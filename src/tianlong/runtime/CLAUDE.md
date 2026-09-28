@@ -4,7 +4,9 @@
 装配层。把内核、认知、存储、记忆、智能体与语言串成可玩的会话。角色决策可以并行，事实提交只经 WorldAuthority 串行发生。
 
 成员清单
-authority.py: WorldAuthority 每个世界实例唯一的权威写入器，settle() = 幂等检查 → 内核裁定 → 认知折叠 → 经历提炼 → 原子提交；found() 由场景建世界
+authority.py: WorldAuthority 每个世界实例唯一的权威写入器，settle() = 幂等检查 → 内核裁定 → 认知折叠 → 经历提炼 → 原子提交；found() 由场景建世界（信任度取自角色设定）
+session.py: GameSession 装配中心，一回合 = 解析玩家输入（失败不推进时间）→ 调度器分出需决策者 → 同一版本扇出 NPC 决策、其余例行等待 → 权威结算 → outbox 同步索引 → 玩家视角叙述；TurnReport 携带真相与 NPC 理由供调试
+cli.py: 终端前端 main()，/beliefs 看玩家自己的认知、/debug 看真相与 NPC 理由，两种视角刻意分开；--llm auto 有密钥即启用 Gemini
 __init__.py: 包入口
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

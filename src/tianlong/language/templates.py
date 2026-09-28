@@ -33,20 +33,20 @@ REASONS: dict[str, str] = {
 }
 
 
-def _n(names: Names, eid: str | None, viewer: str | None = None) -> str:
+def _n(names: Names, eid: str | None, viewer: str | None = None, me: str = "我") -> str:
     if eid is None:
         return "某处"
     if eid == viewer:
-        return "我"
+        return me
     sk = names.get(eid)
     return sk.name if sk else eid
 
 
-def _where(names: Names, eid: str, viewer: str | None) -> str:
+def _where(names: Names, eid: str, viewer: str | None, me: str) -> str:
     """位置宾语的措辞：人 → X身上，台面 → X上，地点 → X。"""
     sk = names.get(eid)
     suffix = {Kind.PERSON: "身上", Kind.SURFACE: "上"}.get(sk.kind, "") if sk else ""
-    return _n(names, eid, viewer) + suffix
+    return _n(names, eid, viewer, me) + suffix
 
 
 # ============================================================
@@ -54,9 +54,9 @@ def _where(names: Names, eid: str, viewer: str | None) -> str:
 # ============================================================
 
 
-def render_fact(f: Fact, names: Names, viewer: str | None = None) -> str:
+def render_fact(f: Fact, names: Names, viewer: str | None = None, me: str = "我") -> str:
     p = f.prop
-    subj = _n(names, p.subject, viewer)
+    subj = _n(names, p.subject, viewer, me)
     neg = not f.holds
     if p.predicate.startswith(ATTR_PREFIX):
         key = p.attr_key
@@ -69,8 +69,8 @@ def render_fact(f: Fact, names: Names, viewer: str | None = None) -> str:
     if p.value is None:
         return f"{subj}在哪里？" if rel == Rel.AT else f"{subj}的{rel.value}是什么？"
     if rel == Rel.AT:
-        return f"{subj}{'不在' if neg else '在'}{_where(names, str(p.value), viewer)}"
-    obj = _n(names, str(p.value), viewer)
+        return f"{subj}{'不在' if neg else '在'}{_where(names, str(p.value), viewer, me)}"
+    obj = _n(names, str(p.value), viewer, me)
     phrase = {
         Rel.OWNS: ("拥有", "并不拥有"),
         Rel.MATCHES: ("能打开", "打不开"),
@@ -84,9 +84,9 @@ def render_fact(f: Fact, names: Names, viewer: str | None = None) -> str:
 # ============================================================
 
 
-def _verb(v: PerceivedEvent, names: Names, viewer: str | None) -> str:
-    t, o = _n(names, v.target, viewer), _n(names, v.obj, viewer)
-    topic = render_fact(v.topic, names, viewer) if v.topic else "一些话"
+def _verb(v: PerceivedEvent, names: Names, viewer: str | None, me: str) -> str:
+    t, o = _n(names, v.target, viewer, me), _n(names, v.obj, viewer, me)
+    topic = render_fact(v.topic, names, viewer, me) if v.topic else "一些话"
     op = Op(v.kind)
     table = {
         Op.MOVE: f"走向{t}",
@@ -103,30 +103,30 @@ def _verb(v: PerceivedEvent, names: Names, viewer: str | None) -> str:
     return table[op]
 
 
-def render_event(v: PerceivedEvent, names: Names, viewer: str | None = None) -> str:
+def render_event(v: PerceivedEvent, names: Names, viewer: str | None = None, me: str = "我") -> str:
     if v.kind == "noise":
-        return f"{_n(names, v.place, viewer)}那边传来一阵响动"
-    text = f"{_n(names, v.actor, viewer)}{_verb(v, names, viewer)}"
+        return f"{_n(names, v.place, viewer, me)}那边传来一阵响动"
+    text = f"{_n(names, v.actor, viewer, me)}{_verb(v, names, viewer, me)}"
     if v.outcome == Outcome.FAILURE:
         text += f"，但没有成功（{REASONS.get(v.reason, v.reason)}）" if v.reason else "，但没有成功"
     elif v.outcome == Outcome.REJECTED:
-        text = f"{_n(names, v.actor, viewer)}想要{_verb(v, names, viewer)}，但这行不通"
+        text = f"{_n(names, v.actor, viewer, me)}想要{_verb(v, names, viewer, me)}，但这行不通"
     return text
 
 
-def render_percept(p: Percept, names: Names, viewer: str) -> str:
-    """角色视角的一句话。SCENE 渲染为所见清单。"""
+def render_percept(p: Percept, names: Names, viewer: str, me: str = "我") -> str:
+    """角色视角的一句话（me 是观察者的自称：记忆里是“我”，对玩家叙述时是“你”）。SCENE 渲染为所见清单。"""
     if p.modality == Modality.SCENE:
-        seen = [render_fact(f, names, viewer) for f in p.facts if f.holds and f.prop.predicate == Rel.AT.value
+        seen = [render_fact(f, names, viewer, me) for f in p.facts if f.holds and f.prop.predicate == Rel.AT.value
                 and f.prop.subject != viewer]
         return "；".join(seen) if seen else "四下空无一物"
     if p.event is None:
-        return "；".join(render_fact(f, names, viewer) for f in p.facts)
-    return render_experience(p.modality, p.event, names, viewer)
+        return "；".join(render_fact(f, names, viewer, me) for f in p.facts)
+    return render_experience(p.modality, p.event, names, viewer, me)
 
 
-def render_experience(modality: Modality, event: PerceivedEvent, names: Names, viewer: str) -> str:
+def render_experience(modality: Modality, event: PerceivedEvent, names: Names, viewer: str, me: str = "我") -> str:
     """以某种感官经历一个事件：“听到……”“看见……”。"""
     prefix = {Modality.SOUND: "听到", Modality.SIGHT: "看见", Modality.SPEECH: "听见"}.get(modality, "")
-    return prefix + render_event(event, names, viewer)
+    return prefix + render_event(event, names, viewer, me)
 
