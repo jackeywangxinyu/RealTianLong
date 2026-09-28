@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，scenarios 的 build_warehouse，language/llm 的 llm_from_env，
          language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/predictor、learning/rl/policy
-[OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）
+[OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()
 [POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
        --store/--save 选择持久化与存档，--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from tianlong.core import Fact
 from tianlong.language.llm import llm_from_env
@@ -32,7 +34,20 @@ def _debug_lines(r: TurnReport) -> list[str]:
                        f"{' (' + e.reason + ')' if e.reason else ''}")
     for d in r.deliberations:
         out.append(f"  [{d.agent}] {d.intent.op.value} {d.intent.target or ''} ← {d.rationale}")
+    out.append("  ⏱ " + " ".join(f"{k}={v}ms" for k, v in r.timings.items()))
     return out
+
+
+def load_dotenv(path: Path = Path(".env")) -> None:
+    """读取 .env（KEY=VALUE，# 为注释）；已存在的环境变量优先，文件只补缺。"""
+    if not path.is_file():
+        return
+    for line in path.read_text("utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            if value.strip():
+                os.environ.setdefault(key.strip(), value.strip())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -49,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
+    load_dotenv()
 
     llm = llm_from_env() if args.llm == "auto" else None
     scenario = build_warehouse(args.seed)

@@ -34,6 +34,7 @@ def test_full_turns_wire_everything():
     assert r1.advanced and s.authority.head().target("key", Rel.AT) == "player"
     r2 = s.turn("等待")
     assert any(d.agent == "guard" and d.intent.op == Op.MOVE for d in r2.deliberations)
+    assert set(r2.timings) == {"parse", "npc_decide", "settle", "index", "narrate"}
     assert "守卫" in r2.narration
     # 记忆已同步进向量索引，且只对守卫本人可见
     now = s.authority.head().clock
@@ -52,6 +53,17 @@ def test_resume_rebuilds_derived_index():
     now = again.authority.head().clock
     hits = again.index.search(MemoryScope(again.ref.world_id, again.ref.branch_id, "guard", now), "响动")
     assert hits, "新进程的空索引已从权威经历记录重建"
+
+
+def test_dotenv_fills_only_missing(tmp_path, monkeypatch):
+    from tianlong.runtime.cli import load_dotenv
+    env = tmp_path / ".env"
+    env.write_text("# 注释\nTL_A=from_file\nTL_B=from_file\nTL_EMPTY=\n", "utf-8")
+    monkeypatch.setenv("TL_B", "from_env")
+    monkeypatch.delenv("TL_A", raising=False)
+    load_dotenv(env)
+    import os
+    assert os.environ["TL_A"] == "from_file" and os.environ["TL_B"] == "from_env" and "TL_EMPTY" not in os.environ
 
 
 def test_cli_runs_scripted_input(monkeypatch, capsys):
