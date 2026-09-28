@@ -41,6 +41,19 @@ def test_full_turns_wire_everything():
     assert hits and all(h.record.owner == "guard" for h in hits)
 
 
+def test_resume_rebuilds_derived_index():
+    from tianlong.persistence import InMemoryWorldStore
+    store = InMemoryWorldStore()
+    first = GameSession(build_warehouse(), store=store)
+    first.turn("拿走桌上的钥匙")
+    first.turn("等待")
+    again = GameSession(build_warehouse(), store=store)
+    assert again.resumed and again.authority.head().version == first.authority.head().version
+    now = again.authority.head().clock
+    hits = again.index.search(MemoryScope(again.ref.world_id, again.ref.branch_id, "guard", now), "响动")
+    assert hits, "新进程的空索引已从权威经历记录重建"
+
+
 def test_cli_runs_scripted_input(monkeypatch, capsys):
     lines = iter(["拿走桌上的钥匙", "/beliefs", "/debug", "等待", "/quit"])
     monkeypatch.setattr("builtins.input", lambda _: next(lines))

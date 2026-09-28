@@ -25,7 +25,7 @@ def records_for(
     out: list[MemoryRecord] = []
 
     def emit(kind: str, text: str, subjects: tuple[str, ...]) -> None:
-        rid = make_id("mem", obs.id, len(out))
+        rid = make_id("mem", world_id, branch_id, obs.id, len(out))  # 跨世界/分支全局唯一：向量点 ID 由它派生
         out.append(MemoryRecord(rid, world_id, branch_id, me, kind, text, p.tick, p.tick, obs.id, subjects))
 
     # ---- 事件：看到的、听到的、自己做的、别人说的 ----

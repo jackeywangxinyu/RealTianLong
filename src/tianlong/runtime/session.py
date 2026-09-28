@@ -2,7 +2,7 @@
 [INPUT]: 依赖 runtime/authority 的 WorldAuthority，agents 的 Orchestrator / NpcContext / AgentPort / Scheduler / Policy / OutcomePredictor，
          memory 的 QdrantMemoryIndex / Recall / MemoryIndexer / MemoryScope，language 的 IntentParser / Narrator / Speaker / LLMClient，
          persistence 的 WorldStore / InMemoryWorldStore，scenarios 的 Scenario
-[OUTPUT]: 对外提供 GameSession（可玩会话）、TurnReport（一回合的全部产物）
+[OUTPUT]: 对外提供 GameSession（可玩会话，支持读档：存储里已有该世界则接续并重建向量索引）、TurnReport（一回合的全部产物）
 [POS]: runtime 的装配中心：一回合 = 解析玩家输入 → 基于同一版本扇出 NPC 决策 → 权威结算 → 同步记忆索引 → 按玩家视角叙述。
        CLI、测试、未来的 Web 前端都只和它打交道
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -20,15 +20,17 @@ from tianlong.agents.port import AgentPort
 from tianlong.agents.predictors import HeuristicPredictor, OutcomePredictor
 from tianlong.agents.scheduler import Scheduler
 from tianlong.cognition import BeliefStore
-from tianlong.core import Event, Intent, Op, clock_label, make_id
+from tianlong.cognition.navigation import believed_place
+from tianlong.core import Event, Fact, Intent, Op, Rel, clock_label, make_id
 from tianlong.language.llm import LLMClient
 from tianlong.language.narrator import Narrator
 from tianlong.language.parser import IntentParser, Parsed
 from tianlong.language.speaker import LLMSpeaker, Speaker, TemplateSpeaker
+from tianlong.language.templates import render_fact
 from tianlong.memory.index import MemoryIndex, MemoryScope, QdrantMemoryIndex
 from tianlong.memory.indexer import MemoryIndexer
 from tianlong.memory.recall import Recall
-from tianlong.persistence import InMemoryWorldStore, WorldStore
+from tianlong.persistence import InMemoryWorldStore, WorldRef, WorldStore
 from tianlong.runtime.authority import Settlement, WorldAuthority
 from tianlong.scenarios import Scenario
 
@@ -60,10 +62,18 @@ class GameSession:
         self.scenario = scenario
         self.player: str = scenario.player
         store = store or InMemoryWorldStore()
-        self.authority = WorldAuthority.found(store, scenario, branch_id)
         self.index = index or QdrantMemoryIndex()
         self.recall = Recall(store, self.index)
         self.indexer = MemoryIndexer(store, self.index)
+        ref = WorldRef(scenario.world_id, branch_id)
+        self.resumed = store.exists(ref)
+        if self.resumed:
+            # 读档：世界与认知来自权威存储；向量索引是派生数据，从经历记录重建
+            self.authority = WorldAuthority(store, ref)
+            for agent in scenario.profiles:
+                self.index.upsert(store.recent_memories(ref, agent, 0))
+        else:
+            self.authority = WorldAuthority.found(store, scenario, branch_id)
         self.orchestrator = Orchestrator()
         self.scheduler = Scheduler()
         self.parser = IntentParser(llm)
@@ -87,9 +97,20 @@ class GameSession:
         return clock_label(self.authority.head().clock)
 
     def intro(self) -> str:
-        """开场：把玩家的初始认知讲给他听。"""
-        prior = self.scenario.priors.get(self.player, ())
-        return self.narrator.narrate(self.player, prior, self.beliefs(self.player).entities, show_scene=True)
+        """开场：新游戏讲初始认知；读档讲玩家此刻以为的周遭（不是世界真相）。"""
+        me = self.beliefs(self.player)
+        if not self.resumed:
+            prior = self.scenario.priors.get(self.player, ())
+            return self.narrator.narrate(self.player, prior, me.entities, show_scene=True)
+        here = believed_place(me, self.player)
+        around = [
+            render_fact(Fact(b.prop, True), me.entities, self.player, me="你")
+            for b in me.sorted_beliefs()
+            if b.holds and b.prop.predicate == Rel.AT.value and b.prop.subject != self.player
+            and believed_place(me, b.prop.subject) == here
+        ]
+        where = me.sketch(here).name if here and me.sketch(here) else "某处"
+        return f"（读档）你在{where}。" + ("；".join(around) if around else "")
 
     # ------------------------------------------------------------
     #  一回合

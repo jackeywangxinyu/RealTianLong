@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import replace
 
 from tianlong.core import Fact
 from tianlong.language.llm import llm_from_env
@@ -36,12 +37,21 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tianlong", description="图世界文字游戏")
     ap.add_argument("--llm", choices=["auto", "none"], default="auto", help="auto：有 GEMINI_API_KEY 则启用")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--store", choices=["memory", "neo4j"], default="memory", help="neo4j：读取 NEO4J_URI 等环境变量")
+    ap.add_argument("--save", default=None, help="存档名（作为 world_id，Neo4j 下可跨进程保留）")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
 
     llm = llm_from_env() if args.llm == "auto" else None
-    session = GameSession(build_warehouse(args.seed), llm=llm)
+    scenario = build_warehouse(args.seed)
+    if args.save:
+        scenario = replace(scenario, world_id=args.save)
+    store = None
+    if args.store == "neo4j":
+        from tianlong.persistence.neo4j_store import Neo4jWorldStore
+        store = Neo4jWorldStore.from_env()
+    session = GameSession(scenario, store=store, llm=llm)
     debug = args.debug
     print(f"【{session.clock()}】{'（Gemini 叙述）' if llm else '（模板叙述）'}")
     print(session.intro())

@@ -13,6 +13,7 @@ src/tianlong/agents/ - 智能体：LangGraph 单角色决策图、多角色扇�
 src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知
 src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言
+scripts/ - 本地基础设施脚本（无 Docker 环境下的 Neo4j）
 </directory>
 
 <config>
