@@ -30,6 +30,7 @@ packages = ["src/tianlong"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-m 'not slow' -p no:warnings"
 markers = [
     "neo4j: 需要可连接的 Neo4j（NEO4J_URI），不可用时跳过",
     "learn: 需要 torch + torch_geometric",

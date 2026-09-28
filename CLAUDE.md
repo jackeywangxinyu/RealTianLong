@@ -2,7 +2,7 @@
 Python 3.11 + 标准库内核 + Neo4j（事实持久化）+ Qdrant（经历检索）+ LangGraph（智能体编排）+ PyTorch Geometric（关系动态模型）+ RLlib（角色策略）+ Gemini（开放语义与叙述）
 
 <directory>
-src/tianlong/ - 引擎本体（9 子包: core, kernel, cognition, persistence, memory, language, agents, scenarios, runtime …）
+src/tianlong/ - 引擎本体（10 子包: core, kernel, cognition, persistence, memory, language, agents, learning, scenarios, runtime）
 src/tianlong/core/ - 领域语言：实体/关系/命题/事件/变化，只依赖标准库
 src/tianlong/kernel/ - 世界规则内核：唯一裁定事实处，纯函数结算（1 子目录: rules）
 src/tianlong/cognition/ - 角色心智：信念存储与修正、认知图投影、候选行动
@@ -10,6 +10,7 @@ src/tianlong/persistence/ - 事实持久化：WorldStore 协议与实现，唯�
 src/tianlong/memory/ - 可回忆经历：记忆写入策略、嵌入、向量索引、回忆
 src/tianlong/language/ - 开放语义：模板文本、LLM 接入、对白、玩家输入解析与叙述
 src/tianlong/agents/ - 智能体：LangGraph 单角色决策图、多角色扇出编排、脚本策略、后果预测、调度
+src/tianlong/learning/ - 学习：PyG 关系动态模型（环境/角色两入口）、RLlib 模仿学习 + PPO 角色策略（1 子目录: rl）
 src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知
 src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言
@@ -17,7 +18,7 @@ scripts/ - 本地基础设施脚本（无 Docker 环境下的 Neo4j）
 </directory>
 
 <config>
-pyproject.toml - 包元数据；核心零依赖，graph/memory/agents/learn/rl 为可选 extras；pytest 标记 neo4j/learn/rl/slow
+pyproject.toml - 包元数据；核心零依赖，graph/memory/agents/learn/rl 为可选 extras；pytest 标记 neo4j/learn/rl/slow（slow 默认不跑）
 .env.example - 运行期环境变量模板（GEMINI_API_KEY、NEO4J_*、QDRANT_URL）；真实 .env 被 gitignore，密钥永不入库
 .gitignore - 排除虚拟环境、缓存、密钥与训练产物
 </config>

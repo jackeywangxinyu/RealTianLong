@@ -31,7 +31,7 @@ class Entity:
 
     @staticmethod
     def make(id: str, kind: Kind, name: str, **attrs: Scalar) -> Entity:
-        return Entity(id, kind, name, tuple(sorted(attrs.items())))
+        return Entity(id, kind, name, tuple(sorted((k, v) for k, v in attrs.items() if v is not None)))
 
     def get(self, key: str, default: Any = None) -> Any:
         for k, v in self.attrs:

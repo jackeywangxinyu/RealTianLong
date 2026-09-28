@@ -13,6 +13,7 @@ persistence/: 事实持久化（见 persistence/CLAUDE.md）
 memory/: 可回忆经历（见 memory/CLAUDE.md）
 language/: 开放语义与文字表达（见 language/CLAUDE.md）
 agents/: 智能体决策与编排（见 agents/CLAUDE.md）
+learning/: GNN 动态模型与 RL 角色策略（见 learning/CLAUDE.md）
 scenarios/: 内容（见 scenarios/CLAUDE.md）
 runtime/: 装配（见 runtime/CLAUDE.md）
 

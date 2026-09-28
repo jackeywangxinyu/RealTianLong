@@ -58,9 +58,11 @@ class PutRule(ActionRule):
         if not _within_reach(s, it.actor, dest):
             return fail("out_of_reach")
         changes = relocate(item, it.actor, dest)
-        if it.manner == Manner.CAREFUL:
-            # 小心地放 = 藏起来：随意环顾者看不见，只有仔细查看才能发现
-            changes += (SetAttr(item, "hidden", None, True),)
+        # 小心地放 = 藏起来（随意环顾者看不见，只有仔细查看才能发现）；正常放置则不藏
+        hidden_now = s.attr(item, "hidden")
+        hidden_next = True if it.manner == Manner.CAREFUL else None
+        if bool(hidden_now) != bool(hidden_next):
+            changes += (SetAttr(item, "hidden", hidden_now, hidden_next),)
         return succeed(changes)
 
 

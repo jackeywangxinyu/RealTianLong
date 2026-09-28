@@ -216,3 +216,31 @@ def test_step_is_deterministic(kernel, warehouse):
     a, b = kernel.step(s, intents), kernel.step(s, list(reversed(intents)))
     assert a.state.fingerprint() == b.state.fingerprint()
     assert [o.id for o in a.observations] == [o.id for o in b.observations]
+
+
+# ============================================================
+#  模糊测试：程序化世界 + 随机行动，内核永不抛错、不变量永远成立
+# ============================================================
+
+
+def test_random_rollouts_never_break_invariants(kernel):
+    import random
+
+    from tianlong.cognition import BeliefStore, candidates
+    from tianlong.scenarios.procedural import random_scenario
+
+    for seed in range(60):
+        sc = random_scenario(seed)
+        rng = random.Random(seed)
+        s = sc.state
+        stores = {a: BeliefStore(a).revise_all(sc.priors[a])[0] for a in sc.profiles}
+        for t in range(20):
+            intents = []
+            for a in sorted(sc.profiles):
+                c = rng.choice(candidates(stores[a]))
+                intents.append(c.to_intent(f"{seed}-{t}-{a}", a, s.version))
+            r = kernel.step(s, intents)          # 内核内部已断言不变量
+            assert not violations(r.state)
+            for o in r.observations:
+                stores[o.observer], _ = stores[o.observer].revise(o.percept)
+            s = r.state
