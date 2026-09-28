@@ -1,7 +1,9 @@
 """
-[INPUT]: 依赖 runtime/session 的 GameSession，scenarios 的 build_warehouse，language/llm 的 llm_from_env，core 的 clock_label
+[INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，scenarios 的 build_warehouse，language/llm 的 llm_from_env，
+         language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/predictor、learning/rl/policy
 [OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）
-[POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开
+[POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
+       --store/--save 选择持久化与存档，--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -39,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--store", choices=["memory", "neo4j"], default="memory", help="neo4j：读取 NEO4J_URI 等环境变量")
     ap.add_argument("--save", default=None, help="存档名（作为 world_id，Neo4j 下可跨进程保留）")
+    ap.add_argument("--predictor", choices=["heuristic", "gnn"], default="heuristic",
+                    help="gnn：加载 artifacts/dynamics_agent.pt 作为 NPC 的后果预测器")
+    ap.add_argument("--policy", choices=["scripted", "learned"], default="scripted",
+                    help="learned：加载 artifacts/policy_ppo.pt 作为 NPC 的决策策略")
+    ap.add_argument("--artifacts", default="artifacts")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
@@ -51,7 +58,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.store == "neo4j":
         from tianlong.persistence.neo4j_store import Neo4jWorldStore
         store = Neo4jWorldStore.from_env()
-    session = GameSession(scenario, store=store, llm=llm)
+    predictor, policies, max_cands = None, None, 64
+    if args.predictor == "gnn":
+        from tianlong.learning.predictor import GNNPredictor
+        predictor = GNNPredictor.load(f"{args.artifacts}/dynamics_agent.pt")
+    if args.policy == "learned":
+        from tianlong.learning.rl.policy import LearnedPolicy
+        learned = LearnedPolicy.load(f"{args.artifacts}/policy_ppo.pt")
+        policies = dict.fromkeys(scenario.npcs, learned)
+        max_cands = learned.spec.max_cands
+    session = GameSession(scenario, store=store, llm=llm, policies=policies, predictor=predictor,
+                          max_candidates=max_cands)
     debug = args.debug
     print(f"【{session.clock()}】{'（Gemini 叙述）' if llm else '（模板叙述）'}")
     print(session.intro())

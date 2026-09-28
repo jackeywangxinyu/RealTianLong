@@ -14,5 +14,6 @@ rewards.py: potential() 目标进度势函数，step_reward() = 势差 − 步�
 module.py: GraphPolicyNet（纯 torch：定长观测还原为稀疏批图 → RelationalEncoder → 逐候选打分 + 价值头）与 CandidateScoringModule（TorchRLModule + ValueFunctionAPI 外壳）
 train.py: 模仿学习初始化 → PPO（所有角色共享参数、各自观测）→ 留出种子上对照 随机/脚本/模仿/PPO + 去掉世界模型特征的消融；CLI python -m tianlong.learning.rl.train
 policy.py: LearnedPolicy 以 Policy 协议接入 LangGraph 决策图，替换 ScriptedPolicy 而不改图
+__init__.py: 包入口（ray[rllib] 为可选依赖）
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

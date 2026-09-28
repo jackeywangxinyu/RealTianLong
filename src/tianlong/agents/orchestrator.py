@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 langgraph 的 StateGraph / Send / Runtime，agents/npc_graph 的 build_npc_graph / NpcContext / checkpoint_serde
-[OUTPUT]: 对外提供 Deliberation（一次决策的可解释轨迹）、Orchestrator（一个 tick 内多个 NPC 的并行决策）
+[OUTPUT]: 对外提供 Deliberation（一次决策的可解释轨迹）、Orchestrator（一个 tick 内多个 NPC 的并行决策，决策轨迹按条数修剪）
 [POS]: agents 的多智能体编排：基于同一版本观察，把需要决策的角色扇出（Send）并行运行各自的决策流程，汇总结构化意图。
        它只产出意图，从不写世界——提交与冲突结算归 WorldAuthority
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import operator
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, TypedDict
@@ -42,10 +43,18 @@ class _TickContext:
 
 
 class Orchestrator:
-    def __init__(self) -> None:
+    """keep_threads：保留最近多少条决策轨迹。每个角色每个 tick 一条线程，不修剪就会在长局中无限增长。"""
+
+    def __init__(self, keep_threads: int = 64) -> None:
         self.checkpointer = InMemorySaver(serde=checkpoint_serde())
         self.npc_graph = build_npc_graph(self.checkpointer)
         self.graph = self._build()
+        self.keep_threads = keep_threads
+        self._threads: deque[str] = deque()
+
+    @staticmethod
+    def thread_id(port) -> str:
+        return f"{port.world_id}:{port.branch_id}:{port.agent}:{port.version}"
 
     def _build(self):
         npc_graph = self.npc_graph
@@ -56,7 +65,7 @@ class Orchestrator:
         def deliberate(state: dict, runtime: Runtime[_TickContext]) -> _TickState:
             ctx = runtime.context.npcs[state["agent"]]
             port = ctx.port
-            thread = {"configurable": {"thread_id": f"{port.world_id}:{port.branch_id}:{port.agent}:{port.version}"}}
+            thread = {"configurable": {"thread_id": Orchestrator.thread_id(port)}}
             out = npc_graph.invoke({"agent": port.agent}, config=thread, context=ctx)
             d = Deliberation(port.agent, out["intent"], out["rationale"],
                              tuple(out.get("recent", [])) + tuple(out.get("related", [])),
@@ -73,4 +82,10 @@ class Orchestrator:
         if not npcs:
             return []
         out = self.graph.invoke({"agents": sorted(npcs), "deliberations": []}, context=_TickContext(npcs))
+        for ctx in npcs.values():
+            tid = self.thread_id(ctx.port)
+            if tid not in self._threads:
+                self._threads.append(tid)
+        while len(self._threads) > self.keep_threads:
+            self.checkpointer.delete_thread(self._threads.popleft())
         return sorted(out["deliberations"], key=lambda d: d.agent)

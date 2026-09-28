@@ -20,7 +20,8 @@ scripts/ - 本地基础设施脚本（无 Docker 环境下的 Neo4j）
 <config>
 pyproject.toml - 包元数据；核心零依赖，graph/memory/agents/learn/rl 为可选 extras；pytest 标记 neo4j/learn/rl/slow（slow 默认不跑）
 .env.example - 运行期环境变量模板（GEMINI_API_KEY、NEO4J_*、QDRANT_URL）；真实 .env 被 gitignore，密钥永不入库
-.gitignore - 排除虚拟环境、缓存、密钥与训练产物
+.gitignore - 排除虚拟环境、缓存、密钥、日志与训练产物（artifacts/）
+README.md - 面向人的入口：架构、快速开始、验收用例、训练结果、边界与测试对照
 </config>
 
 <constitution>

@@ -1,7 +1,8 @@
 """
 [INPUT]: 依赖 runtime/authority 的 WorldAuthority，agents 的 Orchestrator / NpcContext / AgentPort / Scheduler / Policy / OutcomePredictor，
          memory 的 QdrantMemoryIndex / Recall / MemoryIndexer / MemoryScope，language 的 IntentParser / Narrator / Speaker / LLMClient，
-         persistence 的 WorldStore / InMemoryWorldStore，scenarios 的 Scenario
+         persistence 的 WorldStore / InMemoryWorldStore / WorldRef，scenarios 的 Scenario，
+         cognition/navigation 的 believed_place，language/templates 的 render_fact（读档开场）
 [OUTPUT]: 对外提供 GameSession（可玩会话，支持读档：存储里已有该世界则接续并重建向量索引）、TurnReport（一回合的全部产物）
 [POS]: runtime 的装配中心：一回合 = 解析玩家输入 → 基于同一版本扇出 NPC 决策 → 权威结算 → 同步记忆索引 → 按玩家视角叙述。
        CLI、测试、未来的 Web 前端都只和它打交道
@@ -56,6 +57,7 @@ class GameSession:
         branch_id: str = "main",
         policies: Mapping[str, Policy] | None = None,
         predictor: OutcomePredictor | None = None,
+        max_candidates: int = 64,
     ) -> None:
         if scenario.player is None:
             raise ValueError("场景没有玩家角色")
@@ -81,6 +83,7 @@ class GameSession:
         self.speaker: Speaker = LLMSpeaker(llm) if llm else TemplateSpeaker()
         self.policies = dict(policies or {})
         self.predictor = predictor or HeuristicPredictor()
+        self.max_candidates = max_candidates   # 学得的策略按训练时的候选上限看世界
 
     # ------------------------------------------------------------
     #  读
@@ -161,5 +164,6 @@ class GameSession:
                 beliefs=lambda a=a: self.beliefs(a),
                 recall=lambda q, scope=scope: self.recall.recall(scope, q),
             )
-            out[a] = NpcContext(port, self.policies.get(a) or ScriptedPolicy(), self.predictor, self.speaker)
+            out[a] = NpcContext(port, self.policies.get(a) or ScriptedPolicy(), self.predictor, self.speaker,
+                                self.max_candidates)
         return out

@@ -111,6 +111,18 @@ def test_decision_trace_is_checkpointed():
     ctxs = contexts(auth, sc)
     orch.decide(ctxs)
     port = ctxs["guard"].port
-    snap = orch.npc_graph.get_state(
-        {"configurable": {"thread_id": f"{port.world_id}:{port.branch_id}:guard:{port.version}"}})
+    snap = orch.npc_graph.get_state({"configurable": {"thread_id": Orchestrator.thread_id(port)}})
     assert snap.values["intent"].actor == "guard" and snap.values["candidates"]
+
+
+def test_decision_traces_are_bounded_in_long_runs():
+    sc = build_warehouse()
+    auth = WorldAuthority.found(InMemoryWorldStore(), sc)
+    orch = Orchestrator(keep_threads=4)
+    first = None
+    for _ in range(6):
+        ctxs = contexts(auth, sc)
+        first = first or Orchestrator.thread_id(ctxs["guard"].port)
+        auth.settle([d.intent for d in orch.decide(ctxs)])
+    assert len(orch._threads) == 4
+    assert not orch.npc_graph.get_state({"configurable": {"thread_id": first}}).values, "旧轨迹已被修剪"
