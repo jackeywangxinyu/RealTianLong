@@ -1,0 +1,47 @@
+[project]
+name = "tianlong"
+version = "0.1.0"
+description = "图世界文字游戏引擎：规则内核裁定事实，角色通过认知图理解世界，GNN 预测后果，RL 训练选择"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+# 核心（core / kernel / cognition / runtime）只依赖标准库：
+# 世界规则必须能在没有任何数据库与模型的环境里独立运行、回放与测试。
+dependencies = []
+
+[project.optional-dependencies]
+graph = ["neo4j>=5.26"]
+memory = ["qdrant-client>=1.12"]
+agents = ["langgraph>=1.0"]
+learn = ["torch>=2.4", "torch-geometric>=2.6", "numpy>=1.26"]
+rl = ["ray[rllib]>=2.40", "gymnasium>=1.0"]
+all = ["tianlong[graph,memory,agents,learn,rl]"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+tianlong = "tianlong.runtime.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tianlong"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "neo4j: 需要可连接的 Neo4j（NEO4J_URI），不可用时跳过",
+    "learn: 需要 torch + torch_geometric",
+    "rl: 需要 ray[rllib]",
+    "slow: 训练类测试，耗时较长",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
