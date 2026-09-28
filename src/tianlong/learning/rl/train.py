@@ -39,6 +39,8 @@ class RLConfig:
     eval_episodes: int = 40
     seed: int = 0
     predictor_path: str = ""
+    entropy: float = 0.01          # PPO 熵正则：模仿学习后的策略很尖锐，探索不足时调高
+    bc_smoothing: float = 0.0      # 模仿学习的标签平滑：避免初始策略过度确定、PPO 无从探索
 
 
 def _stack(obs_list: list[Obs]) -> dict[str, torch.Tensor]:
@@ -64,7 +66,7 @@ def collect_demos(env: TianlongEnv, episodes: int, seed: int) -> list[tuple[Obs,
 
 
 def behavior_clone(net: GraphPolicyNet, demos: list[tuple[Obs, int]], epochs: int, lr: float = 1e-3,
-                   seed: int = 0, log=print) -> None:
+                   seed: int = 0, smoothing: float = 0.0, log=print) -> None:
     opt = torch.optim.AdamW(net.parameters(), lr=lr)
     rng = random.Random(seed)
     for epoch in range(epochs):
@@ -75,7 +77,15 @@ def behavior_clone(net: GraphPolicyNet, demos: list[tuple[Obs, int]], epochs: in
             batch = _stack([o for o, _ in chunk])
             target = torch.tensor([a for _, a in chunk])
             logits, _ = net(batch)
-            loss = F.cross_entropy(logits, target)
+            if smoothing > 0:
+                # 只在合法候选上平滑：掩码外的空位不分概率
+                valid = batch["action_mask"]
+                soft = valid * (smoothing / valid.sum(-1, keepdim=True).clamp(min=1))
+                soft = soft.scatter_add(1, target.unsqueeze(1), torch.full_like(target, 1 - smoothing,
+                                                                                 dtype=soft.dtype).unsqueeze(1))
+                loss = -(soft * torch.log_softmax(logits, -1).clamp(min=-1e4)).sum(-1).mean()
+            else:
+                loss = F.cross_entropy(logits, target)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -152,7 +162,7 @@ def train_ppo(cfg: RLConfig, init: GraphPolicyNet | None, log=print) -> GraphPol
         .env_runners(num_env_runners=0)
         .learners(num_learners=0)
         .training(lr=cfg.lr, train_batch_size_per_learner=cfg.train_batch, minibatch_size=250, num_epochs=4,
-                  gamma=0.97, lambda_=0.95, entropy_coeff=0.01, vf_loss_coeff=0.5, clip_param=0.2)
+                  gamma=0.97, lambda_=0.95, entropy_coeff=cfg.entropy, vf_loss_coeff=0.5, clip_param=0.2)
         .debugging(seed=cfg.seed)
     )
     algo = config.build_algo()
@@ -192,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
     demos = collect_demos(env, cfg.demo_episodes, cfg.seed)
     print(f"[bc] demos={len(demos)}")
     bc = GraphPolicyNet(cfg.hidden)
-    behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed)
+    behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing)
     report["bc"] = evaluate(env, net_policy(bc), cfg.eval_episodes)
     print("[eval] bc", report["bc"])
 
