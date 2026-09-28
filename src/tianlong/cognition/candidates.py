@@ -26,8 +26,8 @@ class Candidate:
     manner: Manner = Manner.NORMAL
     topic: Fact | None = None
 
-    def to_intent(self, intent_id: str, actor: str, based_on: int) -> Intent:
-        return Intent(intent_id, actor, self.op, self.target, self.obj, self.manner, self.topic, based_on)
+    def to_intent(self, intent_id: str, actor: str, based_on: int, utterance: str | None = None) -> Intent:
+        return Intent(intent_id, actor, self.op, self.target, self.obj, self.manner, self.topic, based_on, utterance)
 
     def sort_key(self) -> tuple:
         topic = self.topic.sort_key() if self.topic else ()
@@ -63,7 +63,8 @@ def candidates(
     persons = [p for p in of_kind(Kind.PERSON) if store.location_of(p) == here]
     held = [i for i in of_kind(Kind.ITEM) if store.location_of(i) == me]
     doors = [d for d in of_kind(Kind.DOOR) if here and store.holds(Proposition.rel(d, Rel.CONNECTS, here))]
-    topics = sorted(interests) if interests is not None else of_kind(Kind.ITEM)
+    # 话题 = 关心的物品 + 认识的人（“钥匙在哪”“玩家在哪”都是值得说/问的）
+    topics = sorted(set(interests if interests is not None else of_kind(Kind.ITEM)) | set(of_kind(Kind.PERSON)))
 
     out: list[Candidate] = [Candidate(Op.WAIT)]
 
@@ -91,14 +92,16 @@ def candidates(
     # ---- 查看 ----
     out += [Candidate(Op.INSPECT, t) for t in (*places_here, *surfaces, *persons)]
 
-    # ---- 言语：说出自己相信的物品位置；询问不知下落的物品 ----
+    # ---- 言语：说出自己相信的下落；询问不知下落的东西或人 ----
     for p in persons:
-        for item in topics:
-            best = store.best(item, Rel.AT.value)
+        for subject in topics:
+            if subject == p:
+                continue
+            best = store.best(subject, Rel.AT.value)
             if best is not None:
                 out.append(Candidate(Op.TELL, p, topic=Fact(best.prop, True)))
-            else:
-                out.append(Candidate(Op.ASK, p, topic=Fact(Proposition.rel(item, Rel.AT, None), True)))
+            # 以为知道也可以问：当面质问、求证，都是合理的言语行动
+            out.append(Candidate(Op.ASK, p, topic=Fact(Proposition.rel(subject, Rel.AT, None), True)))
 
     valid = [c for c in out if signature_error(c.op, kind, c.target, c.obj, c.topic) is None]
     ordered = [valid[0], *sorted(set(valid[1:]), key=Candidate.sort_key)]  # WAIT 永远在首位，截断时不丢

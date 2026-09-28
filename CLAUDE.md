@@ -2,13 +2,14 @@
 Python 3.11 + 标准库内核 + Neo4j（事实持久化）+ Qdrant（经历检索）+ LangGraph（智能体编排）+ PyTorch Geometric（关系动态模型）+ RLlib（角色策略）+ Gemini（开放语义与叙述）
 
 <directory>
-src/tianlong/ - 引擎本体（9 子包: core, kernel, cognition, persistence, memory, language, scenarios, runtime …）
+src/tianlong/ - 引擎本体（9 子包: core, kernel, cognition, persistence, memory, language, agents, scenarios, runtime …）
 src/tianlong/core/ - 领域语言：实体/关系/命题/事件/变化，只依赖标准库
 src/tianlong/kernel/ - 世界规则内核：唯一裁定事实处，纯函数结算（1 子目录: rules）
 src/tianlong/cognition/ - 角色心智：信念存储与修正、认知图投影、候选行动
 src/tianlong/persistence/ - 事实持久化：WorldStore 协议与实现，唯一写路径 commit
 src/tianlong/memory/ - 可回忆经历：记忆写入策略、嵌入、向量索引、回忆
-src/tianlong/language/ - 开放语义：模板文本、LLM 解析与叙述
+src/tianlong/language/ - 开放语义：模板文本、LLM 接入、对白、玩家输入解析与叙述
+src/tianlong/agents/ - 智能体：LangGraph 单角色决策图、多角色扇出编排、脚本策略、后果预测、调度
 src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知
 src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言

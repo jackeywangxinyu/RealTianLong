@@ -31,6 +31,7 @@ class Intent:
     manner: Manner = Manner.NORMAL
     topic: Fact | None = None       # 语义内容：tell 的命题（可以是谎言）、ask 的问题
     based_on: int = 0
+    utterance: str | None = None    # 言语的表层文字（LLM/模板渲染）；只是修辞，事实内容以 topic 为准
 
 
 # ============================================================
@@ -89,6 +90,7 @@ class PerceivedEvent:
     outcome: Outcome | None = None
     topic: Fact | None = None
     reason: str | None = None       # 失败原因（门锁着、没找到……）：看得见失败的人也看得见原因
+    utterance: str | None = None    # 听得见的人才有：说话者的原话
 
 
 @dataclass(frozen=True, slots=True)

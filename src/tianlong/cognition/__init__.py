@@ -13,6 +13,7 @@ from tianlong.cognition.beliefs import (
     BeliefStore,
     Episode,
     confidence_of,
+    effective_confidence,
 )
 from tianlong.cognition.candidates import Candidate, candidates
 from tianlong.cognition.view import (
@@ -28,6 +29,7 @@ from tianlong.cognition.view import (
 
 __all__ = [
     "DEFAULT_TRUST", "FIRSTHAND", "Belief", "BeliefChange", "BeliefStore", "Episode", "confidence_of",
+    "effective_confidence",
     "Candidate", "candidates",
     "EVENT_KIND", "EVENT_RELS", "VIEW_ATTRS", "GraphView", "ViewEdge", "ViewNode", "belief_view", "world_view",
 ]

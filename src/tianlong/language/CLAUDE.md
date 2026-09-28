@@ -4,7 +4,9 @@
 开放语义与文字表达。LLM 只做两件事：把玩家的自由文本解析为结构化意图、把已经成立的事件按玩家可见范围写成文字。它永远不裁定事实；任何模型输出都要回到 kernel 结算。
 
 成员清单
-templates.py: 确定性文本层（无 LLM），render_fact/render_event/render_percept 角色视角措辞 + 失败原因表；memory 生成经历文本、narrator 无模型兜底共用
+templates.py: 确定性文本层（无 LLM），render_fact/render_event/render_experience/render_percept 角色视角措辞（名称表即观察者的实体草图，按种类说"在桌上/在身上"）+ 失败原因表；memory、speaker、narrator 共用
+llm.py: LLMClient 协议 + GeminiClient（REST，密钥只从环境变量读）+ CachedLLM 磁盘缓存 + llm_from_env()；任何失败抛 LLMUnavailable，调用方必须回退模板
+speaker.py: Speaker 协议 + TemplateSpeaker + LLMSpeaker，把结构化言语行动说成符合人设的一句话；事实以命题为准，原话只是修辞
 __init__.py: 包入口
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

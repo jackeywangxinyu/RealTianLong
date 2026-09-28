@@ -48,7 +48,10 @@ class WorldAuthority:
               kernel: Kernel | None = None) -> WorldAuthority:
         """建立世界：初始认知由场景给出的“过去的感知”折叠而成。"""
         ref = WorldRef(scenario.world_id, branch_id)
-        beliefs = {a: BeliefStore(a).revise_all(scenario.priors.get(a, ()))[0] for a in scenario.profiles}
+        beliefs = {
+            a: BeliefStore(a, trust=dict(p.trust)).revise_all(scenario.priors.get(a, ()))[0]
+            for a, p in scenario.profiles.items()
+        }
         store.create(ref, scenario.state, beliefs)
         return cls(store, ref, kernel)
 
@@ -81,8 +84,7 @@ class WorldAuthority:
                 for o in by_agent[agent]:
                     store, cs = store.revise(o.percept)
                     agent_changes.extend(cs)
-                    names = {eid: sk.name for eid, sk in store.entities.items()}
-                    memories.extend(records_for(self.ref.world_id, self.ref.branch_id, o, cs, names))
+                    memories.extend(records_for(self.ref.world_id, self.ref.branch_id, o, cs, store.entities))
                 beliefs[agent] = store
                 changes[agent] = tuple(agent_changes)
 

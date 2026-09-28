@@ -36,7 +36,7 @@ from tianlong.kernel.resolution import Resolution
 # ============================================================
 
 HOP_ATTENUATION = 0.3   # 每隔一道门衰减
-MAX_HEARING_HOPS = 2
+MAX_HEARING_HOPS = 1  # 声音只穿过一道门
 
 
 def audibility(loudness: float, hop_count: int, alertness: float) -> float:
@@ -141,6 +141,7 @@ class Witnessing:
             outcome=self.event.outcome,
             topic=it.topic if with_topic else None,
             reason=self.event.reason,
+            utterance=it.utterance if with_topic else None,
         )
 
     def actor_percept(self) -> tuple[str, Percept]:

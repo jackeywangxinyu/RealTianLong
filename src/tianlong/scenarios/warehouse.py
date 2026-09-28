@@ -83,11 +83,13 @@ def build_warehouse(seed: int = 7) -> Scenario:
 
     locked = (Fact(Proposition.attr("door_store", "locked", True)),)
     key_home = _facts(("key", Rel.AT, "table"), ("captain", Rel.OWNS, "key"), ("key", Rel.MATCHES, "door_store"))
+    ledger = _facts(("ledger", Rel.AT, "storeroom"), ("captain", Rel.OWNS, "ledger"))
     priors = {
         # 船长 08:00 亲眼看见钥匙在桌上，随后去了港口
-        "captain": (past(at(1, 8, 0), _layout() + key_home + locked + _facts(("captain", Rel.AT, "harbor"))),),
-        # 守卫清楚钥匙平时放在桌上、内仓锁着；他在入口站岗
-        "guard": (past(at(1, 7, 30), _layout() + key_home + locked + _facts(("guard", Rel.AT, "entrance"))),),
+        "captain": (past(at(1, 8, 0), _layout() + key_home + ledger + locked + _facts(("captain", Rel.AT, "harbor"))),),
+        # 守卫清楚钥匙平时放在桌上、内仓锁着、船长去了港口；他在入口站岗
+        "guard": (past(at(1, 7, 30), _layout() + key_home + locked
+                       + _facts(("guard", Rel.AT, "entrance"), ("captain", Rel.AT, "harbor"))),),
         # 玩家此刻就在仓库里，看得见桌上的钥匙；但不知道仓库门锁没锁、钥匙配哪扇门
         "player": (replace(scene_percept(state, "player"), tick=START - 1),),
     }
@@ -96,10 +98,12 @@ def build_warehouse(seed: int = 7) -> Scenario:
         "guard": Profile(
             "guard", "guard", "尽职而谨慎的仓库守卫，宁可多查一遍，也不愿冤枉好人",
             goals=(Goal(GoalKind.PROTECT, "key", home="table"),),
+            trust=(("captain", 0.9),),
         ),
         "captain": Profile(
             "captain", "captain", "精明的船长，钥匙和账簿从不离身太久",
             goals=(Goal(GoalKind.PROTECT, "key", home="table"), Goal(GoalKind.PROTECT, "ledger", home="storeroom")),
+            trust=(("guard", 0.9),),
         ),
     }
     return Scenario("warehouse", state, profiles, priors)

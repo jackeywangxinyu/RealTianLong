@@ -1,6 +1,6 @@
 """
-[INPUT]: 依赖 core 的 Fact / PerceivedEvent / Percept / Modality / Op / Outcome / Rel
-[OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_percept()、REASONS
+[INPUT]: 依赖 core 的 EntitySketch / Kind / Fact / PerceivedEvent / Percept / Modality / Op / Outcome / Rel
+[OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_experience()、render_percept()、REASONS
 [POS]: language 的确定性文本层（无 LLM）；memory 用它生成经历文本，narrator 在无模型时用它兜底——同一套措辞，两处复用
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from tianlong.core import Fact, Modality, Op, Outcome, PerceivedEvent, Percept, Rel
+from tianlong.core import EntitySketch, Fact, Kind, Modality, Op, Outcome, PerceivedEvent, Percept, Rel
 from tianlong.core.schema import ATTR_PREFIX
 
-Names = Mapping[str, str]
+# 名称表即观察者自己的实体草图：名字 + 种类（决定“在桌上/在身上/在港口”的措辞）
+Names = Mapping[str, EntitySketch]
 
 REASONS: dict[str, str] = {
     "door_locked": "门锁着",
@@ -37,7 +38,15 @@ def _n(names: Names, eid: str | None, viewer: str | None = None) -> str:
         return "某处"
     if eid == viewer:
         return "我"
-    return names.get(eid, eid)
+    sk = names.get(eid)
+    return sk.name if sk else eid
+
+
+def _where(names: Names, eid: str, viewer: str | None) -> str:
+    """位置宾语的措辞：人 → X身上，台面 → X上，地点 → X。"""
+    sk = names.get(eid)
+    suffix = {Kind.PERSON: "身上", Kind.SURFACE: "上"}.get(sk.kind, "") if sk else ""
+    return _n(names, eid, viewer) + suffix
 
 
 # ============================================================
@@ -59,9 +68,10 @@ def render_fact(f: Fact, names: Names, viewer: str | None = None) -> str:
     rel = Rel(p.predicate)
     if p.value is None:
         return f"{subj}在哪里？" if rel == Rel.AT else f"{subj}的{rel.value}是什么？"
+    if rel == Rel.AT:
+        return f"{subj}{'不在' if neg else '在'}{_where(names, str(p.value), viewer)}"
     obj = _n(names, str(p.value), viewer)
     phrase = {
-        Rel.AT: ("在", "不在"),
         Rel.OWNS: ("拥有", "并不拥有"),
         Rel.MATCHES: ("能打开", "打不开"),
         Rel.CONNECTS: ("通往", "不通往"),
@@ -86,8 +96,8 @@ def _verb(v: PerceivedEvent, names: Names, viewer: str | None) -> str:
         Op.UNLOCK: f"用{o}开{t}的锁",
         Op.LOCK: f"用{o}锁上{t}",
         Op.INSPECT: f"仔细查看{t}",
-        Op.TELL: f"对{t}说：“{topic}”" if v.topic else f"对{t}低声说了些什么",
-        Op.ASK: f"问{t}：“{topic}”" if v.topic else f"向{t}低声问了些什么",
+        Op.TELL: f"对{t}说：“{v.utterance or topic}”" if v.topic else f"对{t}低声说了些什么",
+        Op.ASK: f"问{t}：“{v.utterance or topic}”" if v.topic else f"向{t}低声问了些什么",
         Op.WAIT: "静静等待",
     }
     return table[op]
@@ -112,6 +122,11 @@ def render_percept(p: Percept, names: Names, viewer: str) -> str:
         return "；".join(seen) if seen else "四下空无一物"
     if p.event is None:
         return "；".join(render_fact(f, names, viewer) for f in p.facts)
-    prefix = {Modality.SOUND: "听到", Modality.SIGHT: "看见", Modality.SPEECH: "听见"}.get(p.modality, "")
-    return prefix + render_event(p.event, names, viewer)
+    return render_experience(p.modality, p.event, names, viewer)
+
+
+def render_experience(modality: Modality, event: PerceivedEvent, names: Names, viewer: str) -> str:
+    """以某种感官经历一个事件：“听到……”“看见……”。"""
+    prefix = {Modality.SOUND: "听到", Modality.SIGHT: "看见", Modality.SPEECH: "听见"}.get(modality, "")
+    return prefix + render_event(event, names, viewer)
 

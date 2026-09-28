@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel
-[OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图）及其 revise() 修正规则
+[OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图）及其 revise() 修正规则、effective_confidence()
 [POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -21,6 +21,15 @@ from tianlong.core import EntitySketch, Modality, PerceivedEvent, Percept, Propo
 FIRSTHAND = frozenset({Modality.SELF, Modality.SIGHT, Modality.SCENE})
 DEFAULT_TRUST = 0.6
 EPISODE_CAPACITY = 12
+# 易变事实（位置、锁状态）的可信度随时间衰减：半小时前亲眼所见，未必敌得过刚刚可靠之人的报告
+VOLATILE_HALF_LIFE = 60
+
+
+def effective_confidence(b: Belief, now: int) -> float:
+    volatile = b.prop.is_attr or b.prop.predicate == Rel.AT.value
+    if not volatile or now <= b.learned_at:
+        return b.confidence
+    return b.confidence * 0.5 ** ((now - b.learned_at) / VOLATILE_HALF_LIFE)
 
 
 def confidence_of(modality: Modality, informant: str | None, trust: Mapping[str, float]) -> float:
@@ -97,7 +106,13 @@ class BeliefStore:
     def positives(self, subject: str, predicate: str) -> tuple[Belief, ...]:
         """某槽位上所有“认为为真”的信念（可能多条：互相矛盾的说法并存）。"""
         found = [b for p, b in self.beliefs.items() if p.subject == subject and p.predicate == predicate and b.holds]
-        return tuple(sorted(found, key=lambda b: (-b.confidence, -b.learned_at, b.prop.sort_key())))
+        now = self.last_tick
+        return tuple(sorted(found, key=lambda b: (-effective_confidence(b, now), -b.learned_at, b.prop.sort_key())))
+
+    def subjects(self, predicate: str, value: str) -> tuple[str, ...]:
+        """反查：认为 (X, predicate, value) 为真的所有 X（例如谁拥有钥匙）。"""
+        return tuple(sorted({p.subject for p, b in self.beliefs.items()
+                             if b.holds and p.predicate == predicate and p.value == value}))
 
     def best(self, subject: str, predicate: str) -> Belief | None:
         ps = self.positives(subject, predicate)
@@ -121,11 +136,12 @@ class BeliefStore:
         beliefs = dict(self.beliefs)
         changes: list[BeliefChange] = []
         conf = confidence_of(percept.modality, percept.informant, self.trust)
+        now = max(self.last_tick, percept.tick)
 
         def put(b: Belief) -> None:
             old = beliefs.get(b.prop)
-            if old is not None and old.confidence > b.confidence:
-                return  # 低可信度的说法不覆盖高可信度的认知
+            if old is not None and effective_confidence(old, now) > b.confidence:
+                return  # 低可信度的说法不覆盖（衰减后仍）更可信的认知
             beliefs[b.prop] = b
             if old is None or old.holds != b.holds:
                 changes.append(BeliefChange(old, b))
@@ -140,7 +156,7 @@ class BeliefStore:
             if fact.holds and fact.prop.functional:
                 # 函数型槽位：可信度不高于新证据的旧值被取代；更可信的旧值保留——矛盾的说法由此并存
                 for rival in self._slot_rivals(beliefs, fact.prop):
-                    if rival.confidence <= conf:
+                    if effective_confidence(rival, now) <= conf:
                         drop(rival.prop)
             put(b)
 
@@ -159,7 +175,7 @@ class BeliefStore:
             episodes = (*episodes, Episode(percept.tick, percept.modality, percept.event, percept.informant))
             episodes = episodes[-EPISODE_CAPACITY:]
 
-        store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, max(self.last_tick, percept.tick))
+        store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now)
         return store, tuple(changes)
 
     def revise_all(self, percepts: Iterable[Percept]) -> tuple[BeliefStore, tuple[BeliefChange, ...]]:

@@ -33,3 +33,4 @@ class Profile:
     persona: str
     goals: tuple[Goal, ...] = ()
     is_player: bool = False
+    trust: tuple[tuple[str, float], ...] = ()   # 对他人说法的信任度（未列出者取默认值）
