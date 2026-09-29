@@ -4,7 +4,7 @@
 [OUTPUT]: 对外提供 RelationalEncoder（带边特征的关系图编码器）、DynamicsModel（行动条件化的后果预测器）、DynamicsOutput、loss_terms()
 [POS]: learning 的 GNN 本体。编码器用 TransformerConv(edge_dim)：关系类型/极性/方向与可信度/时效/传闻都在边特征里，
        RGCN 类卷积会丢掉这些认知语义。动态模型回答“这个行动之后会怎样”，覆盖范围由 schema.TARGETS 声明：
-       成败、可定位节点的下一容纳者（含 UNKNOWN 与 GONE 两个空类）、动态布尔属性三态、动态数值属性（值 + 是否已知）、
+       成败、可定位节点的下一容纳者（含 UNKNOWN / GONE / NEW 三个空类）、动态布尔属性三态、动态数值属性（值 + 是否已知）、
        是否认识新实体、有效新观察数。行动条件化包含言语命题（谓词、主语、宾语、极性、提问）。
        位置与已知性各带可学习的“惯性”项：大多数事实不变，模型只需学会何时改变
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -75,7 +75,7 @@ class ActionEncoder(nn.Module):
 @dataclass
 class DynamicsOutput:
     success: Tensor        # [B] logit
-    holder: Tensor         # [M, Nmax + 2] logit，末两类 = UNKNOWN、GONE
+    holder: Tensor         # [M, Nmax + 3] logit，末三类 = UNKNOWN、GONE、NEW
     holder_now: Tensor     # [M] 当前容纳者类别（由输入推出，供惯性基线与指标使用）
     holder_next: Tensor    # [M] 监督目标类别
     attr: Tensor           # [N, len(DYN_BOOL), 3] logit
@@ -97,7 +97,7 @@ class DynamicsModel(nn.Module):
         self.success_head = _mlp(3 * d, d, 1)
         self.query = _mlp(2 * d, d, d)
         self.key = nn.Linear(d, d)
-        self.null_head = _mlp(2 * d, d, 2)                           # UNKNOWN / GONE
+        self.null_head = _mlp(2 * d, d, 3)                           # UNKNOWN / GONE / NEW
         self.inertia = nn.Parameter(torch.tensor(3.0))               # 事实倾向于保持不变
         self.attr_head = _mlp(2 * d, d, len(DYN_BOOL) * 3)
         self.num_head = _mlp(2 * d, d, len(DYN_NUM) * 2)
@@ -138,11 +138,11 @@ class DynamicsModel(nn.Module):
         nmax = scores.size(1)
 
         def cls(idx: Tensor, kind: Tensor) -> Tensor:
-            return torch.where(kind == 0, idx - offset[g], torch.where(kind == -1, nmax, nmax + 1))
+            return torch.where(kind == 0, idx - offset[g], nmax - 1 - kind)       # -1/-2/-3 → nmax/nmax+1/nmax+2
 
         now_cls, next_cls = cls(data.holder_now_idx, data.holder_now_kind), cls(data.holder_next_idx,
                                                                                   data.holder_next_kind)
-        current = F.one_hot(now_cls, nmax + 2).float()
+        current = F.one_hot(now_cls, nmax + 3).float()
         scores = scores.masked_fill(~(mask[g] & holder_ok[g]), float("-inf"))
         holder = torch.cat([scores, self.null_head(torch.cat([h[loc], a[g]], dim=-1))], dim=-1)
         holder = holder + self.inertia * current

@@ -20,10 +20,13 @@ from tianlong.agents.predictors import HeuristicPredictor
 from tianlong.cognition import BeliefChange, BeliefStore, Candidate, candidates
 from tianlong.core import (
     ATTR_PREFIX,
+    TACTILE_ATTRS,
     AddRelation,
     Change,
+    Event,
     Op,
     Outcome,
+    Rel,
     RemoveRelation,
     SetAttr,
     derive_seed,
@@ -60,16 +63,21 @@ def _stratified(rng: random.Random, cands: tuple[Candidate, ...]) -> Candidate:
     return rng.choice(by_op[op])
 
 
-def own_effect_slots(changes: tuple[Change, ...]) -> frozenset[tuple[str, str]]:
-    """本行动直接造成的世界变化所在的信念槽位 (主语, 谓词)。"""
+def own_effect_slots(changes: tuple[Change, ...], event: Event | None = None) -> frozenset[tuple[str, str]]:
+    """本行动直接造成的、以及随得手必然附带的信念槽位 (主语, 谓词)：
+    世界变化本身；拿到手的东西随之而来的手感（锋利、淬毒、所载武功）；走过的那扇门“没锁”。"""
     out: set[tuple[str, str]] = set()
     for c in changes:
         if isinstance(c, AddRelation | RemoveRelation):
             out.add((c.rel.src, c.rel.type.value))
+            if event is not None and isinstance(c, AddRelation) and c.rel.type == Rel.AT and c.rel.dst == event.actor:
+                out.update((c.rel.src, ATTR_PREFIX + k) for k in TACTILE_ATTRS)
         elif isinstance(c, SetAttr):
             out.add((c.entity, ATTR_PREFIX + c.key))
             if c.key == "subdued_until":
                 out.add((c.entity, ATTR_PREFIX + "subdued"))
+    if event is not None and event.op == Op.MOVE and event.outcome == Outcome.SUCCESS and event.intent.obj:
+        out.add((event.intent.obj, ATTR_PREFIX + "locked"))
     return frozenset(out)
 
 
@@ -109,7 +117,7 @@ def collect(cfg: RolloutConfig) -> Rollouts:
                 new_stores[o.observer], cs = new_stores[o.observer].revise(o.percept)
                 if o.observer == actor:
                     changed.extend(cs)
-            gain = observation_gain(changed, own_effect_slots(mine.changes))
+            gain = observation_gain(changed, own_effect_slots(mine.changes, mine))
             out.env.append(env_sample(state, result.state, actor, cand, success))
             out.agent.append(agent_sample(stores[actor], new_stores[actor], state.clock, actor, cand, success, gain))
             out.world_of.append(w)

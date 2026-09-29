@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 core 的 Op / Manner / Kind / Rel / Fact / Proposition / Intent / signature_error，cognition/beliefs 的 BeliefStore
-[OUTPUT]: 对外提供 Candidate（结构化候选行动）、candidates()（从个人认知生成候选集）
+[OUTPUT]: 对外提供 Candidate（结构化候选行动）、candidates()（从个人认知生成候选集）、budget()（行动族轮转配额截断）、FAMILIES
 [POS]: cognition 的行动空间；候选对象只来自角色的认知图——按角色“以为”的世界剪枝是合理的，按真实世界剪枝则是泄密。
        策略（脚本/RL）与预测器都在这个候选集上工作。超出上限时按行动族轮转配额截断（等待、移动、言语、查看、物件、
        动手、施用、锁、研读各轮流取一个，族内与目标相关的在前）：物件组合再多也挤不掉交流、观察与等待
@@ -78,8 +78,9 @@ def candidates(
     persons = [p for p in of_kind(Kind.PERSON) if store.location_of(p) == here]
     held = [i for i in of_kind(Kind.ITEM) if store.location_of(i) == me]
     doors = [d for d in of_kind(Kind.DOOR) if here and store.holds(Proposition.rel(d, Rel.CONNECTS, here))]
-    # 话题 = 关心的物品 + 认识的人（“钥匙在哪”“玩家在哪”都是值得说/问的）
-    topics = sorted(set(interests if interests is not None else of_kind(Kind.ITEM)) | set(of_kind(Kind.PERSON)))
+    # 话题 = 关心的物品 + 认识的人（“钥匙在哪”“玩家在哪”都是值得说/问的）；连名字都不知道的无从谈起
+    topics = sorted(t for t in set(interests if interests is not None else of_kind(Kind.ITEM)) | set(of_kind(Kind.PERSON))
+                    if store.knows(t))
 
     out: list[Candidate] = [Candidate(Op.WAIT)]
 
@@ -131,9 +132,15 @@ def candidates(
         out = [c for c in out if c.op in _WHILE_SUBDUED]   # 自知穴道被制：只剩开口与等待
     valid = [c for c in out if signature_error(c.op, kind, c.target, c.obj, c.topic) is None]
     ordered = [valid[0], *sorted(set(valid[1:]), key=Candidate.sort_key)]  # WAIT 永远在首位，截断时不丢
-    if max_count and len(ordered) > max_count:
-        ordered = _budgeted(ordered, max_count, set(interests or ()))
-    return tuple(ordered)
+    return budget(ordered, max_count, interests)
+
+
+def budget(cands, max_count: int | None, interests: Iterable[str] | None = None) -> tuple[Candidate, ...]:
+    """按行动族轮转配额截到 max_count（None = 不截）；调用方可先拿全集、再截，以便报告截掉了多少。"""
+    cands = list(cands)
+    if max_count and len(cands) > max_count:
+        cands = _budgeted(cands, max_count, set(interests or ()))
+    return tuple(cands)
 
 
 def _budgeted(ordered: list[Candidate], budget: int, focus: set[str]) -> list[Candidate]:

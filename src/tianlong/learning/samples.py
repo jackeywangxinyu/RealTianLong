@@ -3,7 +3,7 @@
          learning/schema 的 DYN_BOOL / DYN_NUM / ATTR_BLOCK / OBS_GAIN_CAP，cognition 的 world_view / belief_view / BeliefStore / Candidate，
          core 的 WorldState / Rel / Proposition
 [OUTPUT]: 对外提供 Sample、env_sample()（环境动态样本）、agent_sample()（角色视角样本）、agent_query()（推理输入）、
-          DynData、to_data()、UNKNOWN / GONE（容纳者的两个“空”类）
+          DynData、to_data()、UNKNOWN / GONE / NEW（容纳者的三个“空”类）
 [POS]: learning 的监督信号定义（StateDelta）。两类样本刻意分开构造：
        环境样本 = 真实状态（含全部机制变量）+ 行动 → 真实的下一状态；
        角色样本 = 个人认知 + 自己的行动 → 结算后“我会相信什么”。
@@ -37,6 +37,7 @@ from tianlong.learning.schema import ATTR_BLOCK, DYN_BOOL, DYN_NUM, OBS_GAIN_CAP
 
 UNKNOWN = -1   # 容纳者未知
 GONE = -2      # 确知不在原以为的地方，去向不明
+NEW = -3       # 确知在一个此前不认识的容纳者那里（指针指不到这一刻的图里）
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,8 @@ def _next_holder(g: GraphTensors, before: BeliefStore, after: BeliefStore, eid: 
     idx = _believed_holder(g, after, eid)
     if idx != UNKNOWN:
         return idx
+    if after.location_of(eid) is not None:
+        return NEW                                # 知道在哪，只是那个容纳者这一刻还不在图里
     was = before.location_of(eid)
     if was is not None:
         b = after.believed(Proposition.rel(eid, Rel.AT, was))

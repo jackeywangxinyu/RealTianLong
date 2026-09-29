@@ -29,7 +29,7 @@ from tianlong.learning.rl.evaluation import (
     scripted_policy,
     wait_policy,
 )
-from tianlong.learning.rl.imitation import behavior_clone, collect_demos, holdout_metrics
+from tianlong.learning.rl.imitation import DEMO_SEED_FLOOR, behavior_clone, collect_demos, holdout_metrics
 from tianlong.learning.rl.module import CandidateScoringModule, GraphPolicyNet
 from tianlong.learning.rl.rewards import REWARD_VERSION
 from tianlong.learning.schema import FEATURES_VERSION, SCHEMA
@@ -61,6 +61,7 @@ class RLConfig:
     scroll_rate: float = 0.5
     scroll_held: float = 0.0
     hide_goal_items: float = 0.0   # E04 探查任务：目标物品藏起来的概率
+    roles: float = 0.3             # 江湖世界里“守地 + 约时潜逃”角色出现的概率
     goals: str = ",".join(ALL_GOALS)
     horizon: int = 30
     # ---- 评测与消融 ----
@@ -69,9 +70,10 @@ class RLConfig:
     margin: float = 0.05           # 等效判定的容许差（目标达成率）；区间整个落在 ±margin 内才说“等效”
 
     def task(self) -> TaskConfig:
-        return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
-                          self.scroll_held, self.hide_goal_items, tuple(g for g in self.goals.split(",") if g),
-                          self.horizon)
+        return TaskConfig(jianghu=self.jianghu, max_places=self.max_places, max_items=self.max_items,
+                          max_persons=self.max_persons, scroll_rate=self.scroll_rate, scroll_held=self.scroll_held,
+                          hide_goal_items=self.hide_goal_items, roles=self.roles,
+                          goals=tuple(g for g in self.goals.split(",") if g), horizon=self.horizon)
 
     def env_config(self) -> dict:
         return {"task": self.task().to_dict(), "seed": self.seed, "predictor_path": self.predictor_path or None,
@@ -150,8 +152,10 @@ def main(argv: list[str] | None = None) -> int:
     for k in runs:
         print(f"[eval] {k}", _brief(runs[k]))
 
-    demos = collect_demos(env, cfg.demo_episodes, cfg.seed)
-    held = collect_demos(env, max(10, cfg.demo_episodes // 5), cfg.seed + 7_919)      # 留出世界：另一段种子
+    if cfg.eval_seed + n > DEMO_SEED_FLOOR:
+        raise ValueError(f"评测种子 [{cfg.eval_seed}, {cfg.eval_seed + n}) 会与示范种子（≥{DEMO_SEED_FLOOR}）重叠")
+    demos = collect_demos(env, cfg.demo_episodes, cfg.seed, "demo")
+    held = collect_demos(env, max(10, cfg.demo_episodes // 5), cfg.seed, "bc_holdout")   # 留出世界：另一条种子流
     print(f"[bc] demos={len(demos)} holdout={len(held)}")
     bc = GraphPolicyNet(cfg.hidden)
     bc_epochs = behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing,
@@ -173,15 +177,16 @@ def main(argv: list[str] | None = None) -> int:
                                                              cfg.margin)
     report = {
         "manifest": run_manifest("policy", asdict(cfg), cfg.task(), seeds={
-            "train": cfg.seed, "demo_episodes": [cfg.seed * 100_000, cfg.seed * 100_000 + cfg.demo_episodes],
-            "holdout_demo_seed": cfg.seed + 7_919, "eval": [cfg.eval_seed, cfg.eval_seed + n]},
+            "train": cfg.seed, "demo": f"demo_seed('demo', {cfg.seed}, 0..{cfg.demo_episodes})",
+            "bc_holdout": f"demo_seed('bc_holdout', {cfg.seed}, ...)", "eval": [cfg.eval_seed, cfg.eval_seed + n]},
             extra={"ablation": "training_time_no_predictions" if cfg.ablate_predictions else None,
                    "device": {"learner_gpus": cfg.gpus, "env_runners": cfg.env_runners}}),
         "policies": {k: _public(v) for k, v in runs.items()},
         "paired_comparisons": comparisons,
         "bc_epochs": bc_epochs,
         "bc_holdout": holdout_metrics(bc, held),
-        "coverage": dict(env.coverage),
+        # 驱动进程里的环境只跑了示范与评测；PPO 各 env runner 用同一份 env_config（同一 TaskConfig）取样
+        "coverage_driver_demo_and_eval": dict(env.coverage),
         "seconds": round(time.time() - t0, 1),
     }
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -145,14 +145,23 @@ def test_t04_unregistered_goal_type_fails_loudly():
         GoalTracker(only_items, {"a": Profile("a", "x", "x", (Goal(GoalKind.HOSTILE, person="b"),))})
     with pytest.raises(UnsupportedGoal):
         GoalTracker(GoalRegistry(), {"a": Profile("a", "x", "x", (Goal(GoalKind.HOSTILE),))})   # 缺字段
-    # 环境：启用目标族不含寻仇，却抽到了寻仇目标 → reset 明确报错
+    # 取样服从启用的目标族：只启用物品目标时，江湖世界里也不会抽到寻仇/护人/守地/潜逃
     task = TaskConfig(jianghu=1.0, goals=("protect", "acquire", "deliver"))
-    seed = next(sd for sd in range(200)
-                if any(g.kind == GoalKind.HOSTILE for p in task.scenario(sd).profiles.values() for g in p.goals))
     env = TianlongEnv({"task": task.to_dict()})
+    for sd in range(20):
+        env.reset(seed=sd)
+        assert all(g.kind.value in task.goals for p in env.scenario.profiles.values() for g in p.goals)
+    assert env.coverage["goal:protect"] > 0 and "goal:hostile" not in env.coverage
+    # 取样与奖励注册表不一致（显式注入了没注册的目标族）→ reset 明确报错，而不是静默套用别的奖励
+    full = TianlongEnv({"task": TaskConfig(jianghu=1.0).to_dict()})
+    full.registry = only_items
+    seed = next(sd for sd in range(200) if any(g.kind == GoalKind.HOSTILE for p in
+                                               TaskConfig(jianghu=1.0).scenario(sd).profiles.values() for g in p.goals))
     with pytest.raises(UnsupportedGoal):
-        env.reset(seed=seed)
+        full.reset(seed=seed)
     assert s0.version == 0
+    with pytest.raises(ValueError, match="规模"):
+        TaskConfig(max_persons=9)
 
 
 def test_t01_task_config_reaches_the_ppo_environment():
@@ -300,3 +309,70 @@ def test_ppo_smoke():
     act = net_policy(net)(env, obs)
     assert all(obs[a]["action_mask"][i] == 1 for a, i in act.items())
     assert np.isfinite(evaluate(env, net_policy(net), 2)["mean_return"])
+
+
+def test_time_gated_goal_done_before_activation_is_credited_and_initial_is_not_farmable():
+    """not_before 目标：激活前自己办成的，激活时照样记功；开局就满足的一次性目标，拆了再办也不给奖励。"""
+    s0, k = duel(), Kernel()
+    tr = _tracker(s0, {"a": (Goal(GoalKind.HOSTILE, person="b", until="wounded", not_before=s0.clock + 2),),
+                       "b": (), "c": ()})
+    r = k.step(s0, [Intent("x", "a", Op.ATTACK, "b", based_on=0)])          # 激活前就出了手
+    assert step_reward(tr, s0, r.state, r.events)["a"].task == 0.0, "未激活：不求值"
+    s2 = k.step(r.state, [Intent("w", "a", Op.WAIT, based_on=1)]).state
+    assert step_reward(tr, r.state, s2, ())["a"].task == 1.0, "激活那一刻已办成：记功"
+    rec = tr.records["a"][0]
+    assert rec.initial is False and rec.newly_achieved
+    # 开局即满足的一次性目标：achieved_at 记在开局，永不再给奖励
+    sc = build_warehouse()
+    tr2 = _tracker(sc.state, {"player": (Goal(GoalKind.ACQUIRE, "key"),)})
+    assert tr2.records["player"][0].initial is False
+    s_have = k.step(sc.state, [Intent("t", "player", Op.TAKE, "key", based_on=0)]).state
+    tr3 = _tracker(s_have, {"player": (Goal(GoalKind.ACQUIRE, "key"),)})
+    s_drop = k.step(s_have, [Intent("p", "player", Op.PUT, "harbor", "key", based_on=1)]).state
+    s_back = k.step(s_drop, [Intent("t2", "player", Op.TAKE, "key", based_on=2)]).state
+    total = step_reward(tr3, s_have, s_drop, ())["player"].task + step_reward(tr3, s_drop, s_back, ())["player"].task
+    assert tr3.records["player"][0].initial is True and total == 0.0, "开局就有：放下再拿起不能刷奖励"
+
+
+def test_demo_holdout_and_eval_seed_namespaces_are_disjoint():
+    from tianlong.learning.rl.imitation import DEMO_SEED_FLOOR, demo_seed
+    demo = {demo_seed("demo", s, ep) for s in range(12) for ep in range(50)}
+    held = {demo_seed("bc_holdout", s, ep) for s in range(12) for ep in range(20)}
+    assert not demo & held and min(demo | held) >= DEMO_SEED_FLOOR > RLConfig().eval_seed + 10_000
+
+
+def test_expert_finds_a_hidden_goal_item_it_only_knows_by_name():
+    """目标物品从没见过、还藏着：专家凭名字去找，每到一处先仔细翻查，最终拿到（评审回归：以前只会随意环顾）。"""
+    s, store = explore_world()
+    s = WorldState.build(s.seed, s.clock, [e.with_attr("hidden", True) if e.id == "jade" else e
+                                           for e in s.entities.values()], s.relations)
+    prof = Profile("h0", "寻宝", "x", (Goal(GoalKind.ACQUIRE, "jade"),))
+    policy, k, pred = ScriptedPolicy(), Kernel(), HeuristicPredictor()
+    for _ in range(16):
+        cands = candidates(store, prof.interests())
+        choice = policy.choose(Situation("h0", prof, store, s.clock, cands, tuple(pred.predict(store, s.clock, cands))))
+        r = k.step(s, [cands[choice.index].to_intent(f"i{s.version}", "h0", s.version)])
+        store = store.revise_all(o.percept for o in r.observations if o.observer == "h0")[0]
+        s = r.state
+        if s.target("jade", Rel.AT) == "h0":
+            break
+    assert s.target("jade", Rel.AT) == "h0"
+
+
+def test_expert_detours_around_a_door_it_knows_is_locked():
+    """自己的地图上有绕得开锁门的路，就绕；不再在锁门前放弃（评审回归）。"""
+    ents = [Entity.make("a", Kind.PLACE, "甲地"), Entity.make("b", Kind.PLACE, "乙地"), Entity.make("c", Kind.PLACE, "丙地"),
+            Entity.make("dab", Kind.DOOR, "甲乙门", locked=True), Entity.make("dac", Kind.DOOR, "甲丙门"),
+            Entity.make("dcb", Kind.DOOR, "丙乙门"), Entity.make("h", Kind.PERSON, "行者")]
+    rels = [Relation("dab", Rel.CONNECTS, "a"), Relation("dab", Rel.CONNECTS, "b"), Relation("dac", Rel.CONNECTS, "a"),
+            Relation("dac", Rel.CONNECTS, "c"), Relation("dcb", Rel.CONNECTS, "c"), Relation("dcb", Rel.CONNECTS, "b"),
+            Relation("h", Rel.AT, "a")]
+    s = WorldState.build(5, at(1, 9, 0), ents, rels)
+    layout = make_percept(s, Modality.SCENE, facts=tuple(Fact(Proposition.of(r)) for r in s.sorted_relations()
+                                                         if r.type == Rel.CONNECTS)
+                          + (Fact(Proposition.attr("dab", "locked", True)),))
+    store = BeliefStore("h").revise_all([layout, scene_percept(s, "h")])[0]
+    prof = Profile("h", "x", "x", (Goal(GoalKind.ESCAPE, home="b"),))
+    cands = candidates(store, [])
+    c = cands[ScriptedPolicy().choose(Situation("h", prof, store, s.clock, cands, ())).index]
+    assert (c.op, c.target, c.obj) == (Op.MOVE, "c", "dac"), c

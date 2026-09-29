@@ -17,6 +17,7 @@ from tianlong.core import (
     Fact,
     Kind,
     Modality,
+    Percept,
     Proposition,
     Rel,
     Relation,
@@ -25,7 +26,7 @@ from tianlong.core import (
     derive_seed,
 )
 from tianlong.core.profiles import Goal, GoalKind, Profile
-from tianlong.kernel.perception import make_percept, scene_percept
+from tianlong.kernel.perception import make_percept, scene_percept, sketches_for
 from tianlong.scenarios.base import Scenario
 
 _PLACE_NAMES = ["码头", "货栈", "账房", "酒肆", "后院", "地窖", "阁楼", "马厩"]
@@ -35,13 +36,17 @@ _PERSON_NAMES = ["阿福", "老周", "小翠", "王掌柜", "李镖头", "孙娘
 
 def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_persons: int = 3,
                     jianghu: float = 0.0, scroll_rate: float = 0.5, scroll_held: float = 0.0,
-                    hide_goal_items: float = 0.0) -> Scenario:
+                    hide_goal_items: float = 0.0, roles: float = 0.0,
+                    goal_kinds: tuple[str, ...] | None = None) -> Scenario:
     """jianghu 是“江湖化”的概率：身手、兵刃（可能带毒）、解药、秘籍、单向通道与寻仇/护人目标。
     江湖层用独立的随机流叠加在同一张底图上，jianghu=0 时与旧版逐字节相同——已有的种子、测试与存档不受影响。
     scroll_rate / scroll_held 是修习机制的覆盖旋钮（江湖世界里有秘籍的概率、秘籍一开始就在某人手上的概率）：
     默认值与旧版逐字节相同；后者用第三条独立随机流，只挪动秘籍的位置，不扰动其余抽样。
     hide_goal_items 是“先探查、再决策”的任务旋钮：获取/递送目标的物品（钥匙除外）若放在地点或台面上，
-    以此概率被藏起来——不仔细查看就找不到。第四条独立随机流，默认 0 逐字节不变。"""
+    以此概率被藏起来——不仔细查看就找不到。第四条独立随机流，默认 0 逐字节不变。
+    roles 是江湖世界里“守地 + 约时潜逃”角色出现的概率（第五条独立随机流）：一人守着自己的所在之处，另一人在
+    若干分钟后（not_before）悄悄动身去最远的地方——七类目标与时间闸门由此都会出现在训练分布里。
+    goal_kinds 给出时只保留这些目标族（事后删去，不扰动抽样）；默认 None 逐字节不变。"""
     rng = random.Random(seed)
     jr = random.Random(derive_seed("jianghu", seed))
     wuxia = jr.random() < jianghu
@@ -112,9 +117,42 @@ def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_pers
             extra_ents = [Entity(e.id, e.kind, e.name, tuple(a for a in e.attrs if a[0] != "hidden"))
                           if e.id == "b0" else e for e in extra_ents]
         state = WorldState.build(seed, at(1, 8, 0), ents + extra_ents, rels + extra_rels)
+    if wuxia and roles > 0:
+        profiles = _roles(random.Random(derive_seed("roles", seed)), state, persons, profiles, roles)
+    if goal_kinds is not None:
+        keep = set(goal_kinds)
+        profiles = {h: replace(p, goals=tuple(g for g in p.goals if g.kind.value in keep)) for h, p in profiles.items()}
     if hide_goal_items > 0:
         state = _hide_goal_items(state, profiles, random.Random(derive_seed("probe", seed)), hide_goal_items)
-    return Scenario(f"proc-{seed}", state, profiles, _priors(state, persons))
+    return Scenario(f"proc-{seed}", state, profiles, _priors(state, persons, profiles))
+
+
+def _roles(rr: random.Random, s: WorldState, persons: list[str], profiles: dict[str, Profile], rate: float
+           ) -> dict[str, Profile]:
+    """守地者守着自己的所在之处；潜逃者若干分钟后悄悄去离自己最远的地方（途中撞见落单的外人便灭口）。"""
+    if rr.random() >= rate or len(persons) < 2:
+        return profiles
+    keeper, runner = rr.sample(persons, 2)
+    start = s.target(runner, Rel.AT)
+    places = sorted(e.id for e in s.of_kind(Kind.PLACE))
+    far = max(places, key=lambda p: (_hops(s, start, p), p))
+    extra = {keeper: Goal(GoalKind.GUARD, home=s.target(keeper, Rel.AT)),
+             runner: Goal(GoalKind.ESCAPE, home=far, not_before=s.clock + rr.randint(3, 12))}
+    if far == start:
+        extra.pop(runner)
+    return {h: replace(p, goals=p.goals + ((extra[h],) if h in extra else ())) for h, p in profiles.items()}
+
+
+def _hops(s: WorldState, a: str | None, b: str) -> int:
+    dist, frontier = {a: 0}, [a]
+    while frontier:
+        cur = frontier.pop(0)
+        for door in s.sources(cur, Rel.CONNECTS) if cur else ():
+            for nxt in s.targets(door, Rel.CONNECTS):
+                if nxt not in dist:
+                    dist[nxt] = dist[cur] + 1
+                    frontier.append(nxt)
+    return dist.get(b, -1)
 
 
 def _hide_goal_items(s: WorldState, profiles: dict[str, Profile], pr: random.Random, rate: float) -> WorldState:
@@ -176,13 +214,17 @@ def _profiles(rng: random.Random, s: WorldState, persons: list[str], items: list
     return out
 
 
-def _priors(s: WorldState, persons: list[str]) -> dict[str, tuple]:
-    """每个人都熟悉门的连接关系，并看得见自己所在之处；别处的物品需要亲自发现。"""
+def _priors(s: WorldState, persons: list[str], profiles: dict[str, Profile] | None = None) -> dict[str, tuple]:
+    """每个人都熟悉门的连接关系，并看得见自己所在之处；别处的物品需要亲自发现。
+    目标所指的人与物至少“闻其名”（心里惦记着一样东西，总知道它叫什么）：只有名字，外观与下落都未知。"""
     layout = tuple(Fact(Proposition.of(r)) for r in s.sorted_relations() if r.type == Rel.CONNECTS)
     surfaces = tuple(Fact(Proposition.of(r)) for r in s.sorted_relations()
                      if r.type == Rel.AT and s.kind(r.src) == Kind.SURFACE)
     out = {}
     for h in persons:
         know = replace(make_percept(s, Modality.SCENE, facts=layout + surfaces), tick=s.clock - 1)
-        out[h] = (know, replace(scene_percept(s, h), tick=s.clock - 1))
+        refs = sorted({x for g in (profiles or {}).get(h, Profile(h, "", "")).goals
+                       for x in (g.item, g.person, g.recipient, g.home) if x and x != h})
+        named = Percept(s.clock - 1, Modality.SCENE, sketches=sketches_for(s, refs, seen=lambda _: False))
+        out[h] = (know, named, replace(scene_percept(s, h), tick=s.clock - 1))
     return out

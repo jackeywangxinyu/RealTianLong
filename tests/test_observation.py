@@ -199,3 +199,23 @@ def test_p07_stale_route_can_be_tried_and_fails():
     assert r.events[0].reason == "door_locked"
     player = player.revise_all(o.percept for o in r.observations if o.observer == "player")[0]
     assert player.holds(Proposition.attr("door_main", "locked", True)), "试过才知道门锁了"
+
+
+def test_p08_asking_about_an_unseen_item_does_not_reveal_it():
+    """问起一件从没见过的东西：它就算藏在这屋里、揣在对面那人身上，问话的人也不会因此“看见”它的样子（评审回归）。"""
+    from tianlong.core import Entity, Relation, WorldState
+    from tianlong.core import at as clock_at
+    for hidden_on_floor in (True, False):
+        ents = [Entity.make("hall", Kind.PLACE, "大堂"), Entity.make("a", Kind.PERSON, "甲"),
+                Entity.make("b", Kind.PERSON, "乙"),
+                Entity.make("key", Kind.ITEM, "钥匙", small=True, weapon=True, hidden=True if hidden_on_floor else None)]
+        rels = [Relation("a", Rel.AT, "hall"), Relation("b", Rel.AT, "hall"),
+                Relation("key", Rel.AT, "hall" if hidden_on_floor else "b")]
+        s = WorldState.build(1, clock_at(1, 9, 0), ents, rels)
+        r = Kernel().step(s, [make_intent("a", Op.ASK, "b", topic=Fact(Proposition.rel("key", Rel.AT, None)),
+                                          based_on=0)])
+        a = BeliefStore("a").revise_all(o.percept for o in r.observations if o.observer == "a")[0]
+        sk = a.sketch("key")
+        assert sk is None or (not sk.seen and sk.attrs == ()), (hidden_on_floor, sk)
+        node = next((n for n in belief_view(a, 999).nodes if n.id == "key"), None)
+        assert node is None or not node.knows("weapon")

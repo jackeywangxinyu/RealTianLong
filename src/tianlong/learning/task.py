@@ -4,8 +4,8 @@
 [OUTPUT]: 对外提供 TaskConfig（训练/评测/部署共用的任务分布定义）、TASK_VERSION
 [POS]: learning 的任务契约：场景混合（江湖化比例）、地图规模、人数、启用的目标族、修习机制覆盖旋钮、时限——
        GNN 数据、模仿学习示范、PPO 环境、评测与模型 manifest 读的是同一个解析后的 TaskConfig，
-       “训练时的江湖参数没传到 PPO”这种断层在结构上不再可能。启用目标族之外的目标在环境初始化时明确报错（UnsupportedGoal），
-       不会静默落进别的目标的奖励
+       “训练时的江湖参数没传到 PPO”这种断层在结构上不再可能。启用的目标族同时约束取样（只生成这些目标）与奖励
+       （GoalTracker 只注册这些）；显式注入的未注册目标在环境初始化时明确报错（UnsupportedGoal），不会静默落进别的目标的奖励
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -32,6 +32,7 @@ class TaskConfig:
     scroll_rate: float = 0.5      # 江湖世界里有秘籍的概率
     scroll_held: float = 0.0      # 秘籍一开始就在某人手上的概率（提高修习机制的数据覆盖）
     hide_goal_items: float = 0.0  # “先探查、再决策”任务：获取/递送目标的物品被藏起来的概率（预测器有无的对照用）
+    roles: float = 0.3            # 江湖世界里出现“守地 + 约时潜逃”角色的概率：七类目标与时间闸门都进入训练分布
     goals: tuple[str, ...] = ALL_GOALS   # 启用的目标族：奖励与评测只认这些
     horizon: int = 30             # 一局的 tick 数
 
@@ -39,12 +40,17 @@ class TaskConfig:
         unknown = set(self.goals) - set(ALL_GOALS)
         if unknown:
             raise ValueError(f"未知目标族 {sorted(unknown)}")
-        if any(not 0.0 <= v <= 1.0 for v in (self.jianghu, self.scroll_rate, self.scroll_held, self.hide_goal_items)):
+        if any(not 0.0 <= v <= 1.0
+               for v in (self.jianghu, self.scroll_rate, self.scroll_held, self.hide_goal_items, self.roles)):
             raise ValueError("概率旋钮必须在 [0, 1]")
+        if not (2 <= self.max_persons <= 6 and 3 <= self.max_places <= 8 and 2 <= self.max_items <= 8
+                and self.horizon >= 1):
+            raise ValueError("规模超出程序化世界的范围：2≤人数≤6、3≤地点≤8、2≤物品≤8、时限≥1")
 
     def scenario(self, seed: int) -> Scenario:
+        subset = None if set(self.goals) == set(ALL_GOALS) else tuple(self.goals)
         return random_scenario(seed, self.max_places, self.max_items, self.max_persons, self.jianghu,
-                               self.scroll_rate, self.scroll_held, self.hide_goal_items)
+                               self.scroll_rate, self.scroll_held, self.hide_goal_items, self.roles, subset)
 
     def registry(self) -> GoalRegistry:
         enabled = set(self.goals)

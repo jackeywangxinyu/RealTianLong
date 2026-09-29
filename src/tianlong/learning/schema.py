@@ -120,7 +120,8 @@ ACTION_FIELDS = ("op", "manner", "target", "obj", "actor", "topic_pred", "topic_
 
 # ============================================================
 #  预测目标（StateDelta）：声明覆盖范围，指标按此分项
-#  - 位置：可定位节点的下一容纳者指针 + 两个“空”类：UNKNOWN（不知道在哪）与 GONE（确知不在原处、去向不明）
+#  - 位置：可定位节点的下一容纳者指针 + 三个“空”类：UNKNOWN（不知道在哪）、GONE（确知不在原处、去向不明）、
+#          NEW（确知在一个此前还不认识的容纳者那里——指针指不到，但绝不是“不知道”）
 #  - 动态属性：布尔三态（否/未知/是），数值（值 + 是否已知）
 #  - 发现：下一刻认识了新实体（角色视角）
 #  - 观察增益：行动之后信念发生的、并非本行动直接效果的变化条数（角色视角；“预期有效新观察数”）
@@ -128,7 +129,7 @@ ACTION_FIELDS = ("op", "manner", "target", "obj", "actor", "topic_pred", "topic_
 
 DYN_BOOL = tuple(k for k in DYNAMIC_ATTRS if ATTR_SPECS[k].type == AttrType.BOOL)
 DYN_NUM = tuple(k for k in DYNAMIC_ATTRS if ATTR_SPECS[k].type == AttrType.NUM)
-HOLDER_EXTRA = ("unknown", "gone")
+HOLDER_EXTRA = ("unknown", "gone", "new")
 OBS_GAIN_CAP = 10
 TARGETS = ("success", "holder", *(f"attr:{k}" for k in DYN_BOOL), *(f"num:{k}" for k in DYN_NUM), "discover",
            "obs_gain")

@@ -22,6 +22,7 @@ from ray.rllib.env.multi_agent_env import MultiAgentEnv
 from tianlong.agents.policies import ScriptedPolicy, Situation
 from tianlong.agents.predictors import HeuristicPredictor, OutcomePredictor, Prediction
 from tianlong.cognition import BeliefStore, Candidate, candidates
+from tianlong.cognition.candidates import budget
 from tianlong.core import Op, derive_seed, make_id
 from tianlong.kernel import Kernel
 from tianlong.learning.rl.observation import CropReport, ObsSpec, build_observation, observation_space
@@ -57,7 +58,7 @@ class TianlongEnv(MultiAgentEnv):
         self._cands: dict[str, tuple[Candidate, ...]] = {}
         self._preds: dict[str, tuple[Prediction, ...]] = {}
         self.crops: dict[str, CropReport] = {}    # 每个角色最近一次观测的裁剪报告：超预算必须看得见
-        self.coverage: Counter = Counter()        # 实际抽到的场景与目标：配置是否真的到达了环境
+        self.coverage: Counter = Counter({f"goal:{g}": 0 for g in task.goals})   # 启用却从没抽到的目标族也看得见
         self.episode_rewards: dict[str, Counter] = {}
         self.last_events: tuple = ()
 
@@ -121,9 +122,11 @@ class TianlongEnv(MultiAgentEnv):
         store = self.stores[agent]
         profile = self.scenario.profiles[agent]
         interests = list(profile.interests())
-        cands = candidates(store, interests, self.obs_spec.max_cands)
+        offered = candidates(store, interests)
+        cands = budget(offered, self.obs_spec.max_cands, interests)     # 先拿全集再截：截掉多少进裁剪报告
         preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests, profile=profile))
-        ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec, self.memories[agent])
+        ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec, self.memories[agent],
+                               offered=len(offered))
         if self.zero_predictions:
             ob.obs["cand_pred"][:] = 0.0
         # 动作编号对应裁剪后保留的候选：引用放不下的候选不会以悬空指针出现在策略面前

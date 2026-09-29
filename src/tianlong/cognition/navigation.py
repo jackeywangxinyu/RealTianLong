@@ -28,12 +28,12 @@ def believed_place(store: BeliefStore, eid: str) -> str | None:
     return None
 
 
-def routes_between(store: BeliefStore, a: str, b: str) -> tuple[str, ...]:
+def routes_between(store: BeliefStore, a: str, b: str, avoid: frozenset[str] = frozenset()) -> tuple[str, ...]:
     """认为连通 a 与 b 的门：认为没锁的在前（不知道锁没锁的次之，认为锁着的最后），同等按 ID。
-    确知单向且方向不对的门不算路。"""
+    确知单向且方向不对的门不算路；avoid 里的门（例如自知过不去的锁门）不算路。"""
     out = []
     for door, sk in store.entities.items():
-        if sk.kind != Kind.DOOR:
+        if sk.kind != Kind.DOOR or door in avoid:
             continue
         ends = {bl.prop.value for bl in store.positives(door, Rel.CONNECTS.value)}
         if not {a, b} <= ends:
@@ -47,14 +47,14 @@ def routes_between(store: BeliefStore, a: str, b: str) -> tuple[str, ...]:
     return tuple(d for _, d in sorted(out))
 
 
-def route_to(store: BeliefStore, dest: str) -> tuple[str, str] | None:
-    """沿认为存在的门 BFS：(下一站, 所走的门)。"""
+def route_to(store: BeliefStore, dest: str, avoid: frozenset[str] = frozenset()) -> tuple[str, str] | None:
+    """沿认为存在的门 BFS：(下一站, 所走的门)；avoid 里的门不走（绕开自知过不去的锁门）。"""
     here = store.location_of(store.owner)
     if here is None or here == dest:
         return None
     adjacency: dict[str, set[str]] = {}
     for door, sk in store.entities.items():
-        if sk.kind != Kind.DOOR:
+        if sk.kind != Kind.DOOR or door in avoid:
             continue
         ends = [b.prop.value for b in store.positives(door, Rel.CONNECTS.value)]
         for a in ends:
@@ -68,7 +68,7 @@ def route_to(store: BeliefStore, dest: str) -> tuple[str, str] | None:
         if cur == dest:
             break
         for nxt in sorted(adjacency.get(cur, ())):
-            if nxt not in parent and routes_between(store, cur, nxt):
+            if nxt not in parent and routes_between(store, cur, nxt, avoid):
                 parent[nxt] = cur
                 queue.append(nxt)
     if dest not in parent:
@@ -76,11 +76,11 @@ def route_to(store: BeliefStore, dest: str) -> tuple[str, str] | None:
     step = dest
     while parent[step] != here:
         step = parent[step]
-    return step, routes_between(store, here, step)[0]
+    return step, routes_between(store, here, step, avoid)[0]
 
 
-def believed_distance(store: BeliefStore, a: str, b: str) -> int | None:
-    """沿认为存在、方向可走的门的最短跳数；地图上走不到返回 None。"""
+def believed_distance(store: BeliefStore, a: str, b: str, avoid: frozenset[str] = frozenset()) -> int | None:
+    """沿认为存在、方向可走的门的最短跳数（avoid 里的门不算）；地图上走不到返回 None。"""
     dist = {a: 0}
     queue = deque([a])
     places = sorted(e for e, sk in store.entities.items() if sk.kind == Kind.PLACE)
@@ -89,7 +89,7 @@ def believed_distance(store: BeliefStore, a: str, b: str) -> int | None:
         if cur == b:
             return dist[cur]
         for nxt in places:
-            if nxt not in dist and routes_between(store, cur, nxt):
+            if nxt not in dist and routes_between(store, cur, nxt, avoid):
                 dist[nxt] = dist[cur] + 1
                 queue.append(nxt)
     return None

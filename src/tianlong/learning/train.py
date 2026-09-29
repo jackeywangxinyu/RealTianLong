@@ -29,7 +29,7 @@ from torch_geometric.loader import DataLoader
 from tianlong.learning.datagen import RolloutConfig, collect
 from tianlong.learning.model import DynamicsModel, DynamicsOutput, loss_terms
 from tianlong.learning.provenance import run_manifest
-from tianlong.learning.samples import GONE, Sample, to_data
+from tianlong.learning.samples import GONE, NEW, Sample, to_data
 from tianlong.learning.schema import DYN_BOOL, DYN_NUM, FEATURES_VERSION, OBS_GAIN_CAP, OPS, SCHEMA
 from tianlong.learning.task import TaskConfig
 
@@ -50,14 +50,16 @@ class TrainConfig:
     scroll_rate: float = 0.5   # 江湖世界里有秘籍的概率
     scroll_held: float = 0.0   # 秘籍开局就在某人手上的概率（修习机制的数据覆盖）
     hide_goal_items: float = 0.0   # 目标物品藏起来的概率（让“查看才有发现”在数据里足够常见）
+    roles: float = 0.3             # 江湖世界里“守地 + 约时潜逃”角色出现的概率
     max_places: int = 5
     max_items: int = 4
     max_persons: int = 3
     device: str = "auto"       # auto：有 GPU 用 GPU（Colab），否则 CPU
 
     def task(self) -> TaskConfig:
-        return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
-                          self.scroll_held, self.hide_goal_items)
+        return TaskConfig(jianghu=self.jianghu, max_places=self.max_places, max_items=self.max_items,
+                          max_persons=self.max_persons, scroll_rate=self.scroll_rate, scroll_held=self.scroll_held,
+                          hide_goal_items=self.hide_goal_items, roles=self.roles)
 
 
 def _device(name: str) -> torch.device:
@@ -109,6 +111,7 @@ def coverage(samples: list[Sample]) -> dict:
         c[f"op:{OPS[s.action.op]}"] += 1
         c["holder_changed"] += int((s.holder_now != s.holder_next).sum())
         c["holder_gone"] += int((s.holder_next == GONE).sum())
+        c["holder_new"] += int((s.holder_next == NEW).sum())
         for j, k in enumerate(DYN_BOOL):
             c[f"attr:{k}"] += int((s.bool_mask[:, j] & (s.bool_now[:, j] != s.bool_next[:, j])).sum())
         for j, k in enumerate(DYN_NUM):
@@ -175,7 +178,7 @@ def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | No
 
         # ---- 位置 ----
         pred = out.holder.argmax(-1)
-        nmax = out.holder.size(1) - 2
+        nmax = out.holder.size(1) - 3
         changed = out.holder_next != out.holder_now
         c["keep_ok"] += int((pred[~changed] == out.holder_next[~changed]).sum())
         c["keep_n"] += int((~changed).sum())
@@ -186,10 +189,13 @@ def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | No
         c["pred_chg_ok"] += int((pred[moved] == out.holder_next[moved]).sum())
         unknown = out.holder_next == nmax
         c["null_n"] += int(unknown.sum())
-        c["null_wrong"] += int((pred[unknown] < nmax).sum())
+        c["null_wrong"] += int(((pred[unknown] < nmax) | (pred[unknown] == nmax + 2)).sum())   # 指到了某处或 NEW
         gone = out.holder_next == nmax + 1
         c["gone_n"] += int(gone.sum())
         c["gone_ok"] += int((pred[gone] == nmax + 1).sum())
+        new = out.holder_next == nmax + 2
+        c["new_n"] += int(new.sum())
+        c["new_ok"] += int((pred[new] == nmax + 2).sum())
 
         # ---- 布尔属性 ----
         m = data.bool_mask
@@ -261,6 +267,7 @@ def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | No
         "holder_predicted_change_precision": r("pred_chg_ok", "pred_chg"),
         "holder_unknown_wrongly_determined": r("null_wrong", "null_n"), "holder_unknown_count": c["null_n"],
         "holder_gone_recall": r("gone_ok", "gone_n"), "holder_gone_count": c["gone_n"],
+        "holder_new_recall": r("new_ok", "new_n"), "holder_new_count": c["new_n"],
         "attr_changed_acc": r("attr_chg_ok", "attr_chg_n"), "attr_changed_count": c["attr_chg_n"],
         "attr_changed_by_attr": split(by_attr), "attr_unchanged_kept": r("attr_keep_ok", "attr_keep_n"),
         "num_changed_by_attr": num_mae(),

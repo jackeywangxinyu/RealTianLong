@@ -110,24 +110,36 @@ def sketches_for(s: WorldState, ids: Iterable[str | None], seen: Seen | None = N
     return tuple(out[k] for k in sorted(out))
 
 
-def in_sight(states: Iterable[WorldState], vantage: str) -> Seen:
-    """站在 vantage 能亲眼看见的：这个地点本身、此处（行动前或后）的人与物、连着此处的门。"""
+def in_sight(states: Iterable[WorldState], vantage: str, revealed: Iterable[str] = ()) -> Seen:
+    """站在 vantage 能亲眼看见的：这个地点本身、此处（行动前或后）看得见的人与物、连着此处的明门，
+    以及本次感知的事实亲眼揭示出来的（翻查找到的藏匿物、手里的东西）。
+    藏匿的物件、揣在别人身上的小物件、暗门，只是“在这里”并不等于看得见——在话题里被提起也不行。"""
     states = tuple(states)
+    shown = frozenset(revealed)
 
     def seen(eid: str) -> bool:
-        if eid == vantage:
+        if eid == vantage or eid in shown:
             return True
         for st in states:
             if not st.has_entity(eid):
                 continue
             if st.kind(eid) == Kind.DOOR:
-                if vantage in st.targets(eid, Rel.CONNECTS):
+                if vantage in st.targets(eid, Rel.CONNECTS) and not st.attr(eid, "hidden", False):
                     return True
-            elif space.place_of(st, eid) == vantage:
+            elif space.place_of(st, eid) == vantage and _visible(st, eid):
                 return True
         return False
 
     return seen
+
+
+def _visible(st: WorldState, eid: str) -> bool:
+    if st.kind(eid) != Kind.ITEM:
+        return True
+    if st.attr(eid, "hidden", False) or space.is_concealed(st, eid):
+        return False
+    holder = space.holder_of(st, eid)
+    return holder is None or st.kind(holder) != Kind.ITEM
 
 
 def _referenced(s: WorldState, facts: Iterable[Fact]) -> Iterator[str]:
@@ -167,7 +179,10 @@ def make_percept(
         present = {informant, view.actor if view else None, view.target if view else None, vantage}
         seen = lambda eid: eid in present  # noqa: E731
     elif vantage is not None:
-        seen = in_sight((s, also) if also is not None else (s,), vantage)
+        # 本次感知亲眼确立的事实的主语（找到的藏匿物、手里的东西）才算揭示；
+        # 事实的宾语（他走向的地点、门那头）与话题里提到的只是被提起
+        revealed = [f.prop.subject for f in facts if f.holds]
+        seen = in_sight((s, also) if also is not None else (s,), vantage, revealed)
     else:
         seen = None
     return Percept(s.clock, modality, view, facts, scopes, sketches_for(s, ids, seen), informant)

@@ -154,7 +154,9 @@ def _select(g: GraphTensors, store: BeliefStore, profile: Profile, cands: Sequen
     kept: list[int] = []
     seen: set[int] = set()
 
-    def admit(ids: Sequence[str]) -> bool:
+    def admit(ids: Sequence[str], strict: bool = True) -> bool:
+        if strict and any(e not in index for e in ids):
+            return False                       # 引用了图里没有的实体：整个候选剔除，绝不留 -1 指针
         new = [index[e] for e in dict.fromkeys(ids) if e in index and index[e] not in seen]
         if len(kept) + len(new) > spec.max_nodes:
             return False
@@ -163,7 +165,7 @@ def _select(g: GraphTensors, store: BeliefStore, profile: Profile, cands: Sequen
         return True
 
     admit([store.owner])
-    admit([r for gl in profile.goals[:spec.max_goals] for r in _goal_refs(gl) if r])
+    admit([r for gl in profile.goals[:spec.max_goals] for r in _goal_refs(gl) if r], strict=False)
     cand_kept: list[int] = []
     for i, c in enumerate(cands[:spec.max_cands]):
         if admit(_cand_refs(c)):
@@ -195,8 +197,9 @@ def _select(g: GraphTensors, store: BeliefStore, profile: Profile, cands: Sequen
 
 def build_observation(
     store: BeliefStore, now: int, profile: Profile, cands: Sequence[Candidate], preds: Sequence[Prediction],
-    spec: ObsSpec, memory: MemoryView | None = None,
+    spec: ObsSpec, memory: MemoryView | None = None, offered: int | None = None,
 ) -> Observation:
+    """offered：行动族配额截断之前的候选总数（给出时裁剪报告把配额截掉的也算进去）。"""
     g = featurize(belief_view(store, now))
     nodes, cand_idx, required = _select(g, store, profile, cands, spec)
     remap = {old: new for new, old in enumerate(nodes)}
@@ -262,7 +265,8 @@ def build_observation(
         flag[i] = (code.topic_holds, code.topic_query)
         pred[i] = np.clip([getattr(p, f) for f in PRED_FIELDS], 0.0, 1.0)
         mask[i] = 1.0
-    report = CropReport(g.num_nodes, n, g.edge_index.shape[1], m, len(cands), len(kept_cands), len(required))
+    report = CropReport(g.num_nodes, n, g.edge_index.shape[1], m, max(len(cands), offered or 0), len(kept_cands),
+                        len(required))
     obs = {"x": x, "node_mask": node_mask, "role": role, "memory": mem, "edge_index": edge_index, "edge_attr": edge_attr,
            "edge_mask": edge_mask, "goal": goal, "goal_ptr": goal_ptr, "goal_mask": goal_mask, "cand": cand,
            "cand_flag": flag, "cand_pred": pred, "action_mask": mask}

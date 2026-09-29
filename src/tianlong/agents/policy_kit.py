@@ -68,21 +68,50 @@ class PolicyKit:
     def _go_towards(self, sit: Situation, place: str | None, why: str, manner: Manner | None = None) -> Choice | None:
         """沿自己以为的地图走一步：目的地与路线（门）都来自认知。
         认为那扇门锁着：手里有（认为配或不知配不配的）钥匙就先开锁；没有就不去撞门——除非这份记忆已经很旧。"""
-        hop = route_to(sit.beliefs, place) if place else None
+        if not place:
+            return None
+        b = sit.beliefs
+        blocked = self._blocked_doors(sit)
+        hop = route_to(b, place, blocked) or route_to(b, place)     # 有绕得开锁门的路就绕，没有才去面对那扇门
         if not hop:
             return None
         nxt, door = hop
-        b = sit.beliefs
-        locked = b.believed(Proposition.attr(door, "locked", True))
-        if locked is not None and locked.holds and effective_confidence(locked, sit.now) >= LOCK_DOUBT:
-            for key in self._held_items(b):
-                match = b.believed(Proposition.rel(key, Rel.MATCHES, door))
-                if match is None or match.holds:
-                    choice = self._pick(sit, f"门锁着，用{self._name(b, key)}开锁", Op.UNLOCK, door, key)
-                    if choice is not None:
-                        return choice
+        if door in blocked:
+            for key in self._keys_for(b, door):
+                choice = self._pick(sit, f"门锁着，用{self._name(b, key)}开锁", Op.UNLOCK, door, key)
+                if choice is not None:
+                    return choice
             return None
         return self._pick(sit, why, Op.MOVE, nxt, door, manner)
+
+    @staticmethod
+    def _blocked_doors(sit: Situation) -> frozenset[str]:
+        """自知过不去的门：确信锁着（记忆还不旧）。"""
+        b = sit.beliefs
+        out = set()
+        for d, sk in b.entities.items():
+            if sk.kind != Kind.DOOR:
+                continue
+            lk = b.believed(Proposition.attr(d, "locked", True))
+            if lk is not None and lk.holds and effective_confidence(lk, sit.now) >= LOCK_DOUBT:
+                out.add(d)
+        return frozenset(out)
+
+    @staticmethod
+    def _keys_for(b: BeliefStore, door: str) -> list[str]:
+        """手里可能开这扇门的东西：认为配的在前，其次是不知配不配、看着也不像兵刃药物秘籍的；确知不配的不试。"""
+        ranked = []
+        for i, sk in sorted(b.entities.items()):
+            if sk.kind != Kind.ITEM or b.location_of(i) != b.owner:
+                continue
+            match = b.believed(Proposition.rel(i, Rel.MATCHES, door))
+            looks = dict(sk.attrs)
+            if match is not None:
+                if match.holds:
+                    ranked.append((0, i))
+            elif not (looks.get("weapon") or looks.get("cures") or looks.get("teaches")):
+                ranked.append((1, i))
+        return [i for _, i in sorted(ranked)]
 
     def _explore(self, sit: Situation, what: str) -> Choice | None:
         """不知道要找的东西/人在哪：先把此处仔细翻一遍（找物件时），再去最近的、没看过或很久没看过的地方。
@@ -99,11 +128,13 @@ class PolicyKit:
         if here is None:
             return None
         options = []
+        blocked = self._blocked_doors(sit)
         for p, psk in sorted(b.entities.items()):
             last = b.surveyed.get(p)
             if psk.kind != Kind.PLACE or p == here or (last is not None and sit.now - last <= STALE):
                 continue
-            d = believed_distance(b, here, p)
+            d = believed_distance(b, here, p, blocked)
+            d = d if d is not None else believed_distance(b, here, p)
             if d is not None:
                 options.append((d, last if last is not None else -1, p))
         for _, _, p in sorted(options):

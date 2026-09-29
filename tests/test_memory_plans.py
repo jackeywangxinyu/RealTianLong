@@ -185,13 +185,16 @@ def test_g01_displacement_is_not_information_gain():
             if o.observer == "me":
                 st, cs = st.revise(o.percept)
                 changed += cs
-        return observation_gain(changed, own_effect_slots(mine.changes)), r.state, st
+        return observation_gain(changed, own_effect_slots(mine.changes, mine)), r.state, st
 
     g_move, s1, st1 = gain(s, mind, Op.MOVE, "yard", "d1")
     g_back, s2, st2 = gain(s1, st1, Op.MOVE, "hall", "d1")
     g_look, _, _ = gain(s2, st2, Op.INSPECT, "hall")
     assert g_back == 0, "确定地回到刚看过的地方：没有有效新观察（自己的位置变化不算获知）"
     assert g_look >= 1, "原地仔细翻查发现藏着的玉佩：没有任何位移，却有新观察"
+    _, s3, st3 = gain(s2, st2, Op.INSPECT, "hall")
+    g_take, _, _ = gain(s3, st3, Op.TAKE, "jade")
+    assert g_take == 0, "拿起来：位置变化与随手感而来的锋利/淬毒/所载武功都是本行动的直接后果，不算获知"
     # 启发式先验同样：刚看过的地方 < 没翻过的此处
     prof = Profile("me", "x", "x", (Goal(GoalKind.ACQUIRE, "jade"),))
     cands = [Candidate(Op.MOVE, "yard", "d1"), Candidate(Op.INSPECT, "hall")]

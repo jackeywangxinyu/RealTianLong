@@ -128,8 +128,10 @@ class ScriptedPolicy(MartialTactics):
         # ---- 不知下落 ≠ 丢失：只有确知“不在原处”才开始找（盘问、搜身）；不知道就只去原处看一眼 ----
         home_belief = b.believed(Proposition.rel(g.item, Rel.AT, g.home)) if g.home else None
         if home_belief is None:
-            return self._look_in_on(sit, g)
-        if home_belief.holds:
+            if not self._home_searched(sit, g):
+                return self._look_in_on(sit, g)
+            # 亲手把原处仔细翻过、仍不见它：当作不在原处，才开始盘问与搜寻
+        elif home_belief.holds:
             return None
         # ---- 下落不明：先问、再搜、再查看现场 ----
         suspects = [p for p, sk in sorted(b.entities.items())
@@ -144,17 +146,25 @@ class ScriptedPolicy(MartialTactics):
             return self._pick(sit, f"仔细找找{name}", Op.INSPECT, here)
         return self._explore(sit, g.item)
 
+    @staticmethod
+    def _home_searched(sit: Situation, g: Goal) -> bool:
+        b = sit.beliefs
+        return g.home is not None and (g.home in b.searched or believed_place(b, g.home) in b.searched)
+
     def _look_in_on(self, sit: Situation, g: Goal) -> Choice | None:
-        """守护之物从没亲眼见过：走到它该在的地方看一眼——核实，而不是怀疑任何人。"""
+        """守护之物从没亲眼见过：走到它该在的地方，仔细看一眼——核实，而不是怀疑任何人。"""
         if g.home is None:
             return None
         b = sit.beliefs
         where = believed_place(b, g.home)
         if where is None:
             return self._explore(sit, g.home)
+        name = self._name(b, g.item or "")
         if where == b.location_of(sit.agent):
-            return None       # 已在原处：环顾会给出答案（看见或负证据）
-        choice = self._go_towards(sit, where, f"去{self._name(b, where)}看看{self._name(b, g.item or '')}还在不在")
+            choice = self._pick(sit, f"仔细看看{name}还在不在", Op.INSPECT, g.home) \
+                or self._pick(sit, f"仔细看看{name}还在不在", Op.INSPECT, where)
+        else:
+            choice = self._go_towards(sit, where, f"去{self._name(b, where)}看看{name}还在不在")
         return Choice(choice.index, choice.rationale, "explore") if choice else None
 
     def _held_by_other(self, sit: Situation, g: Goal, holder: str, owners: tuple[str, ...]) -> Choice | None:
@@ -171,7 +181,7 @@ class ScriptedPolicy(MartialTactics):
                             and not self._did_recently(sit, Op.ASK, p):
                         q = Fact(Proposition.rel(holder, Rel.AT, None), True)
                         return self._pick(sit, f"打听{self._name(b, holder)}在哪里", Op.ASK, p, topic=q)
-                return None
+                return self._explore(sit, holder)       # 没人可问：凭自己的地图去找那人
             if holder_place != here:
                 return self._go_towards(sit, holder_place, f"去找{self._name(b, holder)}讨回{name}")
             if not self._did_recently(sit, Op.ASK, holder):
@@ -184,7 +194,8 @@ class ScriptedPolicy(MartialTactics):
                 continue
             if b.location_of(owner) == here:
                 return self._pick(sit, f"向失主报告{name}的下落", Op.TELL, owner, topic=fact)
-            choice = self._go_towards(sit, believed_place(b, owner), f"去告诉失主{name}在谁那里")
+            where = believed_place(b, owner)
+            choice = self._go_towards(sit, where, f"去告诉失主{name}在谁那里") if where else self._explore(sit, owner)
             if choice is not None:
                 return choice
         return None

@@ -77,7 +77,7 @@ def _predicted_facts(out: DynamicsOutput, samples: Sequence[Sample]) -> list[lis
     """模型认为最可能的下一刻：容纳者换了的写成新的 AT，确知不在原处的写成原处的否定。"""
     facts: list[list[Fact]] = [[] for _ in samples]
     pred = out.holder.argmax(-1).tolist()
-    nmax = out.holder.size(1) - 2           # 指针类是图内的局部下标；末两类为 UNKNOWN、GONE
+    nmax = out.holder.size(1) - 3           # 指针类是图内的局部下标；末三类为 UNKNOWN、GONE、NEW
     row = 0
     for g, s in enumerate(samples):
         for k, node in enumerate(s.located.tolist()):

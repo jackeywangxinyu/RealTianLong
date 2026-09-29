@@ -60,7 +60,7 @@ class GoalRecord:
     goal: Goal
     mode: GoalMode
     activated_at: int | None = None     # 目标激活（not_before 已到）的时刻
-    initial: bool | None = None         # 激活那一刻是否已满足：开局即满足的不算“学会达成”
+    initial: bool | None = None         # 开局（reset）那一刻是否已满足：开局即满足的不算“学会达成”
     achieved_at: int | None = None      # ACHIEVE：激活后第一次满足的时刻（开局即满足者等于激活时刻）
     violated_at: int | None = None      # MAINTAIN：第一次被破坏的时刻
     satisfied: bool | None = None       # 最近一次求值
@@ -94,6 +94,13 @@ class GoalTracker:
         return bool(self.registry.satisfied(WorldReader(s), agent, g, self.profiles[agent].allies))
 
     def start(self, s: WorldState) -> None:
+        """开局求值：每个目标（不论是否已激活）记下 reset 时是否已满足——“初态”只按开局算。
+        于是 not_before 目标在激活前被自己办成，激活时照样记功；开局就满足的一次性目标，拆了再办也没有奖励。"""
+        for agent, recs in self.records.items():
+            for rec in recs:
+                rec.initial = self._sat(s, agent, rec.goal)
+                if rec.initial and rec.mode == GoalMode.ACHIEVE:
+                    rec.achieved_at = s.clock
         self.update(s)
 
     def update(self, s: WorldState) -> dict[str, float]:
@@ -107,9 +114,10 @@ class GoalTracker:
                     continue
                 now = self._sat(s, agent, g)
                 if rec.activated_at is None:
-                    rec.activated_at, rec.initial, rec.satisfied = s.clock, now, now
-                    if now and rec.mode == GoalMode.ACHIEVE:
+                    rec.activated_at, rec.satisfied = s.clock, now
+                    if now and rec.mode == GoalMode.ACHIEVE and rec.achieved_at is None:
                         rec.achieved_at = s.clock
+                        r += g.weight              # 激活前自己办成的：激活时记功（开局即满足者在 start 里已记为初态）
                 else:
                     if rec.mode == GoalMode.ACHIEVE:
                         if now and rec.achieved_at is None:

@@ -281,3 +281,37 @@ def test_pure_id_renaming_keeps_dynamics_prediction():
             outs.append(torch.sigmoid(model(Batch.from_data_list([to_data(agent_query(store, 999, prefix + "a",
                                                                                           cand))])).success))
     assert torch.allclose(outs[0], outs[1], atol=1e-5)
+
+
+def test_crop_drops_candidates_with_unresolvable_refs_and_reports_budget_cuts():
+    """引用了图里没有的实体的候选整个剔除（绝不留 -1）；行动族配额截掉的也计入裁剪报告（评审回归）。"""
+    s = arena(extra_items=25)
+    store = observer(s, "a")
+    prof = Profile("a", "x", "x", (Goal(GoalKind.ACQUIRE, "ghost"),))
+    assert not any(c.topic and c.topic.prop.subject == "ghost" for c in candidates(store, ["ghost"])), \
+        "连名字都不知道的东西无从谈起"
+    ghost = Candidate(Op.ASK, "c", topic=Fact(Proposition.rel("ghost", Rel.AT, None)))
+    cands = [Candidate(Op.WAIT), ghost]
+    ob = build_observation(store, 999, prof, cands, HeuristicPredictor().predict(store, 999, cands), ObsSpec())
+    assert ghost not in ob.candidates and ob.report.cands_kept == 1 and ob.report.cropped
+    full = candidates(store, ["blade"])
+    few = candidates(store, ["blade"], 12)
+    rep = build_observation(store, 999, Profile("a", "x", "x"), few, HeuristicPredictor().predict(store, 999, few),
+                            ObsSpec(), offered=len(full)).report
+    assert rep.cands == len(full) > rep.cands_kept == 12 and rep.cropped
+
+
+def test_holder_label_new_when_seen_at_a_holder_never_met_before():
+    """看见东西在一个此前不认识的人手里：标签是 NEW（知道在哪、只是指针指不到），不是“仍不知道”。"""
+    from tianlong.learning.samples import NEW, agent_sample
+    s = arena()                        # 短剑在乙手上；甲先前只“听说过”短剑，不认识乙
+    heard = make_percept(s, Modality.SCENE, facts=(Fact(Proposition.rel("door", Rel.CONNECTS, "hall")),))
+    from dataclasses import replace
+
+    from tianlong.core import EntitySketch
+    before = BeliefStore("a").revise(replace(heard, sketches=(EntitySketch("blade", Kind.ITEM, "短剑", (), False),
+                                                              EntitySketch("a", Kind.PERSON, "甲"))))[0]
+    after = before.revise(scene_percept(s, "a"))[0]
+    smp = agent_sample(before, after, s.clock, "a", Candidate(Op.WAIT), True)
+    pos = list(smp.located).index(smp.graph.index_of("blade"))
+    assert after.location_of("blade") == "b" and smp.holder_next[pos] == NEW
