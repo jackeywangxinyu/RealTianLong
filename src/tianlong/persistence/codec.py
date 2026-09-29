@@ -1,6 +1,7 @@
 """
 [INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode
-[OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode）
+[OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode /
+          obligation / said）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -9,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tianlong.cognition import Belief, Episode
+from tianlong.cognition import Belief, Episode, Obligation, Said
 from tianlong.core import (
     AddRelation,
     Change,
@@ -158,3 +159,23 @@ def episode_from(d: J) -> Episode:
     ev = pevent_from(d["event"])
     assert ev is not None
     return Episode(int(d["tick"]), Modality(d["modality"]), ev, d.get("informant"))
+
+
+def obligation_to(o: Obligation) -> J:
+    return {"kind": o.kind, "counterpart": o.counterpart, "topic": fact_to(o.topic), "since": o.since}
+
+
+def obligation_from(d: J) -> Obligation:
+    topic = fact_from(d["topic"])
+    assert topic is not None
+    return Obligation(d["kind"], d["counterpart"], topic, int(d["since"]))
+
+
+def said_to(s: Said) -> J:
+    return {"listener": s.listener, "fact": fact_to(s.fact), "tick": s.tick}
+
+
+def said_from(d: J) -> Said:
+    fact = fact_from(d["fact"])
+    assert fact is not None
+    return Said(d["listener"], fact, int(d["tick"]))

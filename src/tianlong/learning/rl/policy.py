@@ -34,7 +34,7 @@ class LearnedPolicy:
 
     @torch.no_grad()
     def choose(self, sit: Situation) -> Choice:
-        ob = build_observation(sit.beliefs, sit.now, sit.profile, sit.candidates, sit.predictions, self.spec)
+        ob = build_observation(sit.beliefs, sit.now, sit.profile, sit.candidates, sit.predictions, self.spec, sit.memory)
         batch = {k: torch.as_tensor(np.expand_dims(v, 0)) for k, v in ob.obs.items()}
         logits, _ = self.net(batch)
         probs = torch.softmax(logits[0], -1)

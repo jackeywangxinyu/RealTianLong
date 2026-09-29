@@ -34,11 +34,14 @@ _PERSON_NAMES = ["阿福", "老周", "小翠", "王掌柜", "李镖头", "孙娘
 
 
 def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_persons: int = 3,
-                    jianghu: float = 0.0, scroll_rate: float = 0.5, scroll_held: float = 0.0) -> Scenario:
+                    jianghu: float = 0.0, scroll_rate: float = 0.5, scroll_held: float = 0.0,
+                    hide_goal_items: float = 0.0) -> Scenario:
     """jianghu 是“江湖化”的概率：身手、兵刃（可能带毒）、解药、秘籍、单向通道与寻仇/护人目标。
     江湖层用独立的随机流叠加在同一张底图上，jianghu=0 时与旧版逐字节相同——已有的种子、测试与存档不受影响。
     scroll_rate / scroll_held 是修习机制的覆盖旋钮（江湖世界里有秘籍的概率、秘籍一开始就在某人手上的概率）：
-    默认值与旧版逐字节相同；后者用第三条独立随机流，只挪动秘籍的位置，不扰动其余抽样。"""
+    默认值与旧版逐字节相同；后者用第三条独立随机流，只挪动秘籍的位置，不扰动其余抽样。
+    hide_goal_items 是“先探查、再决策”的任务旋钮：获取/递送目标的物品（钥匙除外）若放在地点或台面上，
+    以此概率被藏起来——不仔细查看就找不到。第四条独立随机流，默认 0 逐字节不变。"""
     rng = random.Random(seed)
     jr = random.Random(derive_seed("jianghu", seed))
     wuxia = jr.random() < jianghu
@@ -109,7 +112,23 @@ def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_pers
             extra_ents = [Entity(e.id, e.kind, e.name, tuple(a for a in e.attrs if a[0] != "hidden"))
                           if e.id == "b0" else e for e in extra_ents]
         state = WorldState.build(seed, at(1, 8, 0), ents + extra_ents, rels + extra_rels)
+    if hide_goal_items > 0:
+        state = _hide_goal_items(state, profiles, random.Random(derive_seed("probe", seed)), hide_goal_items)
     return Scenario(f"proc-{seed}", state, profiles, _priors(state, persons))
+
+
+def _hide_goal_items(s: WorldState, profiles: dict[str, Profile], pr: random.Random, rate: float) -> WorldState:
+    wanted = sorted({g.item for p in profiles.values() for g in p.goals
+                     if g.kind in (GoalKind.ACQUIRE, GoalKind.DELIVER) and g.item})
+    ents = dict(s.entities)
+    for item in wanted:
+        holder = s.target(item, Rel.AT)
+        if s.sources(item, Rel.MATCHES) or s.targets(item, Rel.MATCHES) or holder is None \
+                or s.kind(holder) == Kind.PERSON:
+            continue
+        if pr.random() < rate:
+            ents[item] = ents[item].with_attr("hidden", True)
+    return WorldState.build(s.seed, s.clock, ents.values(), s.relations)
 
 
 def _jianghu(jr: random.Random, spots: list[str], persons: list[str], profiles: dict[str, Profile],

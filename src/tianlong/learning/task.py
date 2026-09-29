@@ -31,6 +31,7 @@ class TaskConfig:
     max_persons: int = 3
     scroll_rate: float = 0.5      # 江湖世界里有秘籍的概率
     scroll_held: float = 0.0      # 秘籍一开始就在某人手上的概率（提高修习机制的数据覆盖）
+    hide_goal_items: float = 0.0  # “先探查、再决策”任务：获取/递送目标的物品被藏起来的概率（预测器有无的对照用）
     goals: tuple[str, ...] = ALL_GOALS   # 启用的目标族：奖励与评测只认这些
     horizon: int = 30             # 一局的 tick 数
 
@@ -38,12 +39,12 @@ class TaskConfig:
         unknown = set(self.goals) - set(ALL_GOALS)
         if unknown:
             raise ValueError(f"未知目标族 {sorted(unknown)}")
-        if not 0.0 <= self.jianghu <= 1.0 or not 0.0 <= self.scroll_rate <= 1.0 or not 0.0 <= self.scroll_held <= 1.0:
+        if any(not 0.0 <= v <= 1.0 for v in (self.jianghu, self.scroll_rate, self.scroll_held, self.hide_goal_items)):
             raise ValueError("概率旋钮必须在 [0, 1]")
 
     def scenario(self, seed: int) -> Scenario:
         return random_scenario(seed, self.max_places, self.max_items, self.max_persons, self.jianghu,
-                               self.scroll_rate, self.scroll_held)
+                               self.scroll_rate, self.scroll_held, self.hide_goal_items)
 
     def registry(self) -> GoalRegistry:
         enabled = set(self.goals)

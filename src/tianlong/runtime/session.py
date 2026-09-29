@@ -2,7 +2,7 @@
 [INPUT]: 依赖 runtime/authority 的 WorldAuthority，agents 的 Orchestrator / NpcContext / AgentPort / Scheduler / Policy / OutcomePredictor，
          memory 的 QdrantMemoryIndex / Recall / MemoryIndexer / MemoryScope，language 的 IntentParser / Narrator / Speaker / LLMClient，
          persistence 的 WorldStore / InMemoryWorldStore / WorldRef，scenarios 的 Scenario，
-         cognition/navigation 的 believed_place，language/templates 的 render_fact（读档开场）
+         cognition/navigation 的 believed_place，language/templates 的 render_fact（读档开场），memory/view 的 MemoryView
 [OUTPUT]: 对外提供 GameSession（可玩会话，支持读档：存储里已有该世界则接续并重建向量索引）、TurnReport（一回合的全部产物，含分阶段耗时）
 [POS]: runtime 的装配中心：一回合 = 解析玩家输入 → 基于同一版本扇出 NPC 决策 → 权威结算 → 同步记忆索引 → 按玩家视角叙述。
        CLI、测试、未来的 Web 前端都只和它打交道
@@ -32,6 +32,7 @@ from tianlong.language.templates import render_fact
 from tianlong.memory.index import MemoryIndex, MemoryScope, QdrantMemoryIndex
 from tianlong.memory.indexer import MemoryIndexer
 from tianlong.memory.recall import Recall
+from tianlong.memory.view import MemoryView
 from tianlong.persistence import InMemoryWorldStore, WorldRef, WorldStore
 from tianlong.runtime.authority import Settlement, WorldAuthority
 from tianlong.scenarios import Scenario
@@ -97,6 +98,7 @@ class GameSession:
         self.parser = IntentParser(llm, aliases=scenario.aliases)
         self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style)
         self._described: set[str] = set()      # 已向玩家描写过外观的实体：只在初见时描写
+        self._memory_views: dict[str, tuple[int, MemoryView]] = {}   # 长期记忆摘要的增量缓存（派生数据）
         self.speaker: Speaker = LLMSpeaker(llm) if llm else TemplateSpeaker()
         self.policies = dict(policies or {})
         self.predictor = predictor or HeuristicPredictor()
@@ -206,6 +208,16 @@ class GameSession:
             (due if self.scheduler.due(a, self.beliefs(a), now, self.scenario.profiles[a]) else routine).append(a)
         return due, routine
 
+    def _memory_view(self, agent: str, now: int) -> MemoryView:
+        """长期记忆摘要：从权威经历记录汇总（可重建的派生数据），按角色增量缓存。"""
+        seen, view = self._memory_views.get(agent, (-1, MemoryView()))
+        fresh = [m for m in self.authority.store.recent_memories(self.ref, agent, seen + 1) if m.known_at <= now]
+        if fresh:
+            view = view.add(fresh, now)
+            seen = max(m.known_at for m in fresh)
+            self._memory_views[agent] = (seen, view)
+        return view
+
     def _contexts(self, agents: list[str], version: int, now: int) -> dict[str, NpcContext]:
         out = {}
         for a in agents:
@@ -214,6 +226,7 @@ class GameSession:
                 a, self.scenario.profiles[a], self.ref.world_id, self.ref.branch_id, version, now,
                 beliefs=lambda a=a: self.beliefs(a),
                 recall=lambda q, scope=scope: self.recall.recall(scope, q),
+                memory=lambda a=a, now=now: self._memory_view(a, now),
             )
             out[a] = NpcContext(port, self.policies.get(a) or ScriptedPolicy(), self.predictor, self.speaker,
                                 self.max_candidates)

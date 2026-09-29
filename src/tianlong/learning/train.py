@@ -49,6 +49,7 @@ class TrainConfig:
     jianghu: float = 0.5       # 江湖化世界比例（见 learning/task）
     scroll_rate: float = 0.5   # 江湖世界里有秘籍的概率
     scroll_held: float = 0.0   # 秘籍开局就在某人手上的概率（修习机制的数据覆盖）
+    hide_goal_items: float = 0.0   # 目标物品藏起来的概率（让“查看才有发现”在数据里足够常见）
     max_places: int = 5
     max_items: int = 4
     max_persons: int = 3
@@ -56,7 +57,7 @@ class TrainConfig:
 
     def task(self) -> TaskConfig:
         return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
-                          self.scroll_held)
+                          self.scroll_held, self.hide_goal_items)
 
 
 def _device(name: str) -> torch.device:

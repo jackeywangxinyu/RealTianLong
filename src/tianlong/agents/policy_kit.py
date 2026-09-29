@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate / navigation，core 的 Fact / Kind / Manner / Modality / Op / Proposition / Rel，
-         core/profiles 的 Profile，agents/predictors 的 Prediction
+         core/profiles 的 Profile，agents/predictors 的 Prediction，memory/view 的 MemoryView
 [OUTPUT]: 对外提供 Situation / Choice（含结构化标签 tag）/ Policy 协议、PolicyKit（规则策略共享的“在候选集中挑选”、沿自己的地图带路
           （认为锁着的门先试着开、打不开就不去撞）、凭个人勘察记录探索、信念查询积木）、WAIT_REASONS、RECENT、STALE
 [POS]: agents 的决策契约与策略工具箱：策略只能在候选集中选（Choice.index），一切判断来自信念与近期经历。
@@ -19,6 +19,7 @@ from tianlong.cognition import BeliefStore, Candidate, effective_confidence
 from tianlong.cognition.navigation import believed_distance, route_to
 from tianlong.core import Fact, Kind, Manner, Modality, Op, Proposition, Rel
 from tianlong.core.profiles import Profile
+from tianlong.memory.view import MemoryView
 
 RECENT = 5
 STALE = 20          # 多久没看过的地方值得再去看一眼（分钟）
@@ -36,6 +37,7 @@ class Situation:
     candidates: tuple[Candidate, ...]
     predictions: tuple[Prediction, ...]
     memories: tuple[str, ...] = ()
+    memory: MemoryView | None = None     # 长期记忆的结构化摘要：谁的话被证实/证伪过、哪些实体常被提起
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,12 +133,8 @@ class PolicyKit:
 
     @staticmethod
     def _said(sit: Situation, listener: str, fact: Fact) -> bool:
-        """近期经历里是否已经对此人说过这句话（说过就不必追着再说）。"""
-        return any(
-            ep.modality == Modality.SELF and ep.event.kind == Op.TELL.value
-            and ep.event.target == listener and ep.event.topic == fact
-            for ep in sit.beliefs.episodes
-        )
+        """是否已经对此人说过这句话（持久记录，不随经历缓冲滚掉；说过就不必追着再说）。"""
+        return any(s.listener == listener and s.fact == fact for s in sit.beliefs.said)
 
     @staticmethod
     def _attackers_of(sit: Situation, victim: str, window: int = 3) -> list[str]:
@@ -165,6 +163,23 @@ class PolicyKit:
         here = self._here(b)
         return [p for p, sk in sorted(b.entities.items())
                 if sk.kind == Kind.PERSON and p != b.owner and here is not None and b.location_of(p) == here]
+
+    @staticmethod
+    def _whereabouts(sit: Situation, eid: str) -> str | None:
+        """矛盾的说法并存时按“可信度 × 说话者的可靠度（来自长期记忆）”取舍；没有记忆就是最可信的那一条。"""
+        b = sit.beliefs
+        ps = b.positives(eid, Rel.AT.value)
+        if not ps:
+            return None
+        if sit.memory is None or len(ps) == 1:
+            return ps[0].prop.value  # type: ignore[return-value]
+        mem = sit.memory
+
+        def score(bl) -> float:
+            return effective_confidence(bl, sit.now) * (mem.reliability(bl.informant) if bl.hearsay else 1.0)
+
+        best = sorted(ps, key=lambda bl: (-score(bl), -bl.learned_at, bl.prop.sort_key()))[0]
+        return best.prop.value  # type: ignore[return-value]
 
     @staticmethod
     def _held_items(b: BeliefStore) -> list[str]:

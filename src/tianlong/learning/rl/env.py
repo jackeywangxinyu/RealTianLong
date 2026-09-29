@@ -1,6 +1,7 @@
 """
 [INPUT]: 依赖 ray.rllib 的 MultiAgentEnv，gymnasium，kernel 的 Kernel，cognition 的 BeliefStore / candidates，
          agents 的 HeuristicPredictor / ScriptedPolicy / Situation / OutcomePredictor，learning/task 的 TaskConfig，
+         memory 的 records_for / MemoryView（长期记忆摘要与线上同一定义），
          learning/rl 的 observation / rewards
 [OUTPUT]: 对外提供 TianlongEnv（RLlib 多智能体环境：crops 暴露裁剪报告，tracker 暴露目标状态，episode_rewards 暴露分项奖励累计，
           coverage 暴露实际抽到的场景与目标分布）
@@ -26,6 +27,8 @@ from tianlong.kernel import Kernel
 from tianlong.learning.rl.observation import CropReport, ObsSpec, build_observation, observation_space
 from tianlong.learning.rl.rewards import GoalTracker, RewardWeights, step_reward
 from tianlong.learning.task import TaskConfig
+from tianlong.memory.records import records_for
+from tianlong.memory.view import MemoryView
 
 
 class TianlongEnv(MultiAgentEnv):
@@ -73,6 +76,7 @@ class TianlongEnv(MultiAgentEnv):
         self.stores = {a: BeliefStore(a, trust=dict(p.trust)).revise_all(sc.priors.get(a, ()))[0]
                        for a, p in sc.profiles.items()}
         self.agents = sorted(sc.profiles)
+        self.memories = {a: MemoryView() for a in self.agents}   # 长期记忆摘要：与线上同一个 records_for 定义
         self.t = 0
         self.episode_rewards = {a: Counter() for a in self.agents}
         self.coverage["episodes"] += 1
@@ -92,7 +96,10 @@ class TianlongEnv(MultiAgentEnv):
             intents.append(cand.to_intent(make_id("int", self.scenario.world_id, a, before.version), a, before.version))
         result = self.kernel.step(before, intents)
         for o in result.observations:
-            self.stores[o.observer], _ = self.stores[o.observer].revise(o.percept)
+            self.stores[o.observer], changes = self.stores[o.observer].revise(o.percept)
+            recs = records_for(self.scenario.world_id, "train", o, changes, self.stores[o.observer].entities)
+            if recs:
+                self.memories[o.observer] = self.memories[o.observer].add(recs)
         self.state = result.state
         self.last_events = result.events          # 评测用：统计行为（例如有没有学会动手抢）
         self.t += 1
@@ -115,8 +122,8 @@ class TianlongEnv(MultiAgentEnv):
         profile = self.scenario.profiles[agent]
         interests = list(profile.interests())
         cands = candidates(store, interests, self.obs_spec.max_cands)
-        preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests))
-        ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec)
+        preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests, profile=profile))
+        ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec, self.memories[agent])
         if self.zero_predictions:
             ob.obs["cand_pred"][:] = 0.0
         # 动作编号对应裁剪后保留的候选：引用放不下的候选不会以悬空指针出现在策略面前
@@ -126,7 +133,7 @@ class TianlongEnv(MultiAgentEnv):
 
     def situation(self, agent: str) -> Situation:
         return Situation(agent, self.scenario.profiles[agent], self.stores[agent], self.state.clock,
-                         self._cands[agent], self._preds[agent])
+                         self._cands[agent], self._preds[agent], memory=self.memories[agent])
 
     def expert_choices(self) -> dict:
         return {a: self._expert.choose(self.situation(a)) for a in self.agents}

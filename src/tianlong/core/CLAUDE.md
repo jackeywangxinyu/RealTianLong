@@ -14,7 +14,7 @@ propositions.py: Proposition（命题内容，不含"谁相信"）与 Fact（带
 events.py: 因果链数据 Intent → Event（真相）→ Observation（服务端溯源）→ Percept（角色可见的片面内容，刻意不带来源 ID）；结算原因封闭词表 RULE_REASONS/ADMISSION_REASONS（kernel 产出、learning 编码的契约，reason_key() 把语法拒绝归一）；MOVE 的 obj 是所走的路线（门）；EntitySketch.seen 区分亲眼所见（有外观）与只闻其名（外观未知）；言语原话 utterance 随意图与感知传递，只是修辞
 grammar.py: signature_error() 行动语法检查，kernel 用真实种类、cognition 用已知种类调用同一把尺子；只查"能不能这样说"，不查"能不能做成"
 profiles.py: Goal/Profile 角色设定卡，目标角色条件化（守护/获取/递送/守地/寻仇/灭口/护人）+ 时间闸门 not_before + 寻仇了结条件 until + 盟友 + 信任度；interests() 汇总关注的人与物
-memories.py: MemoryRecord 经历权威记录，known_at 用于检索时的时间过滤，向量索引只是它的派生
+memories.py: MemoryRecord 经历权威记录，known_at 用于检索时的时间过滤，informant/verdict 结构化记下“谁的说法后来被亲眼证实/证伪”，向量索引只是它的派生
 ids.py: blake2b 确定性派生 digest/derive_seed/make_id，拒绝 hash() 与 uuid4 以保证可回放
 clock.py: 游戏时间为整数分钟，1 tick = 1 分钟，clock_label() 渲染"第1日 08:10"，is_night()/minutes_until_night() 定义昼夜（戌时入夜、卯时破晓）
 __init__.py: 再导出全部公共类型

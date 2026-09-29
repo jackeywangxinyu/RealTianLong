@@ -1,9 +1,9 @@
 """
-[INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel
+[INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel，cognition/agenda 的 fold_agenda
 [OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图）及其 revise() 修正规则、effective_confidence()
 [POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异。
        surveyed / searched 记着“我上次看清、上次仔细翻查某个容纳者是什么时候”：探索与“还没找过哪里”只凭这份个人记录，
-       不读地图真相
+       不读地图真相；obligations / said（cognition/agenda）是跨越经历缓冲的持久任务状态
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from tianlong.cognition.agenda import Obligation, Said, fold_agenda
 from tianlong.core import EntitySketch, Modality, PerceivedEvent, Percept, Proposition, Rel
 
 # ============================================================
@@ -89,6 +90,8 @@ class BeliefStore:
     last_tick: int = 0
     surveyed: Mapping[str, int] = field(default_factory=dict)   # 容纳者 → 最近一次看清其直接内容的时刻（环顾或查看）
     searched: Mapping[str, int] = field(default_factory=dict)   # 容纳者 → 最近一次亲手仔细翻查（含藏匿物）的时刻
+    obligations: tuple[Obligation, ...] = ()   # 欠着别人的（被问到的问题），答了才勾销——不随经历缓冲滚掉
+    said: tuple[Said, ...] = ()                # 对谁说过什么：说过不重复，跨越经历缓冲
 
     # ------------------------------------------------------------
     #  查询：一律排序返回，保证特征构造与候选生成的确定性
@@ -148,7 +151,8 @@ class BeliefStore:
             if old is not None and effective_confidence(old, now) > b.confidence:
                 return  # 低可信度的说法不覆盖（衰减后仍）更可信的认知
             beliefs[b.prop] = b
-            if old is None or old.holds != b.holds:
+            # 真假翻转是变化；传闻被亲眼证实也是（记忆据此记下“谁的话靠得住”）
+            if old is None or old.holds != b.holds or (old.hearsay and not b.hearsay):
                 changes.append(BeliefChange(old, b))
 
         def drop(prop: Proposition) -> None:
@@ -187,7 +191,9 @@ class BeliefStore:
             episodes = (*episodes, Episode(percept.tick, percept.modality, percept.event, percept.informant))
             episodes = episodes[-EPISODE_CAPACITY:]
 
-        store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now, surveyed, searched)
+        obligations, said = fold_agenda(self.owner, self.obligations, self.said, percept)
+        store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now, surveyed, searched,
+                            obligations, said)
         return store, tuple(changes)
 
     def revise_all(self, percepts: Iterable[Percept]) -> tuple[BeliefStore, tuple[BeliefChange, ...]]:

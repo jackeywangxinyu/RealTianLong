@@ -1,5 +1,5 @@
 """
-[INPUT]: 依赖 langgraph 的 StateGraph / Runtime / InMemorySaver / JsonPlusSerializer，agents 的 port / policies / predictors，
+[INPUT]: 依赖 langgraph 的 StateGraph / Runtime / InMemorySaver / JsonPlusSerializer，agents 的 port（含长期记忆摘要）/ policies / predictors，
          cognition 的 candidates，language/speaker 的 Speaker，language/templates 的 render_experience
 [OUTPUT]: 对外提供 NpcState、NpcContext、build_npc_graph()、checkpoint_serde()
 [POS]: agents 的单角色决策流程：观察 → 回忆 → 形成候选 → 预测后果 → 选择 → 表达 → 提交意图。
@@ -101,7 +101,8 @@ def propose(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
 
 def predict(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
     ctx = runtime.context
-    preds = ctx.predictor.predict(ctx.port.beliefs(), ctx.port.now, state["candidates"], ctx.interests())
+    preds = ctx.predictor.predict(ctx.port.beliefs(), ctx.port.now, state["candidates"], ctx.interests(),
+                                  profile=ctx.port.profile)
     return {"predictions": list(preds)}
 
 
@@ -111,6 +112,7 @@ def decide(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
         ctx.port.agent, ctx.port.profile, ctx.port.beliefs(), ctx.port.now,
         tuple(state["candidates"]), tuple(state["predictions"]),
         tuple(state.get("recent", [])) + tuple(state.get("related", [])),
+        ctx.port.memory() if ctx.port.memory is not None else None,
     )
     choice = ctx.policy.choose(sit)
     if not 0 <= choice.index < len(state["candidates"]):

@@ -1,8 +1,9 @@
 """
 [INPUT]: 依赖 torch，ray.rllib 的 TorchRLModule / ValueFunctionAPI / Columns，learning/model 的 RelationalEncoder，
-         learning/schema 的维度常量，learning/rl/observation 的 ROLES / GOAL_FIELDS / GOAL_PTRS / CAND_FLOAT，agents/predictors 的 PRED_FIELDS
+         learning/schema 的维度常量，learning/rl/observation 的 ROLES / GOAL_FIELDS / GOAL_PTRS / CAND_FLOAT，agents/predictors 的 PRED_FIELDS，
+         memory/view 的 MEMORY_FIELDS
 [OUTPUT]: 对外提供 CandidateScoringModule（RLlib 新 API 栈的策略/价值网络）、GraphPolicyNet（纯 torch 核心，供模仿学习与游戏内推理复用）
-[POS]: learning/rl 的策略网络：定长观测 → 还原为稀疏批图 → 与动态模型同构的关系编码器（节点再叠加角色标记）→
+[POS]: learning/rl 的策略网络：定长观测 → 还原为稀疏批图 → 与动态模型同构的关系编码器（节点再叠加角色标记与长期记忆摘要）→
        目标槽位编码（目标特征 + 所指实体的节点表示，按掩码汇总）→ 逐候选打分（指针式策略：操作、方式、言语谓词、
        目标/对象/命题主语/命题宾语的节点表示、命题极性、冻结世界模型的预测）；掩码外的空位 logit = -inf；
        价值头只看认知池化与目标汇总
@@ -23,6 +24,7 @@ from tianlong.agents.predictors import PRED_FIELDS
 from tianlong.learning.model import RelationalEncoder
 from tianlong.learning.rl.observation import CAND_FLOAT, GOAL_FIELDS, GOAL_PTRS, ROLES
 from tianlong.learning.schema import N_MANNERS, N_OPS, N_TOPICS
+from tianlong.memory.view import MEMORY_FIELDS
 
 NEG_INF = -1e9
 
@@ -39,6 +41,7 @@ class GraphPolicyNet(nn.Module):
         d = hidden
         self.encoder = RelationalEncoder(d, layers)
         self.role = nn.Linear(len(ROLES), d)
+        self.memory = nn.Linear(len(MEMORY_FIELDS), d)          # 长期记忆摘要注入节点表示
         self.goal = nn.Sequential(nn.Linear(len(GOAL_FIELDS) + len(GOAL_PTRS) * d, d), nn.GELU(), nn.Linear(d, d))
         self.op_emb = nn.Embedding(N_OPS, 16)
         self.manner_emb = nn.Embedding(N_MANNERS, 8)
@@ -57,7 +60,7 @@ class GraphPolicyNet(nn.Module):
         flat_ei = (ei + offset).permute(1, 0, 2).reshape(2, -1)[:, emask.reshape(-1)]
         flat_ea = obs["edge_attr"].reshape(b * obs["edge_attr"].shape[1], -1)[emask.reshape(-1)]
         h = self.encoder(x.reshape(b * n, -1), flat_ei, flat_ea).view(b, n, -1)
-        h = (h + self.role(obs["role"])) * node_mask.unsqueeze(-1)
+        h = (h + self.role(obs["role"]) + self.memory(obs["memory"])) * node_mask.unsqueeze(-1)
         denom = node_mask.sum(1, keepdim=True).clamp(min=1)
         mean = h.sum(1) / denom
         maxed = h.masked_fill(~node_mask.unsqueeze(-1), NEG_INF).max(1).values

@@ -1,10 +1,11 @@
 """
 [INPUT]: 依赖 numpy / gymnasium，learning/featurize 的 featurize / encode_action / GraphTensors，learning/schema 的维度常量，
          cognition 的 BeliefStore / Candidate / belief_view，cognition/goals 的 BeliefReader，core/goals 的 GoalRegistry / GoalMode，
-         agents/predictors 的 Prediction / PRED_FIELDS，core/profiles 的 Profile / GoalKind / Goal
+         agents/predictors 的 Prediction / PRED_FIELDS，core/profiles 的 Profile / GoalKind / Goal，memory/view 的 MemoryView
 [OUTPUT]: 对外提供 ObsSpec、CropReport、Observation、observation_space()、build_observation()、encode_goals()、
           GOAL_KINDS / GOAL_FIELDS / GOAL_PTRS / ROLES / CAND_INT / CAND_FLOAT
-[POS]: learning/rl 的观测契约：个人认知图 + 候选集（完整行动编码，含言语命题）+ 冻结世界模型的预测 + 目标槽位。
+[POS]: learning/rl 的观测契约：个人认知图 + 候选集（完整行动编码，含言语命题）+ 冻结世界模型的预测 + 目标槽位 + 长期记忆摘要
+       （逐节点：被经历提起几次、此人的说法被亲眼证实/证伪几次——来自 memory/view，与线上同一定义）。
        目标槽位带着指向图中实体的指针（寻仇的是谁、护的是谁、东西送给谁）、权重、是否已激活与距激活的时间、了结条件、
        一次性/持续语义、以及角色自己以为的达成状态与进展（BeliefReader，不知道就是 0）——换一个仇人，输入就不同。
        裁剪契约：超预算时先保证自身、目标所指、以及每个保留候选的全部引用都在图里，其余节点按到这些必要节点的跳数入选；
@@ -29,6 +30,7 @@ from tianlong.core.goals import GoalMode, GoalRegistry
 from tianlong.core.profiles import Goal, GoalKind, Profile
 from tianlong.learning.featurize import GraphTensors, encode_action, featurize
 from tianlong.learning.schema import F_EDGE, F_NODE, N_OPS, N_TOPICS
+from tianlong.memory.view import MEMORY_FIELDS, MemoryView
 
 GOAL_KINDS = tuple(GoalKind)
 GOAL_PTRS = ("item", "home", "recipient", "person")
@@ -39,6 +41,7 @@ ROLES = ("self", "goal_item", "goal_place", "goal_recipient", "goal_person", "al
 CAND_INT = ("op", "manner", "target", "obj", "topic_pred", "topic_subj", "topic_val")
 CAND_FLOAT = ("topic_holds", "topic_query")
 WAIT_SCALE = 240.0     # 距目标激活的时间：四个时辰以上视为同等遥远
+MEMORY_SCALE = 5.0     # 记忆计数的尺度：被提起/被证实/被证伪五次以上视为同等
 
 _REGISTRY = GoalRegistry()
 
@@ -81,6 +84,7 @@ def observation_space(spec: ObsSpec) -> gym.spaces.Dict:
         "x": gym.spaces.Box(-1.0, 1.0, (n, F_NODE), f32),
         "node_mask": gym.spaces.Box(0.0, 1.0, (n,), f32),
         "role": gym.spaces.Box(0.0, 1.0, (n, len(ROLES)), f32),
+        "memory": gym.spaces.Box(0.0, 1.0, (n, len(MEMORY_FIELDS)), f32),
         "edge_index": gym.spaces.Box(0.0, float(n - 1), (2, e), f32),
         "edge_attr": gym.spaces.Box(0.0, 1.0, (e, F_EDGE), f32),
         "edge_mask": gym.spaces.Box(0.0, 1.0, (e,), f32),
@@ -191,7 +195,7 @@ def _select(g: GraphTensors, store: BeliefStore, profile: Profile, cands: Sequen
 
 def build_observation(
     store: BeliefStore, now: int, profile: Profile, cands: Sequence[Candidate], preds: Sequence[Prediction],
-    spec: ObsSpec,
+    spec: ObsSpec, memory: MemoryView | None = None,
 ) -> Observation:
     g = featurize(belief_view(store, now))
     nodes, cand_idx, required = _select(g, store, profile, cands, spec)
@@ -238,6 +242,10 @@ def build_observation(
         if ally in index:
             role[index[ally], ROLES.index("ally")] = 1.0
     goal, goal_ptr, goal_mask = encode_goals(store, now, profile, index, spec.max_goals)
+    mem = np.zeros((spec.max_nodes, len(MEMORY_FIELDS)), np.float32)
+    if memory is not None:
+        for eid, i in index.items():
+            mem[i] = np.clip(np.asarray(memory.features(eid), np.float32) / MEMORY_SCALE, 0.0, 1.0)
 
     # ---- 候选：完整行动编码 ----
     kept_cands = tuple(cands[i] for i in cand_idx)
@@ -255,7 +263,7 @@ def build_observation(
         pred[i] = np.clip([getattr(p, f) for f in PRED_FIELDS], 0.0, 1.0)
         mask[i] = 1.0
     report = CropReport(g.num_nodes, n, g.edge_index.shape[1], m, len(cands), len(kept_cands), len(required))
-    obs = {"x": x, "node_mask": node_mask, "role": role, "edge_index": edge_index, "edge_attr": edge_attr,
+    obs = {"x": x, "node_mask": node_mask, "role": role, "memory": mem, "edge_index": edge_index, "edge_attr": edge_attr,
            "edge_mask": edge_mask, "goal": goal, "goal_ptr": goal_ptr, "goal_mask": goal_mask, "cand": cand,
            "cand_flag": flag, "cand_pred": pred, "action_mask": mask}
     return Observation(obs, kept_cands, kept_preds, report)

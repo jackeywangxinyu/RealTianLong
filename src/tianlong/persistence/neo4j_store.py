@@ -186,6 +186,8 @@ class Neo4jWorldStore:
                 tuple(codec.episode_from(e) for e in json.loads(mind["episodes"])),
                 json.loads(mind["trust"]), mind["last_tick"],
                 json.loads(mind.get("surveyed") or "{}"), json.loads(mind.get("searched") or "{}"),
+                tuple(codec.obligation_from(o) for o in json.loads(mind.get("obligations") or "[]")),
+                tuple(codec.said_from(x) for x in json.loads(mind.get("said") or "[]")),
             )
 
         return self._read(tx)
@@ -255,13 +257,15 @@ class Neo4jWorldStore:
             mems = [
                 {"uid": _uid(ref, m.id), "w": ref.world_id, "b": ref.branch_id, "id": m.id, "owner": m.owner,
                  "kind": m.kind, "text": m.text, "occurred_at": m.occurred_at, "known_at": m.known_at,
-                 "source": m.source, "subjects": list(m.subjects), "indexed": False, "who": _uid(ref, m.owner)}
+                 "source": m.source, "subjects": list(m.subjects), "indexed": False, "who": _uid(ref, m.owner),
+                 "informant": m.informant, "verdict": m.verdict}
                 for m in batch.memories
             ]
             t.run("UNWIND $rows AS r MATCH (who:Entity {uid:r.who}) "
                   "CREATE (m:Memory {uid:r.uid, w:r.w, b:r.b, id:r.id, owner:r.owner, kind:r.kind, text:r.text, "
                   "occurred_at:r.occurred_at, known_at:r.known_at, source:r.source, subjects:r.subjects, "
-                  "indexed:false}) CREATE (m)-[:OF]->(who)", rows=mems).consume()
+                  "informant:r.informant, verdict:r.verdict, indexed:false}) CREATE (m)-[:OF]->(who)",
+                  rows=mems).consume()
 
         self._write(tx)
 
@@ -321,13 +325,15 @@ class Neo4jWorldStore:
         agent_uid, mind_uid = _uid(ref, store.owner), _uid(ref, "mind", store.owner)
         t.run("MATCH (a:Entity {uid:$a}) MERGE (m:Mind {uid:$m}) "
               "SET m.w = $w, m.b = $b, m.owner = $o, m.trust = $trust, m.episodes = $eps, m.last_tick = $lt, "
-              "m.surveyed = $sv, m.searched = $sr "
+              "m.surveyed = $sv, m.searched = $sr, m.obligations = $ob, m.said = $sd "
               "MERGE (a)-[:HAS_MIND]->(m) "
               "WITH a, m OPTIONAL MATCH (m)-[k:KNOWS]->() DELETE k "
               "WITH a OPTIONAL MATCH (a)-[bel:BELIEVES]->() DELETE bel",
               a=agent_uid, m=mind_uid, w=ref.world_id, b=ref.branch_id, o=store.owner,
               trust=json.dumps(dict(store.trust)), lt=store.last_tick,
               sv=json.dumps(dict(store.surveyed), sort_keys=True), sr=json.dumps(dict(store.searched), sort_keys=True),
+              ob=json.dumps([codec.obligation_to(o) for o in store.obligations], ensure_ascii=False),
+              sd=json.dumps([codec.said_to(x) for x in store.said], ensure_ascii=False),
               eps=json.dumps([codec.episode_to(e) for e in store.episodes], ensure_ascii=False)).consume()
         known = [{"uid": _uid(ref, sk.id), "sketch": json.dumps(codec.sketch_to(sk), ensure_ascii=False)}
                  for sk in store.entities.values()]
@@ -349,4 +355,4 @@ class Neo4jWorldStore:
     @staticmethod
     def _memory_from(m: Any) -> MemoryRecord:
         return MemoryRecord(m["id"], m["w"], m["b"], m["owner"], m["kind"], m["text"], m["occurred_at"],
-                            m["known_at"], m["source"], tuple(m["subjects"]))
+                            m["known_at"], m["source"], tuple(m["subjects"]), m.get("informant"), m.get("verdict"))

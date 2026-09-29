@@ -97,7 +97,7 @@ def collect(cfg: RolloutConfig) -> Rollouts:
             if rng.random() < cfg.epsilon:
                 cand = _stratified(rng, cands)
             else:
-                preds = tuple(predictor.predict(stores[actor], state.clock, cands, interests))
+                preds = tuple(predictor.predict(stores[actor], state.clock, cands, interests, profile=profile))
                 cand = cands[policy.choose(Situation(actor, profile, stores[actor], state.clock, cands, preds)).index]
             intent = cand.to_intent(make_id("int", sc.world_id, actor, state.version), actor, state.version)
             result = kernel.step(state, [intent])

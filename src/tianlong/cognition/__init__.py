@@ -5,6 +5,7 @@
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
+from tianlong.cognition.agenda import Obligation, Said
 from tianlong.cognition.beliefs import (
     DEFAULT_TRUST,
     FIRSTHAND,
@@ -31,6 +32,6 @@ from tianlong.cognition.view import (
 __all__ = [
     "DEFAULT_TRUST", "FIRSTHAND", "Belief", "BeliefChange", "BeliefStore", "Episode", "confidence_of",
     "effective_confidence",
-    "Candidate", "candidates",
+    "Candidate", "candidates", "Obligation", "Said",
     "EVENT_KIND", "EVENT_RELS", "ONEWAY_TO", "VIEW_RELS", "GraphView", "ViewEdge", "ViewNode", "belief_view", "world_view",
 ]

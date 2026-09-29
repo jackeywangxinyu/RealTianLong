@@ -60,6 +60,7 @@ class RLConfig:
     max_persons: int = 3
     scroll_rate: float = 0.5
     scroll_held: float = 0.0
+    hide_goal_items: float = 0.0   # E04 探查任务：目标物品藏起来的概率
     goals: str = ",".join(ALL_GOALS)
     horizon: int = 30
     # ---- 评测与消融 ----
@@ -69,7 +70,8 @@ class RLConfig:
 
     def task(self) -> TaskConfig:
         return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
-                          self.scroll_held, tuple(g for g in self.goals.split(",") if g), self.horizon)
+                          self.scroll_held, self.hide_goal_items, tuple(g for g in self.goals.split(",") if g),
+                          self.horizon)
 
     def env_config(self) -> dict:
         return {"task": self.task().to_dict(), "seed": self.seed, "predictor_path": self.predictor_path or None,

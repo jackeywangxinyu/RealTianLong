@@ -74,15 +74,18 @@ class ScriptedPolicy(MartialTactics):
     # ------------------------------------------------------------
 
     def _answer_questions(self, sit: Situation) -> Choice | None:
+        """欠着的问题（持久记录，不随经历缓冲滚掉）：问话的人在眼前、自己又知道答案，就如实相告。"""
         b = sit.beliefs
-        for ep in reversed(b.episodes):
-            ev = ep.event
-            if ev.kind != Op.ASK.value or ev.target != sit.agent or sit.now - ep.tick > 2 or ev.topic is None:
+        here = set(self._persons_here(b))
+        for ob in b.obligations:
+            if ob.kind != "answer" or ob.counterpart not in here:
                 continue
-            best = b.best(ev.topic.prop.subject, ev.topic.prop.predicate)
-            if best is not None and ev.actor and not self._said(sit, ev.actor, Fact(best.prop, True)):
-                name = b.sketch(ev.actor).name if b.sketch(ev.actor) else ev.actor
-                return self._pick(sit, f"{name}问我，如实相告", Op.TELL, ev.actor, topic=Fact(best.prop, True))
+            best = b.best(ob.topic.prop.subject, ob.topic.prop.predicate)
+            if best is not None and not self._said(sit, ob.counterpart, Fact(best.prop, True)):
+                name = self._name(b, ob.counterpart)
+                late = "（前番问过）" if sit.now - ob.since > 2 else ""
+                return self._pick(sit, f"{name}问我{late}，如实相告", Op.TELL, ob.counterpart,
+                                  topic=Fact(best.prop, True))
         return None
 
     # ------------------------------------------------------------
@@ -190,7 +193,7 @@ class ScriptedPolicy(MartialTactics):
         if g.item is None:
             return None
         b, me = sit.beliefs, sit.agent
-        loc = b.location_of(g.item)
+        loc = self._whereabouts(sit, g.item)
         if loc == me:
             return None
         if loc is None or believed_place(b, loc) is None:
