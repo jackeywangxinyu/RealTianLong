@@ -13,7 +13,7 @@ tactics.py: MartialTactics 江湖行为积木：服解药自救、为自己与�
 policies.py: ScriptedPolicy 作曲者：自救 → 还手 → 救治 → 回应提问 → 按目标（受时间闸门约束）→ 查探响动 → 等待；不知下落≠丢失，失主讨要、旁人报告、说过不重复；也是 RL 模仿学习的示范者
 npc_graph.py: 单角色 LangGraph 决策图 NpcState/NpcContext/build_npc_graph，checkpoint_serde() 以白名单限制检查点可反序列化的类型
 orchestrator.py: Orchestrator 以 Send 扇出并行运行多个角色的决策图并汇总 Deliberation（意图 + 理由 + 回忆 + 候选数）；决策轨迹每角色每 tick 一条线程，按条数修剪，长局内存有界
-scheduler.py: Scheduler 节流阀，有新经历/手头有事/约定时辰已到/闲置过久才完整决策，其余例行等待
+scheduler.py: Scheduler 节流阀，有新经历/手头有事/约定时辰已到/闲置过久才完整决策，其余例行等待；to_state()/from_state() 以 JSON 兼容形状存取调度标记，随世界提交落库、读档恢复（否则读档那一刻人人“该决策”，调度与连续运行分叉）
 __init__.py: 包入口（langgraph 为可选依赖）
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

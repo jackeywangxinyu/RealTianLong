@@ -1,7 +1,9 @@
 """
-[INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel
-[OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图）及其 revise() 修正规则、effective_confidence()
-[POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异
+[INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel / FrozenMap
+[OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图，三张映射都是 FrozenMap）及其 revise() 修正规则、
+          effective_confidence()
+[POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异。
+       认知只能经 revise() 形成新的一份：拿到 store.beliefs 的调用方改不动它
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -10,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from tianlong.core import EntitySketch, Modality, PerceivedEvent, Percept, Proposition, Rel
+from tianlong.core import EntitySketch, FrozenMap, Modality, PerceivedEvent, Percept, Proposition, Rel
 
 # ============================================================
 #  可信度模型
@@ -85,6 +87,13 @@ class BeliefStore:
     episodes: tuple[Episode, ...] = ()
     trust: Mapping[str, float] = field(default_factory=dict)
     last_tick: int = 0
+
+    def __post_init__(self) -> None:
+        # frozen 只冻住字段指向，冻不住映射内容：三张表一律包成只读快照（已是 FrozenMap 的直接沿用，零拷贝）
+        for name in ("entities", "beliefs", "trust"):
+            value = getattr(self, name)
+            if not isinstance(value, FrozenMap):
+                object.__setattr__(self, name, FrozenMap(value))
 
     # ------------------------------------------------------------
     #  查询：一律排序返回，保证特征构造与候选生成的确定性

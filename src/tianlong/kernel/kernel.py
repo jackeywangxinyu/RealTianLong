@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 core 的 WorldState / Intent / Event / Observation / signature_error，kernel/rules 的规则注册表，
          kernel/perception 的 Witnessing / scene_percept，kernel/invariants 的 assert_invariants
-[OUTPUT]: 对外提供 Kernel（纯函数式结算器）、StepResult
+[OUTPUT]: 对外提供 Kernel（纯函数式结算器）、StepResult、KERNEL_VERSION（规则语义版本，写进存档）
 [POS]: kernel 的心脏：同一版本 → 并行意图 → 统一排序与裁定 → 新版本 + 事件 + 观察。无 IO、无全局随机，可独立回放
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -33,6 +33,10 @@ from tianlong.kernel.perception import Witnessing, make_percept, scene_percept
 from tianlong.kernel.resolution import fail
 from tianlong.kernel.rules import ActionRule, default_rules
 from tianlong.kernel.rules.base import MANNER_INITIATIVE
+
+# 规则语义版本：准入、先手、结算、感知投影任何一处的语义改变都要手动递增。
+# 它随存档写入；读档时不一致即拒绝（除非调用方显式迁移）——旧存档里的事件是按旧规则裁定的
+KERNEL_VERSION = "kernel-v1"
 
 
 @dataclass(frozen=True, slots=True)

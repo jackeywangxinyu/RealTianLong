@@ -1,20 +1,28 @@
 """
-[INPUT]: 依赖 persistence/store 的协议与值对象，core / cognition 的不可变类型
+[INPUT]: 依赖 persistence/store 的协议与值对象，core / cognition 的不可变类型，标准库 json（会话运行态按 JSON 往返存取）
 [OUTPUT]: 对外提供 InMemoryWorldStore
-[POS]: persistence 的内存实现；测试、训练、离线游玩的默认后端。与 Neo4j 实现遵守同一协议，用同一组契约测试验证
+[POS]: persistence 的内存实现；测试、训练、离线游玩的默认后端。与 Neo4j 实现遵守同一协议，用同一组契约测试验证：
+       请求进度与会话运行态随世界提交同一临界区写入，叙述文字经 record_render() 只补写一次
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import Any
 
 from tianlong.cognition import BeliefStore
 from tianlong.core import Event, Observation, WorldState
 from tianlong.core.memories import MemoryRecord
-from tianlong.persistence.store import CommitBatch, UnknownWorld, VersionConflict, WorldRef
+from tianlong.persistence.store import CommitBatch, TurnEnvelope, UnknownWorld, VersionConflict, WorldRef
+
+
+def _json_copy(state: Mapping[str, Any]) -> dict[str, Any]:
+    """会话运行态按 JSON 往返保存：与 Neo4j 后端取回的形状逐字节一致，也拒绝混进不可序列化的对象。"""
+    return json.loads(json.dumps(state, ensure_ascii=False, sort_keys=True))
 
 
 @dataclass
@@ -25,6 +33,9 @@ class _World:
     observations: list[Observation] = field(default_factory=list)
     intent_index: dict[str, Event] = field(default_factory=dict)
     memories: list[MemoryRecord] = field(default_factory=list)
+    requests: dict[str, TurnEnvelope] = field(default_factory=dict)
+    session: dict[str, Any] | None = None
+    versions: dict[str, str] = field(default_factory=dict)
 
 
 class InMemoryWorldStore:
@@ -39,11 +50,12 @@ class InMemoryWorldStore:
     #  生命周期
     # ------------------------------------------------------------
 
-    def create(self, ref: WorldRef, state: WorldState, beliefs: Mapping[str, BeliefStore]) -> None:
+    def create(self, ref: WorldRef, state: WorldState, beliefs: Mapping[str, BeliefStore],
+               versions: Mapping[str, str] | None = None) -> None:
         with self._lock:
             if ref in self._worlds:
                 raise ValueError(f"世界已存在: {ref}")
-            self._worlds[ref] = _World(state, dict(beliefs))
+            self._worlds[ref] = _World(state, dict(beliefs), versions=dict(versions or {}))
 
     def exists(self, ref: WorldRef) -> bool:
         return ref in self._worlds
@@ -76,11 +88,22 @@ class InMemoryWorldStore:
     def recent_memories(self, ref: WorldRef, owner: str, since: int) -> tuple[MemoryRecord, ...]:
         return tuple(m for m in self._world(ref).memories if m.owner == owner and m.known_at >= since)
 
+    def request(self, ref: WorldRef, request_id: str) -> TurnEnvelope | None:
+        return self._world(ref).requests.get(request_id)
+
+    def session_state(self, ref: WorldRef) -> Mapping[str, Any] | None:
+        s = self._world(ref).session
+        return None if s is None else _json_copy(s)
+
+    def save_versions(self, ref: WorldRef) -> Mapping[str, str]:
+        return dict(self._world(ref).versions)
+
     # ------------------------------------------------------------
     #  写
     # ------------------------------------------------------------
 
     def commit(self, batch: CommitBatch) -> None:
+        session = None if batch.session_state is None else _json_copy(batch.session_state)
         with self._lock:
             w = self._world(batch.ref)
             if w.head.version != batch.expected_version:
@@ -96,6 +119,23 @@ class InMemoryWorldStore:
             w.memories.extend(batch.memories)
             for m in batch.memories:
                 self._pending[m.id] = m
+            if batch.request is not None:
+                # 叙述只由 record_render 写：提交整份替换进度，但保留已落库的文字
+                prior = w.requests.get(batch.request.request_id)
+                w.requests[batch.request.request_id] = replace(
+                    batch.request, narration=prior.narration if prior else None)
+            if session is not None:
+                w.session = session
+
+    def record_render(self, ref: WorldRef, request_id: str, narration: str) -> None:
+        """幂等：第一次写入的叙述为准，重试不改写；请求不存在是调用方的错。"""
+        with self._lock:
+            w = self._world(ref)
+            env = w.requests.get(request_id)
+            if env is None:
+                raise KeyError(f"未知请求: {request_id}")
+            if env.narration is None:
+                w.requests[request_id] = replace(env, narration=narration)
 
     # ------------------------------------------------------------
     #  outbox

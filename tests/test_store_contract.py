@@ -1,6 +1,7 @@
 """
-[INPUT]: 依赖 tianlong.persistence 的 InMemoryWorldStore / Neo4jWorldStore / net_relation_diff，tianlong.runtime.authority
-[OUTPUT]: WorldStore 契约测试：两种后端跑同一组断言——往返一致、幂等、版本冲突、outbox、跨后端确定性
+[INPUT]: 依赖 tianlong.persistence 的 InMemoryWorldStore / Neo4jWorldStore / net_relation_diff / TurnEnvelope，tianlong.runtime.authority
+[OUTPUT]: WorldStore 契约测试：两种后端跑同一组断言——往返一致、幂等、版本冲突、outbox、跨后端确定性、
+          请求进度与会话运行态随提交同事务落库、叙述只补写一次、存档版本往返
 [POS]: tests 的持久化层；Neo4j 用例在 NEO4J_URI 不可达时自动跳过
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -15,7 +16,7 @@ import pytest
 
 from tianlong.cognition import BeliefStore
 from tianlong.core import Intent, Op, Rel, Relation
-from tianlong.persistence import CommitBatch, InMemoryWorldStore, VersionConflict
+from tianlong.persistence import CommitBatch, InMemoryWorldStore, TurnEnvelope, VersionConflict
 from tianlong.runtime.authority import WorldAuthority
 from tianlong.scenarios import build_warehouse
 
@@ -53,9 +54,9 @@ def store(request):
     s.close()
 
 
-def found(store):
+def found(store, versions=None):
     sc = replace(build_warehouse(), world_id=f"t-{uuid.uuid4().hex[:8]}")
-    auth = WorldAuthority.found(store, sc)
+    auth = WorldAuthority.found(store, sc, versions=versions)
     if hasattr(store, "created"):
         store.created.append(auth.ref)
     return sc, auth
@@ -120,3 +121,32 @@ def test_net_relation_diff_folds_chains():
     removed, added = net_relation_diff(changes)
     assert removed == {Relation("key", Rel.AT, "table")}
     assert added == {Relation("key", Rel.AT, "guard")}
+
+
+def test_request_progress_and_session_state_ride_the_commit(store):
+    versions = {"save": "save-v2", "kernel": "kernel-v1"}
+    _, auth = found(store, versions)
+    assert store.save_versions(auth.ref) == versions
+    assert store.request(auth.ref, "r1") is None and store.session_state(auth.ref) is None
+    it = Intent("r1-t0", "player", Op.TAKE, "key", based_on=0)
+    seen = {}
+
+    def annotate(s):
+        mine = tuple(o.percept for o in s.observations_of("player"))
+        seen["env"] = TurnEnvelope("r1", "h1", it, 2, 0, 0, (s.state.version,), (s.state.clock,), mine, ("key",))
+        return seen["env"], {"scheduler": {"guard": [480, True]}, "described": ["key"]}
+
+    auth.settle([it], annotate)
+    assert store.request(auth.ref, "r1") == seen["env"], "感知、意图与进度逐字段往返"
+    assert store.session_state(auth.ref) == {"scheduler": {"guard": [480, True]}, "described": ["key"]}
+    store.record_render(auth.ref, "r1", "你拿起钥匙")
+    store.record_render(auth.ref, "r1", "另一种说法")
+    assert store.request(auth.ref, "r1").narration == "你拿起钥匙", "叙述只补写一次"
+    with pytest.raises(KeyError):
+        store.record_render(auth.ref, "nope", "……")
+    # 下一次提交整份替换进度，但不抹掉已落库的叙述；不带附注的提交不动会话运行态
+    done = replace(seen["env"], done=True)
+    head = auth.head()
+    auth.settle([Intent("r1-t1", "player", Op.WAIT, based_on=head.version)], lambda s: (done, None))
+    assert store.request(auth.ref, "r1") == replace(done, narration="你拿起钥匙")
+    assert store.session_state(auth.ref) == {"scheduler": {"guard": [480, True]}, "described": ["key"]}

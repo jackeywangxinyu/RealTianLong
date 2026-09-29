@@ -1,6 +1,7 @@
 """
-[INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode
-[OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode）
+[INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode，persistence/store 的 TurnEnvelope
+[OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode /
+          envelope 请求进度）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -30,6 +31,7 @@ from tianlong.core import (
     RemoveRelation,
     SetAttr,
 )
+from tianlong.persistence.store import TurnEnvelope
 
 J = dict[str, Any]
 
@@ -158,3 +160,22 @@ def episode_from(d: J) -> Episode:
     ev = pevent_from(d["event"])
     assert ev is not None
     return Episode(int(d["tick"]), Modality(d["modality"]), ev, d.get("informant"))
+
+
+# ============================================================
+#  请求进度：叙述文字不进这份 JSON，由 record_render 单独补写
+# ============================================================
+
+
+def envelope_to(e: TurnEnvelope) -> J:
+    return {"request_id": e.request_id, "payload_hash": e.payload_hash, "intent": intent_to(e.intent),
+            "planned_ticks": e.planned_ticks, "start_version": e.start_version, "start_clock": e.start_clock,
+            "versions": list(e.versions), "ticks": list(e.ticks), "percepts": [percept_to(p) for p in e.percepts],
+            "fresh": list(e.fresh), "done": e.done, "source": e.source}
+
+
+def envelope_from(d: J, narration: str | None = None) -> TurnEnvelope:
+    return TurnEnvelope(d["request_id"], d["payload_hash"], intent_from(d["intent"]), int(d["planned_ticks"]),
+                        int(d["start_version"]), int(d["start_clock"]), tuple(int(v) for v in d["versions"]),
+                        tuple(int(t) for t in d["ticks"]), tuple(percept_from(p) for p in d["percepts"]),
+                        tuple(d["fresh"]), bool(d["done"]), d.get("source", "rules"), narration)

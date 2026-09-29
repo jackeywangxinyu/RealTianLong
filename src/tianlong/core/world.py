@@ -1,7 +1,9 @@
 """
-[INPUT]: 依赖 core/entities 的 Entity / Relation，core/changes 的 Change 族，core/schema 的 Kind / Rel，core/ids 的 digest
-[OUTPUT]: 对外提供 WorldState（不可变实际世界图）、ChangeConflict 异常
-[POS]: core 的“唯一真相”数据结构；只有 kernel 产生的变化能经由 apply() 形成新版本，persistence 负责持久化它
+[INPUT]: 依赖 core/entities 的 Entity / Relation，core/changes 的 Change 族，core/schema 的 Kind / Rel，core/ids 的 digest，
+         core/frozen 的 FrozenMap
+[OUTPUT]: 对外提供 WorldState（不可变实际世界图，实体表与内部邻接索引都是 FrozenMap）、ChangeConflict 异常
+[POS]: core 的“唯一真相”数据结构；只有 kernel 产生的变化能经由 apply() 形成新版本，persistence 负责持久化它。
+       快照连内容也不可变：拿到 state.entities 的调用方改不动它，想改只能 dict() 拷一份再走 apply()
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -14,6 +16,7 @@ from typing import Any
 
 from tianlong.core.changes import AddRelation, Change, RemoveRelation, SetAttr
 from tianlong.core.entities import Entity, Relation
+from tianlong.core.frozen import FrozenMap
 from tianlong.core.ids import digest
 from tianlong.core.schema import Kind, Rel
 
@@ -25,6 +28,7 @@ class ChangeConflict(Exception):
 # ============================================================
 #  WorldState
 #  - 不可变：所有角色基于同一版本观察，结算基于同一版本裁定
+#  - 连内容也不可变：entities 与内部邻接索引包成 FrozenMap，frozen dataclass 冻不住的“字段里那个 dict”也封死
 #  - 查询一律返回排序后的元组：frozenset 的迭代顺序随进程哈希种子变化，
 #    任何“遍历集合”的地方都可能破坏回放确定性，所以在 API 层根除
 # ============================================================
@@ -37,17 +41,19 @@ class WorldState:
     clock: int
     entities: Mapping[str, Entity]
     relations: frozenset[Relation]
-    _out: dict[tuple[str, Rel], tuple[str, ...]] = field(init=False, repr=False, compare=False)
-    _in: dict[tuple[str, Rel], tuple[str, ...]] = field(init=False, repr=False, compare=False)
+    _out: Mapping[tuple[str, Rel], tuple[str, ...]] = field(init=False, repr=False, compare=False)
+    _in: Mapping[tuple[str, Rel], tuple[str, ...]] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.entities, FrozenMap):
+            object.__setattr__(self, "entities", FrozenMap(self.entities))
         out: dict[tuple[str, Rel], list[str]] = defaultdict(list)
         inn: dict[tuple[str, Rel], list[str]] = defaultdict(list)
         for r in self.relations:
             out[(r.src, r.type)].append(r.dst)
             inn[(r.dst, r.type)].append(r.src)
-        object.__setattr__(self, "_out", {k: tuple(sorted(v)) for k, v in out.items()})
-        object.__setattr__(self, "_in", {k: tuple(sorted(v)) for k, v in inn.items()})
+        object.__setattr__(self, "_out", FrozenMap({k: tuple(sorted(v)) for k, v in out.items()}))
+        object.__setattr__(self, "_in", FrozenMap({k: tuple(sorted(v)) for k, v in inn.items()}))
 
     # ------------------------------------------------------------
     #  构造

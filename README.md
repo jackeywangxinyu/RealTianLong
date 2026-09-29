@@ -20,7 +20,7 @@ cognition/BeliefStore ◀── 感知折叠 ◀── runtime/WorldAuthority（
           │                                   ├─▶ persistence（内存 / Neo4j）：世界、事件、观察、命题与信念、outbox
           │                                   └─▶ memory/indexer ─▶ Qdrant（派生数据，可重建）
           ▼
-language/narrator：只把玩家本回合的感知写成文字
+language/narrator：只把玩家本回合的感知写成文字，过语义闸门才展示
 ```
 
 | 组件 | 选型 | 职责 | 刻意不承担 |
@@ -31,7 +31,7 @@ language/narrator：只把玩家本回合的感知写成文字
 | 多智能体框架 | LangGraph（`agents/`） | 单角色决策图 + `Send` 扇出并行编排 | 用“讨论结果”替代世界规则 |
 | 向量数据库 | Qdrant（`memory/`） | 按语义检索本人有权回忆的经历（服务端强制过滤） | 裁定物品当前位置 |
 | 强化学习 | RLlib（`learning/rl/`） | 模仿学习初始化 + PPO，所有角色共享参数、各自观测 | 游玩中临时重训 |
-| LLM | Gemini（`language/`） | 输入解析、对白润色、叙述润色；失败即回退模板 | 裁定事实、越过认知边界 |
+| LLM | Gemini（`language/`） | 输入解析、对白润色、叙述润色；失败或未过语义闸门即回退模板 | 裁定事实、越过认知边界 |
 
 ## 快速开始
 
@@ -165,5 +165,9 @@ pytest -m slow                          # PPO 冒烟
 | 同意 ≠ 发生 | 智能体只产出意图，`WorldAuthority` 唯一提交 | `test_rl.py`、`test_agents.py` |
 | 相同存档 + 行动 → 相同结果 | blake2b 派生 ID 与种子，纯函数内核 | `test_acceptance_warehouse.py`、`test_store_contract.py`（跨后端指纹一致） |
 | 重试不二次结算 | 意图 ID 由 (世界, 分支, 角色, 版本) 派生 | `test_acceptance_warehouse.py`、`test_agents.py` |
+| 文字 ≠ 事实 | `language/render.py` RenderPlan + 确定性词法闸门：清单外实体、状态升级、瞬移、物品复制、编造承诺、传闻去归属一律回退模板；世界结算与文字结果分开记录 | `test_render_gate.py`（L01–L02：合法修辞放行，每类错误各被拦下） |
+| 快照不可变 | `core/frozen.py` FrozenMap：世界与认知快照里的映射封死就地修改，仍可 pickle / JSON | `test_resume.py`（R01） |
+| 读档等价 | 调度标记与已描写实体随世界提交落库、读档恢复；存档记下规则/属性/目标版本，不符即拒绝，迁移须显式 | `test_resume.py`（R02：内存与 Neo4j，连续运行 vs 中途读档，事件/调度/认知/叙述逐项一致） |
+| 请求幂等 | `TurnEnvelope` 以 request_id + 原文摘要绑定、与世界同事务落库；叙述幂等补写 | `test_resume.py`（R03–R04：故障注入后重试不二次结算，多 tick 等待只走剩下的；同 ID 异内容冲突）、`test_store_contract.py` |
 
 项目地图见 [`CLAUDE.md`](CLAUDE.md)，每个模块目录下都有自己的 `CLAUDE.md`。

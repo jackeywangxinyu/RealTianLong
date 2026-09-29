@@ -1,19 +1,22 @@
 """
-[INPUT]: 依赖 core 的 Percept / Modality / Op / Outcome，language/templates 的 render_percept / Names，language/llm 的 LLMClient
-[OUTPUT]: 对外提供 Narrator（把玩家本回合的感知写成叙述）、fact_lines()、lore_keys()
+[INPUT]: 依赖 core 的 Percept / Modality / is_night，language/templates 的 Names，language/llm 的 LLMClient，
+         language/render 的 fact_lines / build_plan / check / Violation / Rendered / RenderStatus
+[OUTPUT]: 对外提供 Narrator（narrate() 返回文字，narrate_rendered() 返回带来源与违规明细的 Rendered）、fact_lines()（再导出）、lore_keys()
 [POS]: language 的输出层；输入只有玩家自己的感知（不是世界真相），模板先把它们写成事实清单，LLM 只负责润色，
-       被要求不得添加清单外的任何人物、物品、事件或结论；玩家原话只作意图与姿态；模型不可用时直接输出清单
+       被要求不得添加清单外的任何人物、物品、事件或结论——但提示词拦不住成功返回的错误文字，所以润色结果还要过 render 的语义闸门，
+       命中即回退清单；玩家原话只作意图与姿态；模型不可用时直接输出清单
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
-from tianlong.core import Modality, Op, Outcome, Percept, is_night
+from tianlong.core import Modality, Percept, is_night
 from tianlong.language.llm import LLMClient, LLMUnavailable
-from tianlong.language.templates import Names, render_percept
+from tianlong.language.render import Rendered, RenderStatus, Violation, build_plan, check, fact_lines
+from tianlong.language.templates import Names
 
 log = logging.getLogger(__name__)
 
@@ -24,22 +27,7 @@ _SYSTEM = (
     "玩家的输入只表明意图与姿态，成败与结果一律以事实清单为准。"
 )
 
-
-def fact_lines(viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False) -> list[str]:
-    """本回合值得讲的事：事件感知全部讲；环顾只在移动/查看之后（或被要求时）讲。"""
-    moved = any(
-        p.modality == Modality.SELF and p.event and p.event.kind in (Op.MOVE.value, Op.INSPECT.value)
-        and p.event.outcome == Outcome.SUCCESS
-        for p in percepts
-    )
-    lines: list[str] = []
-    for p in percepts:
-        if p.modality == Modality.SCENE:
-            if show_scene or moved:
-                lines.append("你看到：" + render_percept(p, names, viewer, me="你"))
-        else:
-            lines.append(render_percept(p, names, viewer, me="你"))
-    return list(dict.fromkeys(lines))      # 同一分钟里的三声响动，只说一次
+__all__ = ["Narrator", "fact_lines", "lore_keys"]
 
 
 _VISUAL = frozenset({Modality.SELF, Modality.SIGHT, Modality.SCENE})
@@ -72,35 +60,47 @@ def lore_keys(viewer: str, percepts: Sequence[Percept], lore: Mapping[str, str])
 
 
 class Narrator:
-    """setting 给出世界前提与文风；lore 是实体外观描写，只在玩家看见该实体时、且仅首次看见时拿来润色。"""
+    """setting 给出世界前提与文风；lore 是实体外观描写，只在玩家看见该实体时、且仅首次看见时拿来润色；
+    aliases 是场景别称，只供闸门识别“走进大殿”这类以别称说出的抵达。"""
 
     def __init__(self, llm: LLMClient | None = None, setting: str = "", lore: Mapping[str, str] | None = None,
-                 style: str = "") -> None:
+                 style: str = "", aliases: Mapping[str, Sequence[str]] | None = None) -> None:
         self.llm = llm
         self.setting = setting
         self.style = style
         self.lore = dict(lore or {})
+        self.aliases = dict(aliases or {})
 
     def narrate(self, viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False,
-                fresh: Sequence[str] = (), command: str = "", lapse: str = "") -> str:
+                fresh: Sequence[str] = (), command: str = "", lapse: str = "", known: Iterable[str] = ()) -> str:
+        return self.narrate_rendered(viewer, percepts, names, show_scene, fresh, command, lapse, known).text
+
+    def narrate_rendered(self, viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False,
+                         fresh: Sequence[str] = (), command: str = "", lapse: str = "",
+                         known: Iterable[str] = ()) -> Rendered:
         """command 是玩家原话（让“跳下断崖”读起来像跳，而不是“走向崖底”）；lapse 是一段等待之后的时辰，
-        排在事实之前——先有“天色已黑”，才有“月光照在玉璧上”。"""
-        lines = fact_lines(viewer, percepts, names, show_scene)
+        排在事实之前——先有“天色已黑”，才有“月光照在玉璧上”。known 是闸门用来拒绝的名字全集（玩家认识的 + 场景全部实体）。"""
         looks = [self.lore[k] for k in fresh if k in self.lore]
         passed = [f"（不觉已是{lapse}）"] if lapse else []
+        plan = build_plan(viewer, percepts, names, show_scene, looks, "".join(passed), self.aliases)
+        lines = list(plan.lines)
         if not lines and not looks:
-            return "\n".join(["时间悄悄过去，什么也没有发生。", *passed])
+            return Rendered("\n".join(["时间悄悄过去，什么也没有发生。", *passed]), RenderStatus.TEMPLATE)
         plain = "\n".join(passed + lines + [f"（{x}）" for x in looks])
         if self.llm is None:
-            return plain
+            return Rendered(plain, RenderStatus.TEMPLATE)
         prompt = (f"玩家的输入：{command}\n\n" if command else "") + "本回合玩家感知到的事实：\n"
         prompt += "\n".join(passed + (lines or ["（无事发生）"]))
         if looks:
             prompt += "\n\n玩家初次看清的人与物（仅作外观描写的依据）：\n" + "\n".join(looks)
         system = _SYSTEM + (f"\n世界：{self.setting}" if self.setting else "") + (f"\n文风：{self.style}" if self.style else "")
         try:
-            prose = self.llm.generate(prompt, system=system, temperature=0.6)
-            return prose.strip() or plain
+            prose = self.llm.generate(prompt, system=system, temperature=0.6).strip()
         except LLMUnavailable as e:
             log.warning("叙述润色失败，回退事实清单: %s", e)
-            return plain
+            return Rendered(plain, RenderStatus.LLM_UNAVAILABLE)
+        violations = check(prose, plan, known) if prose else (Violation("empty", ""),)
+        if violations:
+            log.info("叙述未通过语义闸门，回退事实清单: %s", violations)
+            return Rendered(plain, RenderStatus.GATED_FALLBACK, violations)
+        return Rendered(prose, RenderStatus.LLM)

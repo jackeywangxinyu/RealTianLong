@@ -1,8 +1,9 @@
 """
-[INPUT]: 依赖 kernel 的 Kernel，persistence 的 WorldStore / CommitBatch / WorldRef，cognition 的 BeliefStore / BeliefChange，
+[INPUT]: 依赖 kernel 的 Kernel，persistence 的 WorldStore / CommitBatch / WorldRef / TurnEnvelope，cognition 的 BeliefStore / BeliefChange，
          memory/records 的 records_for，scenarios 的 Scenario，core 的 Intent / Event / Observation
-[OUTPUT]: 对外提供 WorldAuthority（每个世界实例唯一的权威写入器，含 found() 建世界）、Settlement（一次结算的结果）
-[POS]: runtime 的写入闸口：意图 → 内核裁定 → 认知折叠 → 经历提炼 → 一次原子提交。
+[OUTPUT]: 对外提供 WorldAuthority（每个世界实例唯一的权威写入器，含 found() 建世界并记下存档版本）、Settlement（一次结算的结果）、
+          Annotate（提交前由调用方附上请求进度与会话运行态的钩子）
+[POS]: runtime 的写入闸口：意图 → 内核裁定 → 认知折叠 → 经历提炼 → 附注（请求进度 + 会话运行态）→ 一次原子提交。
        角色决策可以并行，事实提交只在这里串行发生；重复提交同一意图返回既有结果，绝不二次扣钱或移动物品
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -11,15 +12,16 @@ from __future__ import annotations
 
 import threading
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from tianlong.cognition import BeliefChange, BeliefStore
 from tianlong.core import Event, Intent, Observation, WorldState
 from tianlong.core.memories import MemoryRecord
 from tianlong.kernel import Kernel
 from tianlong.memory.records import records_for
-from tianlong.persistence import CommitBatch, WorldRef, WorldStore
+from tianlong.persistence import CommitBatch, TurnEnvelope, WorldRef, WorldStore
 from tianlong.scenarios import Scenario
 
 
@@ -36,6 +38,10 @@ class Settlement:
         return tuple(o for o in self.observations if o.observer == agent)
 
 
+# 提交前的附注：看到本次结算（尚未落库）后，给出随同一事务写入的请求进度与会话运行态（任一可为 None）
+Annotate = Callable[[Settlement], tuple[TurnEnvelope | None, Mapping[str, Any] | None]]
+
+
 class WorldAuthority:
     def __init__(self, store: WorldStore, ref: WorldRef, kernel: Kernel | None = None) -> None:
         self.store = store
@@ -45,20 +51,21 @@ class WorldAuthority:
 
     @classmethod
     def found(cls, store: WorldStore, scenario: Scenario, branch_id: str = "main",
-              kernel: Kernel | None = None) -> WorldAuthority:
-        """建立世界：初始认知由场景给出的“过去的感知”折叠而成。"""
+              kernel: Kernel | None = None, versions: Mapping[str, str] | None = None) -> WorldAuthority:
+        """建立世界：初始认知由场景给出的“过去的感知”折叠而成；versions 记下建档时的存档/规则/属性/目标版本。"""
         ref = WorldRef(scenario.world_id, branch_id)
         beliefs = {
             a: BeliefStore(a, trust=dict(p.trust)).revise_all(scenario.priors.get(a, ()))[0]
             for a, p in scenario.profiles.items()
         }
-        store.create(ref, scenario.state, beliefs)
+        store.create(ref, scenario.state, beliefs, versions)
         return cls(store, ref, kernel)
 
     def head(self) -> WorldState:
         return self.store.head(self.ref)
 
-    def settle(self, intents: Sequence[Intent]) -> Settlement:
+    def settle(self, intents: Sequence[Intent], annotate: Annotate | None = None) -> Settlement:
+        """annotate 在提交前被调用一次（重放时不调用）：它返回的请求进度与会话运行态与世界变化同一事务落库。"""
         with self._lock:
             # ---- 1. 幂等：已结算过的意图直接返回既有事件 ----
             prior = {it.id: self.store.event_for_intent(self.ref, it.id) for it in intents}
@@ -88,8 +95,11 @@ class WorldAuthority:
                 beliefs[agent] = store
                 changes[agent] = tuple(agent_changes)
 
-            # ---- 4. 一次原子提交 ----
+            # ---- 4. 附注 + 一次原子提交 ----
+            settlement = Settlement(result.state, done + result.events, result.observations, changes, tuple(memories))
+            request, session_state = annotate(settlement) if annotate is not None else (None, None)
             self.store.commit(CommitBatch(
-                self.ref, state.version, result.state, result.events, result.observations, beliefs, tuple(memories)
+                self.ref, state.version, result.state, result.events, result.observations, beliefs, tuple(memories),
+                request, session_state,
             ))
-            return Settlement(result.state, done + result.events, result.observations, changes, tuple(memories))
+            return settlement
