@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 langgraph 的 StateGraph / Runtime / InMemorySaver / JsonPlusSerializer，agents 的 port（含长期记忆摘要）/ policies / predictors，
          cognition 的 candidates，language/speaker 的 Speaker，language/templates 的 render_experience
-[OUTPUT]: 对外提供 NpcState、NpcContext、build_npc_graph()、checkpoint_serde()
+[OUTPUT]: 对外提供 NpcState、NpcContext（可带主角 player，转交 Situation）、build_npc_graph()、checkpoint_serde()
 [POS]: agents 的单角色决策流程：观察 → 回忆 → 形成候选 → 预测后果 → 选择 → 表达 → 提交意图。
        依赖通过 LangGraph runtime context 注入（不进检查点）；检查点只保存本次决策的轨迹，不是世界状态
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -47,6 +47,7 @@ class NpcContext:
     predictor: OutcomePredictor = field(default_factory=HeuristicPredictor)
     speaker: Speaker = field(default_factory=TemplateSpeaker)
     max_candidates: int = 64
+    player: str | None = None      # 主角是谁（公开身份）：交给 Situation.player，搭话与见义出声以他为准
 
     def interests(self) -> list[str]:
         return list(self.port.profile.interests())
@@ -57,6 +58,7 @@ def checkpoint_serde() -> JsonPlusSerializer:
     return JsonPlusSerializer(allowed_msgpack_modules=[
         ("tianlong.core.schema", "Op"),
         ("tianlong.core.schema", "Manner"),
+        ("tianlong.core.schema", "Social"),
         ("tianlong.core.propositions", "Proposition"),
         ("tianlong.core.propositions", "Fact"),
         ("tianlong.core.events", "Intent"),
@@ -114,6 +116,7 @@ def decide(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
         tuple(state["candidates"]), tuple(state["predictions"]),
         tuple(state.get("recent", [])) + tuple(state.get("related", [])),
         ctx.port.memory() if ctx.port.memory is not None else None,
+        player=ctx.player,
     )
     choice = ctx.policy.choose(sit)
     chosen = choice.chosen(state["candidates"])       # 越界或不合规的 free 在这里抛错

@@ -1,16 +1,19 @@
 """
-[INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode / Obligation / Said，persistence/store 的 TurnEnvelope
+[INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode / Obligation / Said / SocialCue，persistence/store 的 TurnEnvelope
 [OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode /
-          obligation / said / envelope 请求进度）
+          obligation（待答与待回话，命题可缺）/ said（闲话无命题、带言语行为）/ cue 社交线索 / attitudes 态度 / envelope 请求进度）；
+          旧记录缺新键时取缺省（言语行为为无、态度为空）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from tianlong.cognition import Belief, Episode, Obligation, Said
+from tianlong.cognition.agenda import SocialCue
 from tianlong.core import (
     AddRelation,
     Change,
@@ -169,23 +172,37 @@ def episode_from(d: J) -> Episode:
 
 
 def obligation_to(o: Obligation) -> J:
-    return {"kind": o.kind, "counterpart": o.counterpart, "topic": fact_to(o.topic), "since": o.since}
+    return {"kind": o.kind, "counterpart": o.counterpart, "topic": fact_to(o.topic), "since": o.since,
+            "social": o.social.value if o.social else None}
 
 
 def obligation_from(d: J) -> Obligation:
-    topic = fact_from(d["topic"])
-    assert topic is not None
-    return Obligation(d["kind"], d["counterpart"], topic, int(d["since"]))
+    return Obligation(d["kind"], d["counterpart"], fact_from(d.get("topic")), int(d["since"]), _social(d.get("social")))
 
 
 def said_to(s: Said) -> J:
-    return {"listener": s.listener, "fact": fact_to(s.fact), "tick": s.tick}
+    return {"listener": s.listener, "fact": fact_to(s.fact), "tick": s.tick, "social": s.social.value if s.social else None}
 
 
 def said_from(d: J) -> Said:
-    fact = fact_from(d["fact"])
-    assert fact is not None
-    return Said(d["listener"], fact, int(d["tick"]))
+    return Said(d["listener"], fact_from(d.get("fact")), int(d["tick"]), _social(d.get("social")))
+
+
+def cue_to(c: SocialCue) -> J:
+    return {"frm": c.frm, "op": c.op.value, "social": c.social.value if c.social else None, "tick": c.tick,
+            "utterance": c.utterance, "to": c.to}
+
+
+def cue_from(d: J) -> SocialCue:
+    return SocialCue(d["frm"], Op(d["op"]), _social(d.get("social")), int(d["tick"]), d.get("utterance"), d.get("to"))
+
+
+def attitudes_to(a: Mapping[str, int]) -> J:
+    return {k: int(v) for k, v in sorted(a.items())}
+
+
+def attitudes_from(d: J | None) -> dict[str, int]:
+    return {str(k): int(v) for k, v in (d or {}).items()}      # 旧存档没有态度：空
 
 
 # ============================================================

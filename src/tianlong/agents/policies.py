@@ -1,10 +1,16 @@
 """
-[INPUT]: 依赖 agents/policy_kit 的 Situation / Choice / Policy / PolicyKit，agents/tactics 的 MartialTactics，
-         cognition/navigation 的 believed_place，cognition/goals 的 BeliefReader，core/goals 的 GoalRegistry，
-         core 的 Op / Manner / Rel / Kind / Modality / Fact / Proposition，core/profiles 的 Goal / GoalKind
-[OUTPUT]: 对外提供 ScriptedPolicy（角色条件化的规则策略），并再导出 Situation / Choice / Policy
-[POS]: agents 的决策作曲者：自救 → 还手 → 救治盟友 → 回应提问 → 按目标（守护/获取/递送/守地/寻仇/灭口/护人，受时间闸门约束）→
-       查探响动 → 等待。目标所需的东西或人下落不明时，凭自己的地图与勘察记录去找（而不是原地干等）；
+[INPUT]: 依赖 agents/policy_kit 的 Situation / Choice / Policy / PolicyKit，agents/tactics 的 MartialTactics / reply_act / HOT / DEFIANT_SOCIAL，
+         cognition/navigation 的 believed_place，cognition/agenda 的 REPLY_TTL，cognition/goals 的 BeliefReader，core/goals 的 GoalRegistry，
+         core 的 Op / Manner / Rel / Kind / Modality / Fact / Proposition / Social / HOSTILE_SOCIAL / derive_seed，core/profiles 的 Goal / GoalKind
+[OUTPUT]: 对外提供 ScriptedPolicy（角色条件化的规则策略）、CHAT_COOLDOWN，并再导出 Situation / Choice / Policy
+[POS]: agents 的决策作曲者：自救 → 还手 → 救治盟友 → 回话 → 回应提问 → 按目标（守护/获取/递送/守地/寻仇（先礼后兵）/灭口/护人，
+       受时间闸门约束）→ 见义出声 → 闲谈 → 查探响动 → 等待。
+       回话按性情 × 态度 × 对方的言语行为选言语行为（reply_act；火爆且积怨已深者被骂即动手），对方是在回我的话就到此为止（主角除外），
+       寻仇对象的话留给先礼后兵、闯入者的顶撞留给守卫；
+       被问到的事知道就如实相告，不知道就说不知道（不带命题的 EXPLAIN）并勾销，而不是永远沉默；
+       话多的角色在主角（或眼前的人）身边按 (角色, tick) 派生的确定性闸门搭话，头一回见礼、此后说笑，有冷却。
+       开口只是修辞（Choice.free，index 指向 WAIT）：只认下标的学习层看到的是等待。
+       目标所需的东西或人下落不明时，凭自己的地图与勘察记录去找（而不是原地干等）；
        等待带结构化原因（没事可做/目标未到时辰/自以为已达成/不知道而卡住/没有可行候选/找不到动作）。
        它是阶段 A 的初始策略，也是阶段 C 模仿学习的示范者；RL 策略实现同一协议即可替换
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -12,19 +18,33 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 
 from tianlong.agents.policy_kit import Choice, Policy, Situation
-from tianlong.agents.tactics import MartialTactics
+from tianlong.agents.tactics import DEFIANT_SOCIAL, HOT, MartialTactics, reply_act
+from tianlong.cognition.agenda import REPLY_TTL
 from tianlong.cognition.goals import BeliefReader
 from tianlong.cognition.navigation import believed_place
-from tianlong.core import Fact, Kind, Manner, Modality, Op, Proposition, Rel
+from tianlong.core import (
+    HOSTILE_SOCIAL,
+    Fact,
+    Kind,
+    Manner,
+    Modality,
+    Op,
+    Proposition,
+    Rel,
+    Social,
+    derive_seed,
+)
 from tianlong.core.goals import GoalRegistry
 from tianlong.core.profiles import Goal, GoalKind
 
 _REGISTRY = GoalRegistry()
+CHAT_COOLDOWN = 6        # 对同一个人（没有主角时：对任何人）搭过话之后，多少个 tick 内不再找话说
 
-__all__ = ["Choice", "Policy", "ScriptedPolicy", "Situation"]
+__all__ = ["CHAT_COOLDOWN", "Choice", "Policy", "ScriptedPolicy", "Situation"]
 
 
 # ============================================================
@@ -36,10 +56,10 @@ __all__ = ["Choice", "Policy", "ScriptedPolicy", "Situation"]
 class ScriptedPolicy(MartialTactics):
     def choose(self, sit: Situation) -> Choice:
         steps: list[Callable[[Situation], Choice | None]] = [
-            self._cure_self, self._retaliate, self._heal_allies, self._answer_questions,
+            self._cure_self, self._retaliate, self._heal_allies, self._reply, self._answer_questions,
         ]
         steps += [self._goal_step(g) for g in sit.profile.goals if g.active(sit.now)]
-        steps += [self._investigate_noise]
+        steps += [self._witness, self._chatter, self._investigate_noise]
         for step in steps:
             choice = step(sit)
             if choice is not None:
@@ -70,23 +90,99 @@ class ScriptedPolicy(MartialTactics):
         return any(x is not None and believed_place(b, x) is None for x in (g.item, g.person, g.recipient))
 
     # ------------------------------------------------------------
-    #  回应提问：如实说出自己最相信的下落
+    #  回话：被当面搭话，按性情 × 态度 × 对方的言语行为回一句
+    # ------------------------------------------------------------
+
+    def _reply(self, sit: Situation) -> Choice | None:
+        b, prof = sit.beliefs, sit.profile
+        here = set(self._persons_here(b))
+        pending = sorted((o for o in b.obligations if o.kind == "reply" and o.counterpart in here
+                          and sit.now - o.since <= REPLY_TTL and not self._left_to_goals(sit, o.counterpart, o.social)),
+                         key=lambda o: (o.counterpart != sit.player, o.since, o.counterpart))
+        for ob in pending:
+            who = ob.counterpart
+            cue = next((c for c in reversed(b.cues) if c.frm == who and c.tick == ob.since and c.to == sit.agent), None)
+            question = cue is not None and cue.op == Op.ASK
+            if who != sit.player and not question and self._answers_me(sit, who, ob.since):
+                continue            # 对方是在回我的话：一来一往到此为止，免得两个 NPC 没完没了
+            attitude = b.attitude(who)
+            if ob.social in HOSTILE_SOCIAL and prof.temper >= HOT and attitude <= -2 \
+                    and random.Random(derive_seed("escalate", sit.agent, who, ob.since)).random() < prof.temper:
+                strike = self._pick(sit, f"{self._name(b, who)}出言不逊，忍无可忍", Op.ATTACK, who)
+                if strike is not None:
+                    return strike
+            act = reply_act(ob.social, temper=prof.temper, attitude=attitude, question=question, chatty=prof.chatty)
+            return self._say(sit, who, act, f"回{self._name(b, who)}的话")
+        return None
+
+    def _answers_me(self, sit: Situation, who: str, since: int) -> bool:
+        last = self._last_spoke(sit, who)
+        return last is not None and last >= since - 1
+
+    @staticmethod
+    def _pursued(sit: Situation) -> set[str]:
+        return {g.person for g in sit.profile.goals if g.kind == GoalKind.HOSTILE and g.person and g.active(sit.now)}
+
+    def _left_to_goals(self, sit: Situation, who: str, social: Social | None) -> bool:
+        """这句话由目标自己接：仇家说什么都交给先礼后兵；守地时闯入者的顶撞交给守卫（顶撞即硬闯）。"""
+        if who in self._pursued(sit):
+            return True
+        posts = {g.home for g in sit.profile.goals if g.kind == GoalKind.GUARD and g.home and g.active(sit.now)}
+        return social in DEFIANT_SOCIAL and self._here(sit.beliefs) in posts and who not in sit.profile.allies
+
+    # ------------------------------------------------------------
+    #  回应提问：如实说出自己最相信的下落；不知道就说不知道
     # ------------------------------------------------------------
 
     def _answer_questions(self, sit: Situation) -> Choice | None:
-        """欠着的问题（持久记录，不随经历缓冲滚掉）：问话的人在眼前、自己又知道答案，就如实相告。"""
+        """欠着的问题（持久记录，不随经历缓冲滚掉）：问话的人在眼前、自己又知道答案，就如实相告；
+        不知道就趁热说一句“不知道”（不带命题的 EXPLAIN，说出口即勾销），而不是让问话的人干等。"""
         b = sit.beliefs
         here = set(self._persons_here(b))
+        unknown = None
         for ob in b.obligations:
-            if ob.kind != "answer" or ob.counterpart not in here:
+            if ob.kind != "answer" or ob.counterpart not in here or ob.topic is None:
                 continue
             best = b.best(ob.topic.prop.subject, ob.topic.prop.predicate)
-            if best is not None and not self._said(sit, ob.counterpart, Fact(best.prop, True)):
+            if best is None:
+                if unknown is None and sit.now - ob.since <= REPLY_TTL:
+                    unknown = ob
+                continue
+            if not self._said(sit, ob.counterpart, Fact(best.prop, True)):
                 name = self._name(b, ob.counterpart)
                 late = "（前番问过）" if sit.now - ob.since > 2 else ""
                 return self._pick(sit, f"{name}问我{late}，如实相告", Op.TELL, ob.counterpart,
                                   topic=Fact(best.prop, True))
+        if unknown is not None and unknown.topic is not None:
+            what = self._name(b, unknown.topic.prop.subject)
+            return self._say(sit, unknown.counterpart, Social.EXPLAIN,
+                             f"{self._name(b, unknown.counterpart)}问起{what}，我也不知道")
         return None
+
+    # ------------------------------------------------------------
+    #  闲谈：话多的人在主角身边会找话说
+    # ------------------------------------------------------------
+
+    def _chatter(self, sit: Situation) -> Choice | None:
+        """确定性闸门：random(derive_seed(角色, tick)) < chatty。头一回开口是见礼，此后说笑；
+        对主角（不知道谁是主角时：对任何人）开过口后 CHAT_COOLDOWN 个 tick 内不再找话说。仇家、心怀恶感的人、被制住的人不搭理。"""
+        prof, b, me = sit.profile, sit.beliefs, sit.agent
+        if prof.is_player or prof.chatty <= 0 or self._status(b, me, "subdued"):
+            return None
+        foes = self._pursued(sit)
+        here = [p for p in self._persons_here(b)
+                if p not in foes and b.attitude(p) >= -1 and not self._status(b, p, "subdued")]
+        partners = ([sit.player] if sit.player in here else []) if sit.player is not None else here
+        last = self._last_spoke(sit, sit.player)
+        if not partners or (last is not None and sit.now - last < CHAT_COOLDOWN):
+            return None
+        rng = random.Random(derive_seed("chatter", me, sit.now))
+        if rng.random() >= prof.chatty:
+            return None
+        spoke = {p: self._last_spoke(sit, p) for p in partners}
+        partner = min(partners, key=lambda p: (-1 if spoke[p] is None else spoke[p], p))
+        social = Social.GREET if spoke[partner] is None else Social.JOKE if rng.random() < 0.3 else Social.REMARK
+        return self._say(sit, partner, social, f"找{self._name(b, partner)}说几句话")
 
     # ------------------------------------------------------------
     #  目标

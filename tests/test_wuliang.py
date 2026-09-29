@@ -2,7 +2,8 @@
 [INPUT]: 依赖 tianlong.scenarios 的 build_wuliang，tianlong.scenarios.tianlong.wuliang 的 EAST / WEST / SHENNONG / LOVERS，
          tianlong.runtime 的 GameSession，tianlong.kernel 的 violations / space，tianlong.cognition 的 BeliefStore，
          tianlong.language.parser 的 rule_parse，tianlong.core.goals 的 GoalRegistry
-[OUTPUT]: 天龙八部·无量山场景验收：世界自洽、开场冲突链自然涌现、入夜私奔按约动身、玩家可循原著路线抵达琅嬛福地并学成凌波微步；
+[OUTPUT]: 天龙八部·无量山场景验收：世界自洽、开场冲突链自然涌现（先叫阵、不应才动手）、入夜私奔按约动身、
+          玩家可循原著路线抵达琅嬛福地并学成凌波微步（开溜后被寻仇者追上、等待被打断也照样走得通）；
           主持层内容：每个角色都有腔调/谈资/话多/脾气且谈资只点名本人认识的实体、开场收在对峙的钩子上、段誉的目标已注册、
           逐级提示由浅入深而不列步骤、输入示例不剧透、结局是世界图里真走得到的地点、别称都解析得到、盟友按门户划分
           （西宗掌门不替东宗弟子出头、私奔的一对投到神农帮营中不挨打）、蒲团绣字只是外观不揭示藏物
@@ -41,17 +42,19 @@ def test_world_is_consistent():
 
 
 def test_opening_conflict_chain_emerges():
-    """龚光杰寻衅 → 钟灵放貂 → 左子穆护短、制住钟灵、搜出解药、救治弟子。"""
+    """龚光杰先叫阵、不应才寻衅 → 钟灵放貂 → 同门长辈护短、制住钟灵、搜出解药、救治弟子。"""
     s = GameSession(build_wuliang())
     events = []
-    for _ in range(7):
+    for _ in range(9):
         events += [(e.actor, e.op, e.intent.target, e.outcome.value) for e in s.turn("等待").events]
     assert ("gongguangjie", Op.ATTACK, "duanyu", "success") in events
+    assert events.index(("gongguangjie", Op.TELL, "duanyu", "success")) < \
+        events.index(("gongguangjie", Op.ATTACK, "duanyu", "success")), "先礼后兵：叫阵在前"
     assert ("zhongling", Op.ATTACK, "gongguangjie", "success") in events
-    assert ("zuozimu", Op.TAKE, "antidote", "success") in events
-    assert ("zuozimu", Op.USE, "gongguangjie", "success") in events
+    healers = [a for a in ("zuozimu", "xinshuangqing") if (a, Op.TAKE, "antidote", "success") in events]
+    assert healers and (healers[0], Op.USE, "gongguangjie", "success") in events
     st = s.authority.head()
-    assert not st.attr("gongguangjie", "poisoned") and st.target("antidote", Rel.AT) == "zuozimu"
+    assert not st.attr("gongguangjie", "poisoned") and st.target("antidote", Rel.AT) == healers[0]
 
 
 def test_lovers_leave_at_the_appointed_hour():
@@ -75,8 +78,9 @@ def test_player_can_follow_the_canon_route_to_the_scrolls():
         s.turn(cmd)
     s.turn("查看玉璧")
     assert not s.beliefs("duanyu").knows("d_cave"), "白日里看不出玉璧的秘密"
-    r = s.turn("等到天黑")
-    if not s.authority.head().clock >= at(1, 19, 0):   # 被人打断则再等
+    for _ in range(10):                                  # 被人打断（开溜后寻仇者追来）则再等
+        if s.authority.head().clock >= at(1, 19, 0):
+            break
         s.turn("等到天黑")
     r = s.turn("查看玉璧")
     assert "暗道" in r.narration
