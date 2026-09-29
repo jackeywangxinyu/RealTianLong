@@ -1,7 +1,9 @@
 """
 [INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel
 [OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图）及其 revise() 修正规则、effective_confidence()
-[POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异
+[POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异。
+       surveyed / searched 记着“我上次看清、上次仔细翻查某个容纳者是什么时候”：探索与“还没找过哪里”只凭这份个人记录，
+       不读地图真相
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -85,6 +87,8 @@ class BeliefStore:
     episodes: tuple[Episode, ...] = ()
     trust: Mapping[str, float] = field(default_factory=dict)
     last_tick: int = 0
+    surveyed: Mapping[str, int] = field(default_factory=dict)   # 容纳者 → 最近一次看清其直接内容的时刻（环顾或查看）
+    searched: Mapping[str, int] = field(default_factory=dict)   # 容纳者 → 最近一次亲手仔细翻查（含藏匿物）的时刻
 
     # ------------------------------------------------------------
     #  查询：一律排序返回，保证特征构造与候选生成的确定性
@@ -171,12 +175,19 @@ class BeliefStore:
                     continue  # 随意环顾看不见藏匿物；只有仔细查看的“看清”才能否定它
                 put(Belief(prop, False, 1.0, percept.modality, percept.tick))
 
+        surveyed, searched = self.surveyed, self.searched
+        if percept.scopes:
+            surveyed = {**surveyed, **{sc: max(percept.tick, surveyed.get(sc, percept.tick)) for sc in percept.scopes}}
+            if percept.modality == Modality.SELF:      # 自己动手查看得来的“完整看清”：藏匿物也在其中
+                searched = {**searched, **{sc: max(percept.tick, searched.get(sc, percept.tick))
+                                           for sc in percept.scopes}}
+
         episodes = self.episodes
         if percept.event is not None:
             episodes = (*episodes, Episode(percept.tick, percept.modality, percept.event, percept.informant))
             episodes = episodes[-EPISODE_CAPACITY:]
 
-        store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now)
+        store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now, surveyed, searched)
         return store, tuple(changes)
 
     def revise_all(self, percepts: Iterable[Percept]) -> tuple[BeliefStore, tuple[BeliefChange, ...]]:

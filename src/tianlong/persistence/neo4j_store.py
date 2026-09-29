@@ -185,6 +185,7 @@ class Neo4jWorldStore:
                 agent, {s.id: s for s in sketches}, beliefs,
                 tuple(codec.episode_from(e) for e in json.loads(mind["episodes"])),
                 json.loads(mind["trust"]), mind["last_tick"],
+                json.loads(mind.get("surveyed") or "{}"), json.loads(mind.get("searched") or "{}"),
             )
 
         return self._read(tx)
@@ -319,12 +320,14 @@ class Neo4jWorldStore:
         """整份替换一个角色的认知：命题节点共享（MERGE），相信关系属于个人（先删后建）。"""
         agent_uid, mind_uid = _uid(ref, store.owner), _uid(ref, "mind", store.owner)
         t.run("MATCH (a:Entity {uid:$a}) MERGE (m:Mind {uid:$m}) "
-              "SET m.w = $w, m.b = $b, m.owner = $o, m.trust = $trust, m.episodes = $eps, m.last_tick = $lt "
+              "SET m.w = $w, m.b = $b, m.owner = $o, m.trust = $trust, m.episodes = $eps, m.last_tick = $lt, "
+              "m.surveyed = $sv, m.searched = $sr "
               "MERGE (a)-[:HAS_MIND]->(m) "
               "WITH a, m OPTIONAL MATCH (m)-[k:KNOWS]->() DELETE k "
               "WITH a OPTIONAL MATCH (a)-[bel:BELIEVES]->() DELETE bel",
               a=agent_uid, m=mind_uid, w=ref.world_id, b=ref.branch_id, o=store.owner,
               trust=json.dumps(dict(store.trust)), lt=store.last_tick,
+              sv=json.dumps(dict(store.surveyed), sort_keys=True), sr=json.dumps(dict(store.searched), sort_keys=True),
               eps=json.dumps([codec.episode_to(e) for e in store.episodes], ensure_ascii=False)).consume()
         known = [{"uid": _uid(ref, sk.id), "sketch": json.dumps(codec.sketch_to(sk), ensure_ascii=False)}
                  for sk in store.entities.values()]

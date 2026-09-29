@@ -2,7 +2,7 @@
 [INPUT]: 依赖 core 的 ATTRIBUTES / ATTR_SPECS / AttrType / DYNAMIC_ATTRS / ATTRS_VERSION / REASONS / Kind / Op / Manner / Modality /
          Outcome / Rel / ATTR_PREFIX / digest，cognition/view 的 VIEW_RELS / EVENT_RELS / EVENT_KIND
 [OUTPUT]: 对外提供 FEATURES_VERSION / SCHEMA（特征 + 行动 + 目标 + 预测目标的规格指纹）、StaleModel / check_schema()、
-          节点列布局（AttrBlock / ATTR_BLOCKS / F_NODE 及各事件列切片）、REL_VOCAB / F_EDGE、TOPIC_PREDICATES、
+          节点列布局（AttrBlock / ATTR_BLOCKS / F_NODE 及各事件列切片、个人探索记录列 SURVEY）、REL_VOCAB / F_EDGE、TOPIC_PREDICATES、
           行动编码字段 ACTION_FIELDS、预测目标规格（DYN_BOOL / DYN_NUM / HOLDER_EXTRA / TARGETS）
 [POS]: learning 的类型化特征规格（Schema v2）——一张表说清“每个属性占哪几列、怎样表示已知/未知/不适用、
        行动与言语命题怎样编码、动态模型声明预测哪些变化”。featurize/samples/model/rl 都只从这里取维度；
@@ -107,7 +107,9 @@ EV_REASON = _span(EV_OUTCOME.stop, len(REASONS))
 EV_TOPIC = _span(EV_REASON.stop, len(TOPIC_PREDICATES))
 EV_TOPIC_HOLDS = EV_TOPIC.stop            # +1 肯定 / -1 否定 / 0 无命题
 EV_TOPIC_QUERY = EV_TOPIC.stop + 1        # 1 = 提问（宾语未知）
-F_NODE = EV_TOPIC.stop + 2
+# 个人探索记录（角色视角）：[看清过, 看清的新鲜度, 翻查过, 翻查的新鲜度]；新鲜度 = 1 - 时效/AGE_SCALE（下限 0.05，以别于从没看过）
+SURVEY = slice(EV_TOPIC.stop + 2, EV_TOPIC.stop + 6)
+F_NODE = SURVEY.stop
 
 # ============================================================
 #  行动编码：言语命题不再被丢弃——“说钥匙在桌上”与“说钥匙在他身上”、肯定与否定，是不同的行动
@@ -134,7 +136,7 @@ TARGETS = ("success", "holder", *(f"attr:{k}" for k in DYN_BOOL), *(f"num:{k}" f
 SCHEMA = digest(
     FEATURES_VERSION, ATTRS_VERSION, NODE_KINDS, EVENT_OPS, MODALITIES, OUTCOMES, REASONS, TOPIC_PREDICATES,
     REL_VOCAB, OPS, MANNERS, ACTION_FIELDS, TARGETS, HOLDER_EXTRA, OBS_GAIN_CAP,
-    tuple((b.key, b.start, b.width, b.known, b.scale) for b in ATTR_BLOCKS),
+    tuple((b.key, b.start, b.width, b.known, b.scale) for b in ATTR_BLOCKS), (SURVEY.start, SURVEY.stop),
 )
 
 VIEWS = ("env", "agent")

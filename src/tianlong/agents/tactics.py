@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 agents/policy_kit 的 PolicyKit / Situation / Choice，cognition/navigation 的 believed_place，
-         core 的 Op / Kind，core/profiles 的 Goal / GoalKind
+         core 的 Op / Kind，core/profiles 的 Goal / GoalKind；下落不明时借 PolicyKit._explore 凭个人勘察记录去找
 [OUTPUT]: 对外提供 MartialTactics（江湖行为积木：自救、还手、救治盟友、寻仇、守地、灭口、护人）
 [POS]: agents 的武斗与人情层。每个方法都是“若满足条件则在候选集中选一项，否则返回 None”，由 ScriptedPolicy 按优先级串联。
        判断全部来自信念：谁受伤中毒、谁动过手、解药在谁身上，都是角色自己看见或经历过的——没看见就不知道
@@ -78,7 +78,10 @@ class MartialTactics(PolicyKit):
             return None      # 气已出了
         if foe in self._persons_here(b):
             return self._pick(sit, f"找{self._name(b, foe)}算账", Op.ATTACK, foe)
-        return self._go_towards(sit, believed_place(b, foe), f"去找{self._name(b, foe)}")
+        where = believed_place(b, foe)
+        if where is None:
+            return self._explore(sit, foe)
+        return self._go_towards(sit, where, f"去找{self._name(b, foe)}")
 
     def _guard(self, sit: Situation, g: Goal) -> Choice | None:
         b = sit.beliefs
@@ -114,7 +117,10 @@ class MartialTactics(PolicyKit):
         b = sit.beliefs
         if g.person is None or g.person in self._persons_here(b):
             return None      # 在一起时由“还手”负责出头
-        return self._go_towards(sit, believed_place(b, g.person), f"跟着{self._name(b, g.person)}")
+        where = believed_place(b, g.person)
+        if where is None:
+            return self._explore(sit, g.person)
+        return self._go_towards(sit, where, f"跟着{self._name(b, g.person)}")
 
     # ------------------------------------------------------------
 

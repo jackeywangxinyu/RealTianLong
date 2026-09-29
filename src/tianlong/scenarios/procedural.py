@@ -34,9 +34,11 @@ _PERSON_NAMES = ["阿福", "老周", "小翠", "王掌柜", "李镖头", "孙娘
 
 
 def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_persons: int = 3,
-                    jianghu: float = 0.0) -> Scenario:
+                    jianghu: float = 0.0, scroll_rate: float = 0.5, scroll_held: float = 0.0) -> Scenario:
     """jianghu 是“江湖化”的概率：身手、兵刃（可能带毒）、解药、秘籍、单向通道与寻仇/护人目标。
-    江湖层用独立的随机流叠加在同一张底图上，jianghu=0 时与旧版逐字节相同——已有的种子、测试与存档不受影响。"""
+    江湖层用独立的随机流叠加在同一张底图上，jianghu=0 时与旧版逐字节相同——已有的种子、测试与存档不受影响。
+    scroll_rate / scroll_held 是修习机制的覆盖旋钮（江湖世界里有秘籍的概率、秘籍一开始就在某人手上的概率）：
+    默认值与旧版逐字节相同；后者用第三条独立随机流，只挪动秘籍的位置，不扰动其余抽样。"""
     rng = random.Random(seed)
     jr = random.Random(derive_seed("jianghu", seed))
     wuxia = jr.random() < jianghu
@@ -98,12 +100,20 @@ def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_pers
     state = WorldState.build(seed, at(1, 8, 0), ents, rels)
     profiles = _profiles(rng, state, persons, items)
     if wuxia:
-        extra_ents, extra_rels, profiles = _jianghu(jr, places + surfaces, persons, profiles)
+        extra_ents, extra_rels, profiles = _jianghu(jr, places + surfaces, persons, profiles, scroll_rate)
+        cr = random.Random(derive_seed("cultivation", seed))
+        if any(e.id == "b0" for e in extra_ents) and cr.random() < scroll_held:
+            holder = cr.choice(persons)
+            extra_rels = [Relation("b0", Rel.AT, holder) if r.src == "b0" and r.type == Rel.AT else r
+                          for r in extra_rels]
+            extra_ents = [Entity(e.id, e.kind, e.name, tuple(a for a in e.attrs if a[0] != "hidden"))
+                          if e.id == "b0" else e for e in extra_ents]
         state = WorldState.build(seed, at(1, 8, 0), ents + extra_ents, rels + extra_rels)
     return Scenario(f"proc-{seed}", state, profiles, _priors(state, persons))
 
 
-def _jianghu(jr: random.Random, spots: list[str], persons: list[str], profiles: dict[str, Profile]):
+def _jianghu(jr: random.Random, spots: list[str], persons: list[str], profiles: dict[str, Profile],
+             scroll_rate: float = 0.5):
     """江湖层：一件兵刃（半数淬毒）、一瓶解药、半数世界再加一卷秘籍；一人寻仇，三人局里另一人护着被寻仇者。"""
     venom = jr.random() < 0.5
     ents = [Entity.make("w0", Kind.ITEM, "毒针" if venom else jr.choice(["短剑", "钢刀"]), weapon=True,
@@ -113,7 +123,7 @@ def _jianghu(jr: random.Random, spots: list[str], persons: list[str], profiles: 
     armed = jr.random() < 0.5                  # 半数世界里兵刃一开始就在某人手上：否则动手多是徒手，毒几乎不出现
     rels = [Relation("w0", Rel.AT, jr.choice(persons) if armed else jr.choice(spots)),
             Relation("c0", Rel.AT, jr.choice(spots + persons))]
-    if jr.random() < 0.5:
+    if jr.random() < scroll_rate:
         spot = jr.choice(spots)
         ents.append(Entity.make("b0", Kind.ITEM, "秘籍", small=True, teaches=jr.choice(["evasion", "absorb"]),
                                 difficulty=jr.randint(2, 3), hidden=True if jr.random() < 0.3 else None))

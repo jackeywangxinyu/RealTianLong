@@ -1,11 +1,11 @@
 """
-[INPUT]: 依赖 torch，ray.rllib 的 PPOConfig / RLModuleSpec / MultiRLModuleSpec，learning/rl 的 env / module / observation，learning/schema 的 SCHEMA
-[OUTPUT]: 对外提供 RLConfig、collect_demos()、behavior_clone()、evaluate()、train_ppo()、main()（python -m tianlong.learning.rl.train）
-[POS]: learning/rl 的训练与验收流水线：模仿学习初始化（脚本策略示范）→ PPO（同一策略网络被所有角色共享参数，但各自观测各自的认知）→
-       留出种子上对照 随机 / 脚本 / 模仿 / PPO，并做“去掉世界模型预测特征”的消融，回答“每个组件究竟增加了什么”；
-       评测同时数“冤枉人”与“动手”两种手段；env_runners/gpus 让同一 CLI 在 Colab 上并行采样、GPU 学习；
-       示范者约 99% 时刻在等待，模仿学习按 bc_wait_share 平衡两类样本并单独报告非等待动作的准确率，否则会学成“永远等待”；
-       策略检查点带规格指纹、视角 policy 与训练时的 ObsSpec
+[INPUT]: 依赖 torch，ray.rllib 的 PPOConfig / RLModuleSpec / MultiRLModuleSpec，learning/rl 的 env / module / imitation / evaluation，
+         learning/task 的 TaskConfig，learning/schema 的 SCHEMA
+[OUTPUT]: 对外提供 RLConfig（含展平的 TaskConfig 字段）、train_ppo()、main()（python -m tianlong.learning.rl.train）
+[POS]: learning/rl 的训练流水线：模仿学习初始化（脚本策略示范，见 imitation）→ PPO（同一策略网络被所有角色共享参数，
+       但各自观测各自的认知）→ 留出种子上对照 随机 / 永远等待 / 脚本 / 模仿 / PPO，并做“去掉世界模型预测特征”的消融（见 evaluation）。
+       TaskConfig 一份解析、处处同用：示范、PPO 的每个 env runner、评测与检查点读的是同一个任务分布；
+       env_runners/gpus 让同一 CLI 在 Colab 上并行采样、GPU 学习；策略检查点带规格指纹、视角 policy、训练时的 ObsSpec 与 TaskConfig
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -13,164 +13,55 @@ from __future__ import annotations
 
 import argparse
 import json
-import random
 import time
-from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 
-from tianlong.core import Op
 from tianlong.learning.rl.env import TianlongEnv
+from tianlong.learning.rl.evaluation import evaluate, net_policy, random_policy, scripted_policy, wait_policy
+from tianlong.learning.rl.imitation import behavior_clone, collect_demos, holdout_metrics
 from tianlong.learning.rl.module import CandidateScoringModule, GraphPolicyNet
-from tianlong.learning.rl.rewards import FALSE_ACCUSATION
+from tianlong.learning.rl.rewards import REWARD_VERSION
 from tianlong.learning.schema import FEATURES_VERSION, SCHEMA
-
-Obs = dict[str, np.ndarray]
-PolicyFn = Callable[[TianlongEnv, dict[str, Obs]], dict[str, int]]
+from tianlong.learning.task import ALL_GOALS, TaskConfig
 
 
 @dataclass(frozen=True)
 class RLConfig:
-    horizon: int = 30
     demo_episodes: int = 120
     bc_epochs: int = 8
     ppo_iterations: int = 20
     train_batch: int = 1500
     lr: float = 3e-4
+    gamma: float = 0.97            # PPO 折扣；塑形用同一个 γ 才保持策略不变
     hidden: int = 64
     eval_episodes: int = 40
     seed: int = 0
     predictor_path: str = ""
     entropy: float = 0.01          # PPO 熵正则：模仿学习后的策略很尖锐，探索不足时调高
     bc_smoothing: float = 0.0      # 模仿学习的标签平滑：避免初始策略过度确定、PPO 无从探索
-    bc_wait_share: float = 0.5     # 模仿学习里“等待”样本占的总权重：示范者 99% 时间在等，不平衡就学成永远等待
+    bc_wait_share: float = 0.5     # 模仿学习里“等待”样本占的总权重（[0, 1]；见 imitation.bc_weights）
     env_runners: int = 0           # 并行采样进程数；0 = 在驱动进程里采样（小机器），Colab 上可设 2~8
     gpus: float = 0.0              # 学习器 GPU 数（Colab 设 1）
+    # ---- 任务分布（TaskConfig 展平，CLI 可直接传）----
+    jianghu: float = 0.5
+    max_places: int = 5
+    max_items: int = 4
+    max_persons: int = 3
+    scroll_rate: float = 0.5
+    scroll_held: float = 0.0
+    goals: str = ",".join(ALL_GOALS)
+    horizon: int = 30
 
+    def task(self) -> TaskConfig:
+        return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
+                          self.scroll_held, tuple(g for g in self.goals.split(",") if g), self.horizon)
 
-def _stack(obs_list: list[Obs]) -> dict[str, torch.Tensor]:
-    return {k: torch.as_tensor(np.stack([o[k] for o in obs_list])) for k in obs_list[0]}
-
-
-# ============================================================
-#  模仿学习：脚本策略的示范 → 候选集上的交叉熵
-# ============================================================
-
-
-def collect_demos(env: TianlongEnv, episodes: int, seed: int) -> list[tuple[Obs, int]]:
-    demos = []
-    for ep in range(episodes):
-        obs, _ = env.reset(seed=seed * 100_000 + ep)
-        for _ in range(env.horizon):
-            act = env.expert_actions()
-            demos += [(obs[a], act[a]) for a in env.agents]
-            obs, _, _, trunc, _ = env.step(act)
-            if trunc["__all__"]:
-                break
-    return demos
-
-
-def behavior_clone(net: GraphPolicyNet, demos: list[tuple[Obs, int]], epochs: int, lr: float = 1e-3,
-                   seed: int = 0, smoothing: float = 0.0, wait_share: float | None = None, log=print) -> None:
-    """示范者绝大多数时刻在等待（程序化世界里约 99%），不加权的交叉熵会学成“永远等待”而准确率依旧 99%。
-    wait_share = 等待样本在损失里占的总权重（0.5 即两类平衡；None 为按原样本比例），按实际比例换算成每条的权重——
-    固定权重不行：非等待样本占比随场景从 1% 到 10% 不等。WAIT 永居候选首位（下标 0）；act_acc 单独报告非等待动作的准确率。"""
-    n_wait = sum(a == 0 for _, a in demos)
-    n_act = len(demos) - n_wait
-    wait_weight = 1.0 if wait_share is None or not n_wait or not n_act else \
-        wait_share / (1 - wait_share) * n_act / n_wait
-    opt = torch.optim.AdamW(net.parameters(), lr=lr)
-    rng = random.Random(seed)
-    for epoch in range(epochs):
-        rng.shuffle(demos)
-        total, correct, n, act_ok, act_n = 0.0, 0, 0, 0, 0
-        for i in range(0, len(demos), 128):
-            chunk = demos[i:i + 128]
-            batch = _stack([o for o, _ in chunk])
-            target = torch.tensor([a for _, a in chunk])
-            logits, _ = net(batch)
-            if smoothing > 0:
-                # 只在合法候选上平滑：掩码外的空位不分概率
-                valid = batch["action_mask"]
-                soft = valid * (smoothing / valid.sum(-1, keepdim=True).clamp(min=1))
-                soft = soft.scatter_add(1, target.unsqueeze(1), torch.full_like(target, 1 - smoothing,
-                                                                                 dtype=soft.dtype).unsqueeze(1))
-                per = -(soft * torch.log_softmax(logits, -1).clamp(min=-1e4)).sum(-1)
-            else:
-                per = F.cross_entropy(logits, target, reduction="none")
-            w = torch.where(target == 0, wait_weight, 1.0)
-            loss = (per * w).sum() / w.sum()
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            hit = logits.argmax(-1) == target
-            total += float(loss) * len(chunk)
-            correct += int(hit.sum())
-            n += len(chunk)
-            act_ok += int(hit[target != 0].sum())
-            act_n += int((target != 0).sum())
-        act = f"{act_ok / act_n:.3f}" if act_n else "nan"
-        log(f"[bc {epoch + 1}] loss={total / n:.4f} acc={correct / n:.3f} act_acc={act} (非等待 {act_n})")
-
-
-# ============================================================
-#  评测：留出种子，同一批世界上比较不同策略
-# ============================================================
-
-
-def net_policy(net: GraphPolicyNet, zero_predictions: bool = False) -> PolicyFn:
-    @torch.no_grad()
-    def act(env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
-        batch = _stack([obs[a] for a in env.agents])
-        if zero_predictions:
-            batch["cand_pred"] = torch.zeros_like(batch["cand_pred"])
-        logits, _ = net(batch)
-        return {a: int(i) for a, i in zip(env.agents, logits.argmax(-1), strict=True)}
-
-    return act
-
-
-def random_policy(seed: int = 0) -> PolicyFn:
-    rng = random.Random(seed)
-    return lambda env, obs: {a: rng.choice(list(np.flatnonzero(obs[a]["action_mask"]))) for a in env.agents}
-
-
-def scripted_policy(env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
-    return env.expert_actions()
-
-
-def evaluate(env: TianlongEnv, policy: PolicyFn, episodes: int, seed_base: int = 900_000) -> dict[str, float]:
-    """除了回报与达成率，还数两种“手段”：冤枉人（搜身落空）与动手——奖励里没有禁止动手，
-    制住对方再搜走东西在规则上是可行的捷径，策略学没学会这条捷径必须如实报告。"""
-    returns, achieved, accusations, attacks = [], [], 0, 0
-    for ep in range(episodes):
-        obs, _ = env.reset(seed=seed_base + ep)
-        total = {a: 0.0 for a in env.agents}
-        for _ in range(env.horizon):
-            obs, rew, _, trunc, _ = env.step(policy(env, obs))
-            attacks += sum(e.op == Op.ATTACK for e in env.last_events)
-            for a, r in rew.items():
-                total[a] += r
-                accusations += int(r <= -FALSE_ACCUSATION)
-            if trunc["__all__"]:
-                break
-        returns += list(total.values())
-        achieved += [env.achieved(a) for a in env.agents]
-    return {"mean_return": round(float(np.mean(returns)), 4), "return_ci95": _bootstrap_ci(returns),
-            "goal_rate": round(float(np.mean(achieved)), 4), "goal_rate_ci95": _bootstrap_ci(achieved),
-            "false_accusations_per_ep": round(accusations / episodes, 3),
-            "attacks_per_ep": round(attacks / episodes, 3)}
-
-
-def _bootstrap_ci(values: list, draws: int = 2000, seed: int = 0) -> list[float]:
-    """角色局均值的 95% 自助法区间：几十局的差异常常落在噪声里，报告必须带上区间才能下结论。"""
-    v = np.asarray(values, dtype=np.float64)
-    means = np.random.default_rng(seed).choice(v, size=(draws, len(v)), replace=True).mean(axis=1)
-    return [round(float(np.percentile(means, 2.5)), 4), round(float(np.percentile(means, 97.5)), 4)]
+    def env_config(self) -> dict:
+        return {"task": self.task().to_dict(), "seed": self.seed, "predictor_path": self.predictor_path or None,
+                "reward": {"gamma": self.gamma}}
 
 
 # ============================================================
@@ -186,7 +77,7 @@ def train_ppo(cfg: RLConfig, init: GraphPolicyNet | None, log=print) -> GraphPol
 
     ray.init(ignore_reinit_error=True, include_dashboard=False, num_cpus=max(2, cfg.env_runners + 1),
              num_gpus=int(cfg.gpus > 0), log_to_driver=False)
-    env_config = {"horizon": cfg.horizon, "seed": cfg.seed, "predictor_path": cfg.predictor_path or None}
+    env_config = cfg.env_config()
     model_config = {"hidden": cfg.hidden, "layers": 2}
     config = (
         PPOConfig()
@@ -198,7 +89,7 @@ def train_ppo(cfg: RLConfig, init: GraphPolicyNet | None, log=print) -> GraphPol
         .learners(num_learners=0, num_gpus_per_learner=cfg.gpus)
         .training(lr=cfg.lr, train_batch_size_per_learner=cfg.train_batch,
                   minibatch_size=min(250, cfg.train_batch), num_epochs=4,
-                  gamma=0.97, lambda_=0.95, entropy_coeff=cfg.entropy, vf_loss_coeff=0.5, clip_param=0.2)
+                  gamma=cfg.gamma, lambda_=0.95, entropy_coeff=cfg.entropy, vf_loss_coeff=0.5, clip_param=0.2)
         .debugging(seed=cfg.seed)
     )
     algo = config.build_algo()
@@ -229,18 +120,23 @@ def main(argv: list[str] | None = None) -> int:
     cfg = RLConfig(**args)
     torch.manual_seed(cfg.seed)
     t0 = time.time()
-    env = TianlongEnv({"horizon": cfg.horizon, "seed": cfg.seed, "predictor_path": cfg.predictor_path or None})
+    env = TianlongEnv(cfg.env_config())
 
     report: dict[str, dict] = {"random": evaluate(env, random_policy(cfg.seed), cfg.eval_episodes),
+                               "wait_only": evaluate(env, wait_policy, cfg.eval_episodes),
                                "scripted": evaluate(env, scripted_policy, cfg.eval_episodes)}
-    print("[eval] random", report["random"], "\n[eval] scripted", report["scripted"])
+    for k in ("random", "wait_only", "scripted"):
+        print(f"[eval] {k}", report[k])
 
     demos = collect_demos(env, cfg.demo_episodes, cfg.seed)
-    print(f"[bc] demos={len(demos)}")
+    held = collect_demos(env, max(10, cfg.demo_episodes // 5), cfg.seed + 7_919)      # 留出世界：另一段种子
+    print(f"[bc] demos={len(demos)} holdout={len(held)}")
     bc = GraphPolicyNet(cfg.hidden)
-    behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing, wait_share=cfg.bc_wait_share)
+    report["bc_epochs"] = behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing,
+                                         wait_share=cfg.bc_wait_share)       # type: ignore[assignment]
+    report["bc_holdout"] = holdout_metrics(bc, held)
     report["bc"] = evaluate(env, net_policy(bc), cfg.eval_episodes)
-    print("[eval] bc", report["bc"])
+    print("[eval] bc", report["bc"], "\n[bc] holdout", report["bc_holdout"])
 
     ppo = train_ppo(cfg, bc)
     report["ppo"] = evaluate(env, net_policy(ppo), cfg.eval_episodes)
@@ -248,12 +144,14 @@ def main(argv: list[str] | None = None) -> int:
                                                           cfg.eval_episodes)
     print("[eval] ppo", report["ppo"], "\n[eval] ppo(无世界模型特征)", report["ppo_without_world_model_features"])
     report["config"] = asdict(cfg)
+    report["task"] = cfg.task().to_dict()
+    report["coverage"] = dict(env.coverage)
     report["seconds"] = round(time.time() - t0, 1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     torch.save({"state_dict": ppo.state_dict(), "config": asdict(cfg), "schema": SCHEMA,
-                "features_version": FEATURES_VERSION, "view": "policy", "obs_spec": asdict(env.obs_spec)},
-               out_dir / "policy_ppo.pt")
+                "features_version": FEATURES_VERSION, "reward_version": REWARD_VERSION, "view": "policy",
+                "obs_spec": asdict(env.obs_spec), "task": cfg.task().to_dict()}, out_dir / "policy_ppo.pt")
     (out_dir / "policy_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0

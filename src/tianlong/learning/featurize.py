@@ -42,6 +42,7 @@ from tianlong.learning.schema import (
     REL_INDEX,
     REL_VOCAB,
     SELF_COL,
+    SURVEY,
     TOPIC_INDEX,
     AttrBlock,
 )
@@ -110,6 +111,10 @@ def featurize(view: GraphView) -> GraphTensors:
                 _write_attr(row, b, known[b.key])
         if n.event:
             _write_event(row, dict(n.event))
+        for j, age in enumerate((n.surveyed_age, n.searched_age)):
+            if age is not None:
+                row[SURVEY.start + 2 * j] = 1.0
+                row[SURVEY.start + 2 * j + 1] = max(0.05, 1.0 - min(age, AGE_SCALE) / AGE_SCALE)
 
     src, dst, attr = [], [], []
     for e in view.edges:

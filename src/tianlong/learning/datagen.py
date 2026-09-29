@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 kernel 的 Kernel，cognition 的 BeliefStore / BeliefChange / candidates，agents 的 ScriptedPolicy / HeuristicPredictor / Situation，
-         scenarios/procedural 的 random_scenario，learning/samples 的 env_sample / agent_sample，core 的变化类型
+         learning/task 的 TaskConfig，learning/samples 的 env_sample / agent_sample，core 的变化类型
 [OUTPUT]: 对外提供 RolloutConfig、Rollouts、collect()、own_effect_slots()、observation_gain()
 [POS]: learning 的数据工厂：在程序化小世界（一半江湖化）里用“脚本策略 + 分层随机探索”行动，由内核实际执行，
        同时记录环境样本与角色样本。每个 tick 只让一个角色行动，使环境标签只反映这一个行动的后果（孤立行动效果模型：
@@ -31,7 +31,7 @@ from tianlong.core import (
 )
 from tianlong.kernel import Kernel
 from tianlong.learning.samples import Sample, agent_sample, env_sample
-from tianlong.scenarios.procedural import random_scenario
+from tianlong.learning.task import TaskConfig
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class RolloutConfig:
     steps: int = 24
     epsilon: float = 0.8      # 随机探索比例：覆盖失败与少见行动
     seed: int = 0
-    jianghu: float = 0.5      # 江湖化世界的比例：让模型见过动手、中毒、解毒、研读与单向通道
+    task: TaskConfig = TaskConfig()   # 任务分布（江湖化比例、规模、修习覆盖旋钮）：与 RL 环境、评测同一份
 
 
 @dataclass
@@ -83,7 +83,7 @@ def collect(cfg: RolloutConfig) -> Rollouts:
     kernel, policy, predictor = Kernel(), ScriptedPolicy(), HeuristicPredictor()
     out = Rollouts()
     for w in range(cfg.worlds):
-        sc = random_scenario(cfg.seed * 1_000_003 + w, jianghu=cfg.jianghu)
+        sc = cfg.task.scenario(cfg.seed * 1_000_003 + w)
         rng = random.Random(derive_seed("rollout", cfg.seed, w))
         state = sc.state
         stores = {a: BeliefStore(a, trust=dict(p.trust)).revise_all(sc.priors.get(a, ()))[0]

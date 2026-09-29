@@ -7,7 +7,8 @@
        类型保留（数值不压成布尔、类别不压成有无）。两个入口面对同一张属性规格（core/attributes）：
        world_view 读 true_value——规则用到的就是模型看到的（内力、锋利、淬毒、难度、进度、点穴余时）；
        belief_view 只按获知途径读认知——外观要亲眼见过，状态要见过或听说，手感要拿过，内在只有本人知道。
-       事件节点带着内容（操作、渠道、结果、原因、言语命题的谓词与极性），命题的主语与宾语以 ABOUT/ABOUT_VALUE 边连回实体。
+       事件节点带着内容（操作、渠道、结果、原因、言语命题的谓词与极性），命题的主语与宾语以 ABOUT/ABOUT_VALUE 边连回实体；
+       容纳者节点带着“多久以前看清过/翻查过”（个人记录，探索的依据）。
        learning 只接受 GraphView——角色入口在结构上拿不到 WorldState，隔离由类型边界保证
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -51,6 +52,8 @@ class ViewNode:
     attrs: tuple[tuple[str, Scalar], ...] = ()  # 已知属性值（bool / float / 类别字符串）；缺席 = 未知
     is_self: bool = False
     event: tuple[tuple[str, Scalar], ...] = ()  # 事件节点的内容：op / modality / outcome / reason / topic_pred / topic_holds / topic_query
+    surveyed_age: int | None = None             # 角色视角：多久以前看清过它的直接内容（None = 从没看清过/全知视角）
+    searched_age: int | None = None             # 角色视角：多久以前亲手仔细翻查过它
 
     def value(self, key: str) -> Scalar:
         return dict(self.attrs).get(key)
@@ -149,7 +152,10 @@ def belief_view(store: BeliefStore, now: int) -> GraphView:
             v = _known_value(store, eid, spec, sk.seen, shown)
             if v is not _MISSING:
                 attrs.append((spec.key, v))
-        nodes.append(ViewNode(eid, sk.kind.value, tuple(attrs), eid == store.owner))  # type: ignore[arg-type]
+        sv, sr = store.surveyed.get(eid), store.searched.get(eid)
+        nodes.append(ViewNode(eid, sk.kind.value, tuple(attrs), eid == store.owner,  # type: ignore[arg-type]
+                              surveyed_age=None if sv is None else max(0, now - sv),
+                              searched_age=None if sr is None else max(0, now - sr)))
 
     edges: list[ViewEdge] = []
     for b in store.sorted_beliefs():

@@ -1,5 +1,5 @@
 """
-[INPUT]: 依赖 torch，torch_geometric 的 DataLoader，learning 的 datagen / samples / model / schema，core 的 Op
+[INPUT]: 依赖 torch，torch_geometric 的 DataLoader，learning 的 datagen / samples / model / schema / task
 [OUTPUT]: 对外提供 TrainConfig、split_by_world()、fit_baselines()、coverage()、loss_fn()、evaluate()、train_dynamics()、
           save_checkpoint()、main()（python -m tianlong.learning.train）
 [POS]: learning 的训练与验收：按世界切分（检验对没见过的布局的泛化），指标按 schema.TARGETS 声明的覆盖范围逐项报告——
@@ -28,6 +28,7 @@ from tianlong.learning.datagen import RolloutConfig, collect
 from tianlong.learning.model import DynamicsModel, DynamicsOutput, loss_terms
 from tianlong.learning.samples import GONE, Sample, to_data
 from tianlong.learning.schema import DYN_BOOL, DYN_NUM, FEATURES_VERSION, OBS_GAIN_CAP, OPS, SCHEMA
+from tianlong.learning.task import TaskConfig
 
 
 @dataclass(frozen=True)
@@ -41,8 +42,17 @@ class TrainConfig:
     hidden: int = 64
     seed: int = 0
     val_frac: float = 0.2
-    jianghu: float = 0.5       # 江湖化世界比例（见 scenarios/procedural）
+    jianghu: float = 0.5       # 江湖化世界比例（见 learning/task）
+    scroll_rate: float = 0.5   # 江湖世界里有秘籍的概率
+    scroll_held: float = 0.0   # 秘籍开局就在某人手上的概率（修习机制的数据覆盖）
+    max_places: int = 5
+    max_items: int = 4
+    max_persons: int = 3
     device: str = "auto"       # auto：有 GPU 用 GPU（Colab），否则 CPU
+
+    def task(self) -> TaskConfig:
+        return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
+                          self.scroll_held)
 
 
 def _device(name: str) -> torch.device:
@@ -233,7 +243,7 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
     torch.manual_seed(cfg.seed)
     t0 = time.time()
     device = _device(cfg.device)
-    rollouts = collect(RolloutConfig(worlds=cfg.worlds, steps=cfg.steps, seed=cfg.seed, jianghu=cfg.jianghu))
+    rollouts = collect(RolloutConfig(worlds=cfg.worlds, steps=cfg.steps, seed=cfg.seed, task=cfg.task()))
     samples = rollouts.env if cfg.view == "env" else rollouts.agent
     train, test = split_by_world(samples, rollouts.world_of, cfg.val_frac, cfg.seed)
     t_data = time.time() - t0
@@ -271,7 +281,7 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
 
 def save_checkpoint(model: DynamicsModel, cfg: TrainConfig, metrics: dict, path: Path) -> None:
     torch.save({"state_dict": model.state_dict(), "config": asdict(cfg), "metrics": metrics, "schema": SCHEMA,
-                "features_version": FEATURES_VERSION, "view": cfg.view}, path)
+                "features_version": FEATURES_VERSION, "view": cfg.view, "task": cfg.task().to_dict()}, path)
 
 
 def main(argv: list[str] | None = None) -> int:
