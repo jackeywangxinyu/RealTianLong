@@ -27,7 +27,7 @@ from tianlong.cognition import BeliefStore, Candidate, candidates
 from tianlong.cognition.candidates import budget
 from tianlong.core import Op, derive_seed, make_id
 from tianlong.kernel import Kernel
-from tianlong.learning.parallel import ordered_map, resolve_workers
+from tianlong.learning.parallel import ordered_map, resolve_workers, single_thread
 from tianlong.learning.rl.observation import CropReport, ObsSpec, ablate, build_observation, observation_space
 from tianlong.learning.rl.rewards import GoalTracker, RewardWeights, step_reward
 from tianlong.learning.task import TaskConfig
@@ -179,7 +179,8 @@ def map_episodes(env: TianlongEnv, fn, extra, args, workers: int = 1) -> list:
     fn 必须是模块级函数，extra（如策略）必须可 pickle。"""
     args = list(args)
     if resolve_workers(workers) <= 1:
-        return [fn(env, extra, a) for a in args]
+        with single_thread():              # 与子进程同一线程数：逐位相同
+            return [fn(env, extra, a) for a in args]
     results = ordered_map(_run_one, args, workers, _init_worker, (env.config, fn, extra))
     for _, cov in results:
         env.coverage.update(cov)

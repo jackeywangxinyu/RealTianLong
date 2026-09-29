@@ -147,3 +147,35 @@ def test_workers_do_not_enter_run_id_or_block_resume(tmp_path):
     _load_state(tmp_path / "s.pt", TrainConfig(view="agent", workers=8))       # 换并行度可以续训
     with pytest.raises(ValueError, match="lr"):
         _load_state(tmp_path / "s.pt", TrainConfig(view="agent", workers=8, lr=1.0))
+
+
+def test_gnn_predictor_runs_are_bitwise_identical_whatever_the_parent_thread_count(tmp_path):
+    """GNN 的 CPU 运算随线程数差几个 ulp：顺序路径与子进程都在单线程下算，workers 才不改结果。"""
+    from tianlong.learning.model import DynamicsModel
+    from tianlong.learning.provenance import run_manifest
+    from tianlong.learning.train import TrainConfig, save_checkpoint
+    cfg = TrainConfig(view="agent", hidden=64)
+    torch.manual_seed(1)
+    save_checkpoint(DynamicsModel(64), cfg, {"manifest": run_manifest("dynamics_agent", asdict(cfg), cfg.task())},
+                    tmp_path / "p.pt")
+    env_cfg = {"task": {"jianghu": 1.0, "horizon": 6}, "predictor_path": str(tmp_path / "p.pt")}
+    before = torch.get_num_threads()
+    torch.set_num_threads(4)
+    try:
+        seq, par = TianlongEnv(env_cfg), TianlongEnv(env_cfg)
+        da, db = collect_demos(seq, 3, 5), collect_demos(par, 3, 5, workers=2)
+        assert torch.get_num_threads() == 4, "顺序路径只临时单线程，结束后恢复"
+    finally:
+        torch.set_num_threads(before)
+    assert [{k: v.tobytes() for k, v in d.obs.items()} for d in da] == [{k: v.tobytes() for k, v in d.obs.items()} for d in db]
+
+
+def test_random_policy_is_stateless_so_reuse_and_order_do_not_matter():
+    env = TianlongEnv({"task": {"horizon": 6}})
+    pol = random_policy(7)
+    first = evaluate(env, pol, 2, seed_base=900_000, draws=10, keep_logs=True)
+    overlap = evaluate(env, pol, 2, seed_base=900_001, draws=10, keep_logs=True)      # 同一个对象，世界 900001 再来一次
+    twice = evaluate(env, pol, 1, seed_base=900_001, draws=10, keep_logs=True)
+    assert _log_key(overlap)[0] == _log_key(first)[1] == _log_key(twice)[0]
+    assert _log_key(evaluate(env, pol, 3, seed_base=899_999, draws=10, keep_logs=True, workers=3)) == \
+        _log_key(evaluate(env, pol, 3, seed_base=899_999, draws=10, keep_logs=True))

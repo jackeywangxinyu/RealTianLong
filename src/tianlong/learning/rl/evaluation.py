@@ -2,7 +2,7 @@
 [INPUT]: 依赖 numpy / torch，learning/rl 的 env / imitation 的 stack / observation 的 ABLATIONS / stats（统计推断），
          kernel/space 的 WorldReader / place_of，core 的 Event / Op / Kind / Rel / Outcome / Proposition / GoalMode / reason_key，
          cognition 的 BeliefStore
-[OUTPUT]: 对外提供 PolicyFn、NetPolicy / net_policy()（可测试期消融）、RandomPolicy / random_policy()（逐局派生随机流）、
+[OUTPUT]: 对外提供 PolicyFn、NetPolicy / net_policy()（可测试期消融）、RandomPolicy / random_policy()（无状态：随机数由种子、世界种子与局内步数派生）、
           scripted_policy()、wait_policy()（策略都可 pickle）、
           event_counts()（一个 tick 的行为计数）、repeat_kind()（无效循环与随机重掷之分）、run_episode()、
           evaluate()（workers > 1 时逐局分给子进程，与顺序评测逐项相同）；转出 stats 的 EpisodeLog / METRICS / MIN_WORLDS /
@@ -20,7 +20,7 @@ from __future__ import annotations
 import random
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -78,17 +78,15 @@ def net_policy(net, ablate: Iterable[str] = ()) -> PolicyFn:
     return NetPolicy(net, tuple(ablate))
 
 
-@dataclass
+@dataclass(frozen=True)
 class RandomPolicy:
-    """在合法候选里均匀随机。随机流按（种子，这一局的世界种子）派生：每局可单独复现，并行与顺序评测逐项相同。"""
+    """在合法候选里均匀随机。无状态：每一步的随机数只由（种子，世界种子，局内步数）派生——
+    同一局无论单独评测、连着评测、复用同一个对象还是分给子进程，都走出同一条轨迹。"""
     seed: int = 0
-    _world: int | None = field(default=None, repr=False)
-    _rng: random.Random = field(default_factory=random.Random, repr=False)
 
     def __call__(self, env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
-        if env.world_seed != self._world:
-            self._world, self._rng = env.world_seed, random.Random(derive_seed("random_policy", self.seed, env.world_seed))
-        return {a: int(self._rng.choice(list(np.flatnonzero(obs[a]["action_mask"])))) for a in env.agents}
+        rng = random.Random(derive_seed("random_policy", self.seed, env.world_seed, env.t))
+        return {a: int(rng.choice(list(np.flatnonzero(obs[a]["action_mask"])))) for a in env.agents}
 
 
 def random_policy(seed: int = 0) -> PolicyFn:
