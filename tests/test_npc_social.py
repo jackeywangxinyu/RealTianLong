@@ -497,7 +497,7 @@ def test_decision_graph_passes_the_player_and_checkpoints_the_social_act():
     auth = WorldAuthority.found(InMemoryWorldStore(), sc)
     port = AgentPort("npc", cast["npc"], auth.ref.world_id, auth.ref.branch_id, 0, T0,
                      beliefs=lambda: auth.store.beliefs(auth.ref, "npc"))
-    orch = Orchestrator()
+    orch = Orchestrator(checkpoint=True)
     [d] = orch.decide({"npc": NpcContext(port, player="hero")})
     assert (d.intent.op, d.intent.target, d.intent.topic, d.intent.social) == (Op.TELL, "hero", None, Social.GREET)
     snap = orch.npc_graph.get_state({"configurable": {"thread_id": Orchestrator.thread_id(port)}})

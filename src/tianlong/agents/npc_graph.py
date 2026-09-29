@@ -1,9 +1,11 @@
 """
 [INPUT]: 依赖 langgraph 的 StateGraph / Runtime / InMemorySaver / JsonPlusSerializer，agents 的 port（含长期记忆摘要）/ policies / predictors，
          cognition 的 candidates，language/speaker 的 Speaker，language/templates 的 render_experience
-[OUTPUT]: 对外提供 NpcState、NpcContext（可带主角 player，转交 Situation）、build_npc_graph()、checkpoint_serde()
+[OUTPUT]: 对外提供 NpcState、NpcContext（可带主角 player，转交 Situation；recall 开关：只有读 Situation.memories 的策略才需要向量回忆）、
+          build_npc_graph()、checkpoint_serde()
 [POS]: agents 的单角色决策流程：观察 → 回忆 → 形成候选 → 预测后果 → 选择 → 表达 → 提交意图。
-       依赖通过 LangGraph runtime context 注入（不进检查点）；检查点只保存本次决策的轨迹，不是世界状态
+       依赖通过 LangGraph runtime context 注入（不进检查点）；检查点只保存本次决策的轨迹，不是世界状态。
+       观察与回忆只为 Situation.memories 服务：现有策略（脚本、学得的）都不读它，默认跳过（省下每人每 tick 一次向量检索）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -48,6 +50,8 @@ class NpcContext:
     speaker: Speaker = field(default_factory=TemplateSpeaker)
     max_candidates: int = 64
     player: str | None = None      # 主角是谁（公开身份）：交给 Situation.player，搭话与见义出声以他为准
+    recall: bool = False           # 是否跑回忆节点（向量检索）：只有读 Situation.memories 的策略需要，现有策略都不读；
+                                   # 会话按策略的 reads_memories 属性设它
 
     def interests(self) -> list[str]:
         return list(self.port.profile.interests())
@@ -77,8 +81,10 @@ def _names(ctx: NpcContext) -> Names:
 
 
 def observe(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
-    """把最近的经历凝成一句“当下处境”，作为回忆的线索。"""
+    """把最近的经历凝成一句“当下处境”，作为回忆的线索（不回忆就不必凝）。"""
     ctx = runtime.context
+    if not ctx.recall:
+        return {"query": ""}
     store = ctx.port.beliefs()
     names = _names(ctx)
     lines = [
@@ -91,7 +97,7 @@ def observe(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
 
 def recall(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
     port = runtime.context.port
-    if port.recall is None:
+    if not runtime.context.recall or port.recall is None:
         return {"recent": [], "related": []}
     r = port.recall(state.get("query", ""))
     return {"recent": [m.text for m in r.recent], "related": [x.record.text for x in r.related]}

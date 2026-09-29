@@ -34,7 +34,7 @@ def test_full_turns_wire_everything():
     assert r1.advanced and s.authority.head().target("key", Rel.AT) == "player"
     r2 = s.turn("等待")
     assert any(d.agent == "guard" and d.intent.op == Op.MOVE for d in r2.deliberations)
-    assert set(r2.timings) == {"parse", "npc_decide", "settle", "index", "narrate"}
+    assert set(r2.timings) == {"interpret", "npc_decide", "settle", "index", "narrate"}   # 解释期间后台预算 NPC 决策
     assert "守卫" in r2.narration
     # 记忆已同步进向量索引，且只对守卫本人可见
     now = s.authority.head().clock

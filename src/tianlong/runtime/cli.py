@@ -1,11 +1,15 @@
 """
 [INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，runtime/versions 的 IncompatibleSave，scenarios 的 SCENARIOS 注册表，
-         language/llm 的 llm_from_env，language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/bundle（部署包）
-[OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()
-[POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
+         language/llm 的 llm_from_env / fast_llm_from_env；按需加载 language/interpret（主持层解释器，未并入时退回规则解析）、
+         persistence/neo4j_store、learning/bundle（部署包）
+[OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()、interpreter_for()
+[POS]: runtime 的终端前端：叙述经 on_text 流式逐句打印；开场只讲玩家所见，附上不剧透的输入示例（Scenario.hints）；
+       /hint /recap /beliefs 与“GM：”场外提问都交给会话（不推进时间），/debug 显示真相、NPC 理由与分阶段耗时（含首字耗时）——
+       开发者视角与玩家自己的认知刻意分开；落幕即打印终章与真相揭晓并退出。
+       --llm auto 有密钥即启用：叙述用 llm_from_env()，解释用 fast_llm_from_env()；
        --world 选择世界（默认天龙八部·无量山），--store/--save 选择持久化与存档（存档版本不符时一句话说明并退出，
-       --allow-migration 显式接续旧档），--predictor/--policy 让部署包里的 GNN 与 RL 策略驱动 NPC（部署包逐项核对语义版本与文件哈希，策略配套的预测器随包决定；
-       缺包、被改动或与当前代码不兼容时一句话说明并退出）
+       --allow-migration 显式接续旧档），--predictor/--policy 让部署包里的 GNN 与 RL 策略驱动 NPC（部署包逐项核对语义版本与文件哈希，
+       策略配套的预测器随包决定；缺包、被改动或与当前代码不兼容时一句话说明并退出）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -18,18 +22,17 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from tianlong.core import Fact
-from tianlong.language.llm import llm_from_env
-from tianlong.language.templates import render_fact
+from tianlong.language.llm import LLMClient, fast_llm_from_env, llm_from_env
 from tianlong.runtime.session import GameSession, TurnReport
 from tianlong.runtime.versions import IncompatibleSave
-from tianlong.scenarios import SCENARIOS
+from tianlong.scenarios import SCENARIOS, Scenario
 
-_META = "元指令：/beliefs 查看你的认知  /debug 切换开发者视角  /quit 退出"
+_META = "元指令：/hint 提示  /recap 前情回顾  /beliefs 你所知道的  /debug 开发者视角  /quit 退出；以“GM：”开头向主持人提问"
 
 
 def _debug_lines(r: TurnReport) -> list[str]:
-    out = ["  ── 真相 ──"]
+    """推进了时间的回合列出真相与 NPC 理由；每个回合都列分阶段耗时与首字耗时。"""
+    out = ["  ── 真相 ──"] if r.advanced else []
     for e in r.events:
         if e.op.value != "wait":
             out.append(f"  {e.actor} {e.op.value} {e.intent.target or ''} {e.intent.obj or ''} → {e.outcome.value}"
@@ -37,7 +40,8 @@ def _debug_lines(r: TurnReport) -> list[str]:
     for d in r.deliberations:
         if d.intent.op.value != "wait":
             out.append(f"  [{d.agent}] {d.intent.op.value} {d.intent.target or ''} ← {d.rationale}")
-    out.append("  ⏱ " + " ".join(f"{k}={v}ms" for k, v in r.timings.items()))
+    first = f" first_text={r.first_text_ms}ms" if r.first_text_ms is not None else ""
+    out.append(f"  ⏱ [{r.kind.value}]" + first + "".join(f" {k}={v}ms" for k, v in r.timings.items()))
     return out
 
 
@@ -51,6 +55,15 @@ def load_dotenv(path: Path = Path(".env")) -> None:
             key, value = line.split("=", 1)
             if value.strip():
                 os.environ.setdefault(key.strip(), value.strip())
+
+
+def interpreter_for(llm: LLMClient | None, scenario: Scenario):
+    """主持层解释器（快模型；没有模型时它自己退回规则解析）。模块尚未并入时返回 None，会话照旧用规则解析器。"""
+    try:
+        from tianlong.language.interpret import Interpreter
+    except ImportError:
+        return None
+    return Interpreter(llm, aliases=scenario.aliases)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -71,7 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING)
     load_dotenv()
 
-    llm = llm_from_env() if args.llm == "auto" else None
+    voice = llm_from_env() if args.llm == "auto" else None
+    fast = fast_llm_from_env() if args.llm == "auto" else None
     scenario = SCENARIOS[args.world](args.seed)
     if args.save:
         scenario = replace(scenario, world_id=args.save)
@@ -94,17 +108,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"无法加载训练好的模型：{e}")
         return 2
     try:
-        session = GameSession(scenario, store=store, llm=llm, policies=policies, predictor=predictor,
-                              max_candidates=max_cands, allow_migration=args.allow_migration)
+        session = GameSession(scenario, store=store, llm=voice, policies=policies, predictor=predictor,
+                              max_candidates=max_cands, allow_migration=args.allow_migration,
+                              interpreter=interpreter_for(fast, scenario))
     except IncompatibleSave as e:                   # 旧规则下建的档：说清楚，由玩家决定是否显式迁移
         print(f"无法读档：{e}")
         return 2
     debug = args.debug
-    print(f"【{session.clock()}】{'（Gemini 叙述）' if llm else '（模板叙述）'}")
+    print(f"【{session.clock()}】{'（Gemini 叙述）' if voice else '（模板叙述）'}")
+    if session.ending is not None:                  # 读到的是已落幕的存档
+        print(session.epilogue())
+        return 0
     if scenario.setting and not session.resumed:
         print(scenario.setting + "\n")
     print(session.intro())
-    print(scenario.hints)
+    if scenario.hints:
+        print("\n" + scenario.hints)
     print(_META)
     while True:
         try:
@@ -120,17 +139,14 @@ def main(argv: list[str] | None = None) -> int:
             debug = not debug
             print(f"开发者视角：{'开' if debug else '关'}")
             continue
-        if text == "/beliefs":
-            store = session.beliefs(session.player)
-            for b in store.sorted_beliefs():
-                if not b.prop.is_attr or b.holds:
-                    tag = "传闻" if b.hearsay else "亲见"
-                    print(f"  [{tag} {b.confidence:.1f}] {render_fact(Fact(b.prop, b.holds), store.entities, session.player)}")
-            continue
-        r = session.turn(text)
-        print(f"【{r.clock}】{r.narration}")
-        if debug and r.advanced:
+        print(f"【{session.clock()}】", end="", flush=True)
+        r = session.turn(text, on_text=lambda piece: print(piece, end="", flush=True))
+        print()
+        if debug:
             print("\n".join(_debug_lines(r)))
+        if r.ending is not None:
+            print("\n" + session.epilogue())
+            return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
