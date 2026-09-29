@@ -1,8 +1,9 @@
 """
-[INPUT]: 依赖 persistence/store 的协议与值对象，core / cognition 的不可变类型，标准库 json（会话运行态按 JSON 往返存取）
+[INPUT]: 依赖 persistence/store 的协议、值对象与 check_request_progress，core / cognition 的不可变类型，
+         标准库 json（会话运行态按 JSON 往返存取）
 [OUTPUT]: 对外提供 InMemoryWorldStore
 [POS]: persistence 的内存实现；测试、训练、离线游玩的默认后端。与 Neo4j 实现遵守同一协议，用同一组契约测试验证：
-       请求进度与会话运行态随世界提交同一临界区写入，叙述文字经 record_render() 只补写一次
+       请求绑定检查（check_request_progress）、请求进度与会话运行态随世界提交同一临界区完成，叙述文字经 record_render() 只补写一次
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -17,7 +18,14 @@ from typing import Any
 from tianlong.cognition import BeliefStore
 from tianlong.core import Event, Observation, WorldState
 from tianlong.core.memories import MemoryRecord
-from tianlong.persistence.store import CommitBatch, TurnEnvelope, UnknownWorld, VersionConflict, WorldRef
+from tianlong.persistence.store import (
+    CommitBatch,
+    TurnEnvelope,
+    UnknownWorld,
+    VersionConflict,
+    WorldRef,
+    check_request_progress,
+)
 
 
 def _json_copy(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -110,6 +118,9 @@ class InMemoryWorldStore:
                 raise VersionConflict(f"{batch.ref}: head={w.head.version} expected={batch.expected_version}")
             if batch.state.version != batch.expected_version + 1:
                 raise ValueError("新状态版本必须恰好 +1")
+            if batch.request is not None:
+                # 请求绑定与写入同一临界区：重复投递抢在后面提交即被拒，世界一处不改
+                check_request_progress(w.requests.get(batch.request.request_id), batch.request, batch.state.version)
             w.head = batch.state
             w.beliefs.update(batch.beliefs)
             w.events.extend(batch.events)

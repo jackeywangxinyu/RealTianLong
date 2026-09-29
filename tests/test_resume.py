@@ -1,9 +1,10 @@
 """
 [INPUT]: 依赖 tianlong.core 的 FrozenMap / WorldState，tianlong.persistence 的 InMemoryWorldStore / RequestConflict（Neo4j 按需），
          tianlong.runtime 的 GameSession / versions，tianlong.scenarios 的 build_warehouse / build_wuliang
-[OUTPUT]: 持久化与恢复验收 R01–R04：快照映射不可就地修改且可 pickle；连续运行与中途关闭再读档的事件、调度、认知、叙述逐项一致
-          （内存后端必跑，Neo4j 可达时同跑）；同请求返回既有结果、同 ID 异内容显式冲突；提交后索引/叙述崩溃的重试不二次结算，
-          多 tick 等待中途崩溃只走剩下的 tick；存档版本不一致即拒绝，除非显式迁移
+[OUTPUT]: 持久化与恢复验收 R01–R04：快照映射不可就地修改且可 pickle；连续运行与中途关闭（含首回合前关闭）再读档的事件、调度、
+          认知、叙述逐项一致（内存后端必跑，Neo4j 可达时同跑）；同请求返回既有结果、同 ID 异内容显式冲突；
+          并发的重复投递在查询与结算之间插入也只结算一次，重试仍在进行的多 tick 等待不多走 tick；
+          提交后索引/叙述崩溃的重试不二次结算，多 tick 等待中途崩溃只走剩下的 tick；存档版本不一致即拒绝，除非显式迁移
 [POS]: tests 的恢复层；证明“重试与读档”不会让世界多走一步、也不会让角色忘掉自己的节奏
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -117,16 +118,18 @@ def _play(scenario, store, split=None, reopen=None):
     return events, minds, trace, s.session_state(), s.authority.head().fingerprint()
 
 
+@pytest.mark.parametrize("split", [SPLIT, 0], ids=["mid-game", "right-after-opening"])
 @pytest.mark.parametrize("backend", ["memory", pytest.param("neo4j", marks=pytest.mark.neo4j)])
-def test_resume_is_equivalent_to_continuous_play(backend):
+def test_resume_is_equivalent_to_continuous_play(backend, split):
+    """split=0：看完开场、第一回合提交之前就关闭——此时还没有任何提交带着会话运行态落库，开场的初见描写也不许重来。"""
     scenario = replace(build_wuliang(), world_id=f"r02-{uuid.uuid4().hex[:8]}")
     continuous = _play(scenario, InMemoryWorldStore())
     if backend == "memory":
-        resumed = _play(scenario, InMemoryWorldStore(), split=SPLIT)
+        resumed = _play(scenario, InMemoryWorldStore(), split=split)
     else:
         first, second = _neo4j_store(), _neo4j_store()        # 读档用新的连接：模拟另一个进程
         try:
-            resumed = _play(scenario, first, split=SPLIT, reopen=lambda: second)
+            resumed = _play(scenario, first, split=split, reopen=lambda: second)
         finally:
             first.drop_world(WorldRef(scenario.world_id))
             first.close()
@@ -184,6 +187,97 @@ def test_same_id_different_payload_conflicts():
     s.turn("等待")
     s.turn("等待")
     assert s.authority.head().version == version + 2, "不带 request_id 的请求保持原有行为：每次都推进"
+
+
+def _inject_before_settle(monkeypatch, store, duplicate):
+    """在本次请求的 request() 检查之后、结算之前，让另一次投递整个跑完（模拟并发的重复投递）。"""
+    real = store.request
+    fired = []
+
+    def racing(ref, rid):
+        prior = real(ref, rid)
+        if not fired:
+            fired.append(True)                           # 先置位：另一次投递自己的 request() 检查不再触发
+            fired.append(duplicate())
+        return prior
+
+    monkeypatch.setattr(store, "request", racing)
+    return fired
+
+
+@pytest.mark.parametrize("same_session", [True, False], ids=["one-session", "two-sessions"])
+def test_duplicate_delivery_in_flight_is_settled_once(monkeypatch, same_session):
+    store = InMemoryWorldStore()
+    s = GameSession(build_warehouse(), store=store)
+    other = s if same_session else GameSession(build_warehouse(), store=store)
+    fired = _inject_before_settle(monkeypatch, store, lambda: other.turn("拿走桌上的钥匙", request_id="req-x"))
+    late = s.turn("拿走桌上的钥匙", request_id="req-x")
+    first = fired[1]
+    assert store.head(s.ref).version == 1 and len(store.events(s.ref)) == len(first.events), "世界只结算一次"
+    assert late.replayed and late.narration == first.narration == "你拿起钥匙"
+    assert [e.id for e in late.events] == [e.id for e in first.events]
+    env = store.request(s.ref, "req-x")
+    assert env.versions == (1,) and env.done and env.narration == first.narration
+
+
+@pytest.mark.parametrize("same_session", [True, False], ids=["one-session", "two-sessions"])
+def test_duplicate_id_with_other_payload_in_flight_conflicts(monkeypatch, same_session):
+    store = InMemoryWorldStore()
+    s = GameSession(build_warehouse(), store=store)
+    other = s if same_session else GameSession(build_warehouse(), store=store)
+    fired = _inject_before_settle(monkeypatch, store, lambda: other.turn("拿走桌上的钥匙", request_id="req-x"))
+    with pytest.raises(RequestConflict):
+        s.turn("等待", request_id="req-x")
+    assert store.head(s.ref).version == 1, "异内容的那一次一处不改"
+    env = store.request(s.ref, "req-x")
+    assert env.versions == (1,) and env.narration == fired[1].narration, "绑定与进度仍是先到的那一份"
+    monkeypatch.undo()
+    again = s.turn("拿走桌上的钥匙", request_id="req-x")
+    assert again.replayed and again.narration == fired[1].narration
+    with pytest.raises(RequestConflict):
+        s.turn("等待", request_id="req-x")
+
+
+@pytest.mark.parametrize("where", ["between-ticks", "same-version"])
+def test_retry_during_multi_tick_wait_runs_no_extra_ticks(monkeypatch, where):
+    """客户端超时重试一个仍在进行的“等一会”：两次执行合起来也只走计划的十个 tick，进度与叙述都与不被打扰时一致。"""
+    ref_session = GameSession(build_warehouse())
+    reference = ref_session.turn("等一会")
+    store = InMemoryWorldStore()
+    s = GameSession(build_warehouse(), store=store)
+    retried = []
+
+    def retry():
+        retried.append(GameSession(build_warehouse(), store=store).turn("等一会", request_id="req-wait"))
+
+    if where == "between-ticks":                                     # 第 3 个 tick 提交之后，重试到达并走完剩下的 tick
+        real, calls = s.indexer.drain, {"n": 0}
+
+        def drain(*a, **kw):
+            out = real(*a, **kw)
+            calls["n"] += 1
+            if calls["n"] == 3:
+                retry()
+            return out
+
+        monkeypatch.setattr(s.indexer, "drain", drain)
+    else:                                                            # 第 4 个 tick 已读过版本、尚未结算时，重试抢先走完
+        real, calls = s.orchestrator.decide, {"n": 0}
+
+        def decide(*a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 4:
+                retry()
+            return real(*a, **kw)
+
+        monkeypatch.setattr(s.orchestrator, "decide", decide)
+    first = s.turn("等一会", request_id="req-wait")
+    assert store.head(s.ref).version == 10, "只走计划的十个 tick，不多不少"
+    assert store.request(s.ref, "req-wait").versions == tuple(range(1, 11))
+    assert [e.id for e in store.events(s.ref)] == [e.id for e in ref_session.store.events(ref_session.ref)]
+    assert first.narration == retried[0].narration == reference.narration
+    assert store.request(s.ref, "req-wait").narration == reference.narration
+    assert not first.replayed and not retried[0].replayed, "两次调用都真的提交过 tick"
 
 
 def test_unparsed_request_is_not_persisted():

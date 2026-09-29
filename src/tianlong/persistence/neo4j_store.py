@@ -1,6 +1,6 @@
 """
-[INPUT]: 依赖 neo4j 驱动的 Driver / GraphDatabase，persistence/store 的协议与值对象，persistence/codec 的编解码，
-         core / cognition 的不可变类型
+[INPUT]: 依赖 neo4j 驱动的 Driver / GraphDatabase，persistence/store 的协议、值对象与 check_request_progress，
+         persistence/codec 的编解码，core / cognition 的不可变类型
 [OUTPUT]: 对外提供 Neo4jWorldStore（WorldStore 协议的图数据库实现）、net_relation_diff()
 [POS]: persistence 的 Neo4j 后端。图模型：
        (:World) 版本锚点；(:Entity:{Person|Place|Item|Surface|Door}) 以 AT/OWNS/MATCHES/CONNECTS 相连；
@@ -9,7 +9,8 @@
        (:Entity)-[:HAS_MIND]->(:Mind)-[:KNOWS]->(:Entity)；(:Memory {indexed}) 即 outbox；
        (:Request {data, narration}) 是玩家请求的进度与叙述；World 节点另存存档版本（versions）与会话运行态（session）。
        commit 先对 World 节点加写锁再比对版本——read-committed 隔离下由锁保证串行，而不是指望 ACID 自动解决并发；
-       请求进度与会话运行态与世界变化同一事务写入，叙述文字由 record_render() 只补写一次
+       持锁后再做请求绑定检查（进度必须接在已落库的那一份之后），请求进度与会话运行态与世界变化同一事务写入，
+       叙述文字由 record_render() 只补写一次
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -39,7 +40,14 @@ from tianlong.core import (
 )
 from tianlong.core.memories import MemoryRecord
 from tianlong.persistence import codec
-from tianlong.persistence.store import CommitBatch, TurnEnvelope, UnknownWorld, VersionConflict, WorldRef
+from tianlong.persistence.store import (
+    CommitBatch,
+    TurnEnvelope,
+    UnknownWorld,
+    VersionConflict,
+    WorldRef,
+    check_request_progress,
+)
 
 _LABELS = {k: k.value.capitalize() for k in Kind}   # 标签与关系类型只来自枚举白名单，绝不拼接外部输入
 _ROLES = (("BY", "actor"), ("TARGET", "target"), ("OBJ", "obj"), ("OCCURRED_AT", "place"))
@@ -242,6 +250,12 @@ class Neo4jWorldStore:
                 raise VersionConflict(f"{ref}: head={rec['v']} expected={batch.expected_version}")
             if batch.state.version != batch.expected_version + 1:
                 raise ValueError("新状态版本必须恰好 +1")
+            if batch.request is not None:
+                # 持有 World 锁时读已落库的进度：绑定检查与写入同一事务，重复投递抢在后面提交即整体回滚
+                rec = t.run("MATCH (r:Request {uid:$u}) RETURN r.data AS d",
+                            u=_uid(ref, "request", batch.request.request_id)).single()
+                prior = codec.envelope_from(json.loads(rec["d"])) if rec else None
+                check_request_progress(prior, batch.request, batch.state.version)
 
             # ---- 2. 世界变化：关系按净差异，属性按新状态整体覆盖 ----
             changes = [c for e in batch.events for c in e.changes]

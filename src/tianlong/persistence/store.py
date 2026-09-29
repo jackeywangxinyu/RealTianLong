@@ -1,8 +1,10 @@
 """
 [INPUT]: 依赖 core 的 WorldState / Event / Observation / Intent / Percept / MemoryRecord，cognition 的 BeliefStore
-[OUTPUT]: 对外提供 WorldRef / TurnEnvelope / CommitBatch / VersionConflict / RequestConflict / UnknownWorld / WorldStore 协议
-[POS]: persistence 的契约；内存实现与 Neo4j 实现都遵守它。commit 是唯一写路径：版本检查 + 世界变化 + 事件 + 观察 + 认知 + 待索引经历
-       + 请求进度（TurnEnvelope）+ 会话运行态，一次原子提交——“世界推进了”与“这个请求推进到哪了”不可能只落一半。
+[OUTPUT]: 对外提供 WorldRef / TurnEnvelope / CommitBatch / VersionConflict / RequestConflict / UnknownWorld / WorldStore 协议、
+          check_request_progress()（请求绑定检查：两个后端在提交的同一临界区 / 事务里调用）
+[POS]: persistence 的契约；内存实现与 Neo4j 实现都遵守它。commit 是唯一写路径：版本检查 + 请求绑定检查 + 世界变化 + 事件 + 观察 + 认知
+       + 待索引经历 + 请求进度（TurnEnvelope）+ 会话运行态，一次原子提交——“世界推进了”与“这个请求推进到哪了”不可能只落一半，
+       同一请求的重复投递也不可能各结算一次（进度必须恰好接在已落库的那一份之后）。
        叙述文字另走幂等的 record_render()：文字失败不回滚世界，世界也不因文字重试而再结算一次
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -61,7 +63,7 @@ class CommitBatch:
     observations: tuple[Observation, ...]
     beliefs: Mapping[str, BeliefStore]  # 本次发生变化的角色认知（整份替换）
     memories: tuple[MemoryRecord, ...]  # outbox：待索引的经历
-    request: TurnEnvelope | None = None           # 请求进度（整份替换；narration 不随提交改写）
+    request: TurnEnvelope | None = None           # 请求进度（整份替换；须接续已落库的那一份；narration 不随提交改写）
     session_state: Mapping[str, Any] | None = None  # 会话运行态（调度标记、已描写实体），JSON 兼容，整份替换
 
 
@@ -70,7 +72,23 @@ class VersionConflict(Exception):
 
 
 class RequestConflict(Exception):
-    """同一个 request_id 带来了不同的请求内容：拒绝执行，而不是猜哪一份才算数。"""
+    """同一个 request_id 带来了不同的请求内容，或这份进度接不上已落库的那一份：拒绝执行，而不是猜哪一份才算数。"""
+
+
+def check_request_progress(prior: TurnEnvelope | None, progress: TurnEnvelope, version: int) -> None:
+    """请求进度只能逐 tick 向前接续：首 tick 建立绑定，此后每次提交恰好在已落库的进度上多出本次的版本。
+    两个后端都在 commit 的同一临界区 / 事务里调用它——检查与写入之间没有空隙：
+    重复投递抢在另一次之后提交，整次提交随之回滚，不会二次结算，也不会改写别人的绑定。"""
+    if progress.versions[-1:] != (version,):
+        raise RequestConflict(f"请求 {progress.request_id} 的进度没有记下本次提交的版本 {version}")
+    if prior is None:
+        if len(progress.versions) != 1:
+            raise RequestConflict(f"请求 {progress.request_id} 尚未落库，进度却不是从首 tick 开始")
+        return
+    if prior.payload_hash != progress.payload_hash:
+        raise RequestConflict(f"请求 {progress.request_id} 已绑定另一份内容：拒绝执行")
+    if prior.done or prior.versions != progress.versions[:-1]:
+        raise RequestConflict(f"请求 {progress.request_id} 已由另一次投递推进到 {prior.versions}：拒绝重复结算")
 
 
 class UnknownWorld(KeyError):

@@ -1,7 +1,9 @@
 """
-[INPUT]: 依赖 tianlong.persistence 的 InMemoryWorldStore / Neo4jWorldStore / net_relation_diff / TurnEnvelope，tianlong.runtime.authority
+[INPUT]: 依赖 tianlong.persistence 的 InMemoryWorldStore / Neo4jWorldStore / net_relation_diff / TurnEnvelope / RequestConflict，
+         tianlong.runtime.authority
 [OUTPUT]: WorldStore 契约测试：两种后端跑同一组断言——往返一致、幂等、版本冲突、outbox、跨后端确定性、
-          请求进度与会话运行态随提交同事务落库、叙述只补写一次、存档版本往返
+          请求进度与会话运行态随提交同事务落库、叙述只补写一次、存档版本往返、
+          请求绑定在提交内检查（重复投递 / 同 ID 异内容 / 接不上的进度 / 已完结请求的提交整体回滚）
 [POS]: tests 的持久化层；Neo4j 用例在 NEO4J_URI 不可达时自动跳过
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -16,7 +18,13 @@ import pytest
 
 from tianlong.cognition import BeliefStore
 from tianlong.core import Intent, Op, Rel, Relation
-from tianlong.persistence import CommitBatch, InMemoryWorldStore, TurnEnvelope, VersionConflict
+from tianlong.persistence import (
+    CommitBatch,
+    InMemoryWorldStore,
+    RequestConflict,
+    TurnEnvelope,
+    VersionConflict,
+)
 from tianlong.runtime.authority import WorldAuthority
 from tianlong.scenarios import build_warehouse
 
@@ -144,9 +152,47 @@ def test_request_progress_and_session_state_ride_the_commit(store):
     assert store.request(auth.ref, "r1").narration == "你拿起钥匙", "叙述只补写一次"
     with pytest.raises(KeyError):
         store.record_render(auth.ref, "nope", "……")
-    # 下一次提交整份替换进度，但不抹掉已落库的叙述；不带附注的提交不动会话运行态
-    done = replace(seen["env"], done=True)
+    # 下一次提交整份替换进度（接在已落库的那一份之后），但不抹掉已落库的叙述；不带附注的提交不动会话运行态
+    def finish(s):
+        env = seen["env"]
+        seen["done"] = replace(env, versions=(*env.versions, s.state.version), ticks=(*env.ticks, s.state.clock),
+                               done=True)
+        return seen["done"], None
+
     head = auth.head()
-    auth.settle([Intent("r1-t1", "player", Op.WAIT, based_on=head.version)], lambda s: (done, None))
-    assert store.request(auth.ref, "r1") == replace(done, narration="你拿起钥匙")
+    auth.settle([Intent("r1-t1", "player", Op.WAIT, based_on=head.version)], finish)
+    assert store.request(auth.ref, "r1") == replace(seen["done"], narration="你拿起钥匙")
     assert store.session_state(auth.ref) == {"scheduler": {"guard": [480, True]}, "described": ["key"]}
+
+
+def test_request_binding_is_checked_inside_the_commit(store):
+    """同一 request_id 的两次提交交错：进度必须恰好接在已落库的那一份之后，否则整次提交回滚——
+    不会二次结算，不会改写别人的绑定，同 ID 异内容也逃不过（检查与写入在同一临界区 / 事务里）。"""
+    _, auth = found(store)
+    base = Intent("rq-t0", "player", Op.TAKE, "key", based_on=0)
+    envs = {}
+
+    def progress(key, payload, prior_versions=(), done=False):
+        def annotate(s):
+            envs[key] = TurnEnvelope("rq", payload, base, 2, 0, 0, (*prior_versions, s.state.version), done=done)
+            return envs[key], {"described": [key]}
+        return annotate
+
+    def refused(intent_id, annotate):
+        head, n_events = store.head(auth.ref), len(store.events(auth.ref))
+        with pytest.raises(RequestConflict):
+            auth.settle([Intent(intent_id, "guard", Op.WAIT, based_on=head.version)], annotate)
+        assert store.head(auth.ref).fingerprint() == head.fingerprint(), "被拒的提交一处不改：世界原样"
+        assert len(store.events(auth.ref)) == n_events and store.event_for_intent(auth.ref, intent_id) is None
+
+    auth.settle([base], progress("a", "h-take"))                                  # A：首 tick 建立绑定
+    assert store.request(auth.ref, "rq") == envs["a"]
+    refused("dup-1", progress("b", "h-take"))                                     # B：同内容重复投递，也想“首 tick”
+    refused("dup-2", progress("c", "h-wait"))                                     # 同 ID 异内容
+    refused("dup-3", progress("d", "h-take", prior_versions=(7,)))                # 接不上已落库的进度
+    assert store.request(auth.ref, "rq") == envs["a"], "绑定没被改写"
+    assert store.session_state(auth.ref) == {"described": ["a"]}, "会话运行态随被拒的提交一起回滚"
+    auth.settle([Intent("rq-t1", "player", Op.WAIT, based_on=1)], progress("e", "h-take", envs["a"].versions, True))
+    assert store.request(auth.ref, "rq").versions == (1, 2) and store.request(auth.ref, "rq").done
+    refused("dup-4", progress("f", "h-take", envs["e"].versions))                 # 已完结：不再接受任何进度
+    assert store.head(auth.ref).version == 2

@@ -3,8 +3,8 @@
          language/render 的 fact_lines / build_plan / check / Violation / Rendered / RenderStatus
 [OUTPUT]: 对外提供 Narrator（narrate() 返回文字，narrate_rendered() 返回带来源与违规明细的 Rendered）、fact_lines()（再导出）、lore_keys()
 [POS]: language 的输出层；输入只有玩家自己的感知（不是世界真相），模板先把它们写成事实清单，LLM 只负责润色，
-       被要求不得添加清单外的任何人物、物品、事件或结论——但提示词拦不住成功返回的错误文字，所以润色结果还要过 render 的语义闸门，
-       命中即回退清单；玩家原话只作意图与姿态；模型不可用时直接输出清单
+       被要求不得添加清单外的任何人物、物品、事件或结论——但提示词拦不住成功返回的错误文字，所以润色结果还要过 render 的语义闸门
+       （场景别称全表一并交给闸门：未出场实体的别称与名字同样被拒），命中即回退清单；玩家原话只作意图与姿态；模型不可用时直接输出清单
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -61,7 +61,7 @@ def lore_keys(viewer: str, percepts: Sequence[Percept], lore: Mapping[str, str])
 
 class Narrator:
     """setting 给出世界前提与文风；lore 是实体外观描写，只在玩家看见该实体时、且仅首次看见时拿来润色；
-    aliases 是场景别称，只供闸门识别“走进大殿”这类以别称说出的抵达。"""
+    aliases 是场景别称全表，只供闸门使用：识别“走进大殿”这类以别称说出的抵达，并拒绝本回合未出场实体的别称（“神仙姐姐”）。"""
 
     def __init__(self, llm: LLMClient | None = None, setting: str = "", lore: Mapping[str, str] | None = None,
                  style: str = "", aliases: Mapping[str, Sequence[str]] | None = None) -> None:
