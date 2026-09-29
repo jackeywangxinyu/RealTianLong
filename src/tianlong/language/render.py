@@ -1,17 +1,24 @@
 """
-[INPUT]: 依赖 core 的 Percept / Modality / Op / Outcome / Kind / SKILLS / STATUS_ATTRS，language/templates 的 Names / render_percept
+[INPUT]: 依赖 core 的 Percept / Modality / Op / Outcome / Kind / SKILLS / STATUS_ATTRS，language/templates 的 Names / render_percept，
+         language/scene 的 SceneBrief / VoiceLine
 [OUTPUT]: 对外提供 fact_lines()（本回合允许讲的事实清单）、RenderPlan / build_plan()（渲染计划）、Violation / check()（叙述闸门）、
-          check_utterance()（对白闸门）、RenderStatus / Rendered（渲染结果与来源）、
+          check_utterance()（对白闸门）、check_quotes()（台词闸门：引语归属、替玩家开口、NPC 越界点名、凭空多出的说话者）、
+          sentence_ends()（流式分句）、RenderStatus / Rendered（渲染结果与来源）、
           词表 STATUS_LEXICON / COMMITMENT_WORDS / ARRIVAL_VERBS / ATTRIBUTION_VERBS / NEGATIONS / QUANTIFIERS / EXTRA_MARKERS
-          及其排除表（STATUS_EXCLUSIONS / COMMITMENT_EXCLUSIONS / ATTRIBUTION_EXCLUSIONS / NOT_NEGATION）、MIN_ALIAS
+          及其排除表（STATUS_EXCLUSIONS / COMMITMENT_EXCLUSIONS / ATTRIBUTION_EXCLUSIONS / NOT_NEGATION）、MIN_ALIAS，
+          台词词表 SPEECH_MARKS / POST_MARKS / OBJECT_MARKERS / SUBJECT_LEADS / PERCEPTION / PRONOUNS / PLAYER_MIND
 [POS]: language 的“文字 ≠ 事实”闸门。提示词约束拦不住一次成功调用返回的错误非空文本，这里用确定性的词法检查拦：
        点名清单外的人与物（名或别称）、状态升级（受伤→被制、略有所得→学成）、瞬移、物品复制、编造承诺、把传闻说成叙述者确认的事实——
        命中任何一条即回退确定模板。宁可错杀：误报只让这一回合的文字退回模板，世界结算不受任何影响。
+       台词闸门把每段引语归到说话者（引子小句的主语、句首引语之后的“某某喝道”、上一段引语的说话者），
+       归到“你”名下的只能是玩家本回合的原话，NPC 只许点名自己认识的名字、只许说出计划里有的状态。
        局限（如实）：只做词法比对，不做命题级语义理解——代词不参与点名检查，单字别称（“貂”）太泛、不作拒绝依据，
        两字以上的别称与名字同等对待，“石壁”“山道”这类泛称可能误报（误报只让文字退回模板）；
        传闻只检查“说话者名字之后有言说动词”，LLM 若在带归属的句子之外再以叙述口吻复述同一命题，本闸门查不出；
        否定只认紧贴关键词的否定词（中间至多隔几个“有/能/曾/会/被”之类的虚字，双重否定算肯定）；
-       数量只认“数词 + 量词 + 物品名”与“还有/另有/又……一 + 量词 + 物品名”的直接说法。
+       数量只认“数词 + 量词 + 物品名”与“还有/另有/又……一 + 量词 + 物品名”的直接说法；
+       引语归属靠小句主语的词法近似（宾语标记、“的”字结构、感知动词），复杂句式可能归错——归错成玩家只让这一句被丢，
+       归成代词或找不到说话者的按所有说话者的交集查；替玩家起念头只认“你……决定/心想”等少数说法。
        出处优先：清单、外观描写与原话里本来就有的词、名字、数量与“抵达”说法，照搬不算违规
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -26,6 +33,7 @@ from enum import StrEnum
 from functools import cache
 
 from tianlong.core import SKILLS, STATUS_ATTRS, Kind, Modality, Op, Outcome, Percept
+from tianlong.language.scene import SceneBrief, VoiceLine
 from tianlong.language.templates import Names, render_percept
 
 # ============================================================
@@ -122,6 +130,9 @@ class RenderPlan:
     commitment: bool = False                  # 本回合是否存在承诺；引擎没有承诺行动，恒为 False
     aliases: frozenset[str] = frozenset()     # 允许点名的实体的别称（“大殿”）：与名字同等对待
     hidden: frozenset[str] = frozenset()      # 其余实体的别称（两字以上）：只用于拒绝——“神仙姐姐”“营地”不许凭空出现
+    viewer_name: str = ""                     # 观察者自己的名字（“段誉”）：引语归到他名下的，只能是玩家自己的原话
+    people: tuple[tuple[str, str], ...] = ()  # 观察者认识的人：(称呼, 本名)，名字与别称都映射到本名——台词闸门据此给引语找说话者
+    speakers: frozenset[str] = frozenset()    # 本回合确实开口（TELL/ASK）的人（本名）：其余的人不许凭空多出一句台词
 
 
 def build_plan(viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False,
@@ -136,10 +147,13 @@ def build_plan(viewer: str, percepts: Sequence[Percept], names: Names, show_scen
     statuses: set[str] = set()
     arrived: set[str] = set()
     hearsay: list[str] = []
+    talkers: set[str] = set()
     for p in percepts:
         ev = p.event
         if ev is not None:
             ids.update(x for x in (ev.actor, ev.target, ev.obj, ev.place) if x)
+            if ev.kind in (Op.TELL.value, Op.ASK.value) and ev.actor:
+                talkers.add(ev.actor)
             if ev.kind == Op.MOVE.value and ev.outcome == Outcome.SUCCESS and ev.target:
                 arrived.add(ev.target)
             if ev.reason == "subdued":
@@ -183,6 +197,10 @@ def build_plan(viewer: str, percepts: Sequence[Percept], names: Names, show_scen
         aliases=spoken,
         hidden=frozenset(a for al in aliases.values() for a in al
                          if len(a) >= MIN_ALIAS and a not in spoken and a not in allowed),
+        viewer_name=name(viewer) or "",
+        people=tuple(sorted({(form, n) for e, (n, k) in table.items() if k == Kind.PERSON
+                             for form in (n, *aliases.get(e, ())) if form})),
+        speakers=frozenset(n for e in talkers if (n := name(e))),
     )
 
 
@@ -193,8 +211,8 @@ def build_plan(viewer: str, percepts: Sequence[Percept], names: Names, show_scen
 
 @dataclass(frozen=True, slots=True)
 class Violation:
-    kind: str      # entity / status / teleport / duplicate / commitment / hearsay / subject / empty
-    detail: str
+    kind: str      # entity / status / teleport / duplicate / commitment / hearsay / subject / empty；
+    detail: str    # 台词闸门另有 puppet / voice / quote_entity / quote_status，叙述者另有 clock
 
 
 def _mentions(text: str, words: Iterable[str]) -> list[tuple[int, str]]:
@@ -374,6 +392,304 @@ def check_utterance(line: str, allowed: Iterable[str], universe: Iterable[str], 
     forms = [f for f in subject_forms if f]
     if forms and not any(f in line for f in forms):
         out.append(Violation("subject", "/".join(forms)))
+    return tuple(dict.fromkeys(out))
+
+
+# ============================================================
+#  分句：主持人之声逐句生成、逐句过闸门
+# ============================================================
+
+SENTENCE_ENDS = "。！？!?…"
+QUOTE_OPEN = "“「"
+QUOTE_CLOSE = "”」"
+_CLOSERS = QUOTE_CLOSE + "’』）)"
+_TRAILING = SENTENCE_ENDS + _CLOSERS
+SPEECH_MARKS = "道说问答喝叫喊嚷骂叹笑吼斥应想"     # 言说动词的字：引语之前的“某某道/喝道/笑道/问/说/心想”
+POST_MARKS = "道说问答喝叫喊嚷骂吼斥"               # 引语之后的归属只认这些（“满堂笑声”“你心想”不是归属）
+
+
+def sentence_ends(text: str, final: bool = True) -> list[int]:
+    """完整句子的结束位置（不含该位置）。句末标点只在引号外断句，其后紧跟的句末标点与收引号并入本句（“？！”“……”“。”」”）；
+    引语以句末标点收尾时，紧跟其后的一小句若带言说动词（“你笑什么？”龚光杰喝道。），它是这段引语的归属，句子继续；
+    否则引语就是一句（“……！”满堂哗然。）；换行总是断句。
+    final=False（流还没完）：结尾处也许还会接着来标点、收引号或那一小句，先不算完，等下一段再定。"""
+    ends: list[int] = []
+    depth, ascii_open, i, n = 0, False, 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\n":
+            if text[ends[-1] if ends else 0:i].strip():
+                ends.append(i)
+            depth, ascii_open, i = 0, False, i + 1
+            continue
+        if ch in QUOTE_OPEN:
+            depth += 1
+        elif ch in QUOTE_CLOSE:
+            depth = max(0, depth - 1)
+        elif ch == '"':
+            ascii_open = not ascii_open             # 半角引号不分开合，按出现次序配对
+        inside = depth > 0 or ascii_open
+        closing = ch in QUOTE_CLOSE or ch == '"'
+        quoted_end = closing and not inside and i > 0 and text[i - 1] in SENTENCE_ENDS
+        if not quoted_end and not (ch in SENTENCE_ENDS and not inside):
+            i += 1
+            continue
+        j = i + 1
+        while j < n and text[j] in _TRAILING:
+            j += 1
+        if j == n and not final:
+            break                                   # 后面也许还有标点、收引号或正文：等下一段
+        marked = any(c in SENTENCE_ENDS for c in text[i + 1:j])
+        if quoted_end and not marked and j < n and not text[j].isspace() and text[j] not in QUOTE_OPEN:
+            k = j
+            while k < n and k - j < ATTRIBUTION_WINDOW and text[k] not in _PUNCT and not text[k].isspace():
+                k += 1
+            if k == n and k - j < ATTRIBUTION_WINDOW and not final:
+                break                               # 引语后面那一小句还没写完：等下一段再定
+            if _post_attribution(text, j, k):
+                i = j                               # “……”龚光杰喝道：句子带着归属继续
+                continue
+        ends.append(j)
+        i = j
+    return ends
+
+
+def _post_attribution(text: str, j: int, k: int) -> bool:
+    """引语之后 [j, k) 这一小句是不是它的归属（“龚光杰喝道。”）；以冒号或开引号收尾的是下一段引语的引子（“钟灵笑道：“……””）。"""
+    return any(c in POST_MARKS for c in text[j:k]) and text[k:k + 1] not in (*"：:", *QUOTE_OPEN, '"')
+
+
+def _spans(text: str) -> list[tuple[int, int]]:
+    cuts = [0, *sentence_ends(text), len(text)]
+    return [(a, b) for a, b in zip(cuts, cuts[1:], strict=False) if b > a]
+
+
+# ============================================================
+#  台词闸门：每段引语归到说话者，说话者只说得出他知道的；归到“你”名下的只能是玩家自己的原话
+#  - 归属：引语前面紧挨着“道/说/问……”或冒号的，从引子所在的小句往前逐句找主语（同一句里没有就找上一句）；
+#    句首的引语先看紧跟其后的“某某喝道”，再沿用上一段引语的说话者，最后取上一句的主语；
+#    句中既无言说动词又无冒号的引语（匾额、称谓、强调）不归给任何人
+#  - 主语只在人里找（观察者认识的人、要说台词的人、你、他/她）：“钟灵抱着貂儿笑道”说话的是钟灵，不是貂儿；
+#    NPC 的称呼要在小句开头几个字之内（“梁上的钟灵已笑道”），或紧跟在感知动词之后（“你听见钟灵笑道”）；
+#    “你”只在小句开头或“于是/此时/之后……”之后才是主语——“目光落在你脸上，冷笑道”说话的不是你；
+#    紧跟在宾语标记之后（“指着你”“对龚光杰”“落在你”）或自己带着“的”（“你身旁的钟灵”）的称呼都不是主语
+# ============================================================
+
+# 称呼紧跟在这些词后面时是宾语，不是主语：“龚光杰指着你道”“马五德对龚光杰道”“龚光杰被钟灵一激，大声道”“走到你面前”
+OBJECT_MARKERS: tuple[str, ...] = ("对着", "向着", "朝着", "冲着", "指着", "望着", "看着", "盯着", "瞪着", "瞧着", "看了", "望了",
+                                   "瞥了", "瞧了", "瞪了", "打量", "拦住", "叫住", "喝住", "拉着", "扶着", "揪住", "抓住",
+                                   "对", "向", "朝", "冲", "跟", "和", "与", "同", "给", "替", "被", "把", "将", "让", "叫",
+                                   "请", "问", "劝", "骂", "瞪", "在", "到", "住", "着", "了")
+# “你”前面只能是小句开头或这些承接词，才算主语
+SUBJECT_LEADS: tuple[str, ...] = ("于是", "此时", "这时", "当下", "随即", "之后", "然后", "只好", "只得", "终于", "当即",
+                                  "便", "就", "才", "也", "又", "却", "而", "但", "则")
+# 感知动词之后的称呼是内嵌小句的主语：“你听见钟灵笑道”说话的是钟灵
+PERCEPTION: tuple[str, ...] = ("听见", "听到", "听得", "只听", "但听", "忽听", "看见", "瞧见", "只见", "但见", "望见")
+PERCEPTION_WINDOW = 6
+SUBJECT_WINDOW = 6            # NPC 的称呼离小句开头至多这么多字（“一旁的马五德”“梁上的钟灵已”）
+POSSESSED = ("的", "身旁的", "身边的", "身后的", "面前的", "跟前的", "对面的")
+_CLAUSE = "，,；;：:、□ \t\n"
+PRONOUNS: tuple[str, ...] = ("他们", "她们", "你们", "他", "她")
+# 替玩家起念头、拿主意：“你当即决定”“你心中暗想”；“由你决定”“你得尽快拿定主意”“你决定如何？”是把选择留给玩家，不算
+PLAYER_MIND: tuple[str, ...] = ("决定", "打定主意", "拿定主意", "下定决心", "心想", "暗想", "心道", "寻思", "思忖", "盘算")
+MIND_WINDOW = 4
+MIND_PENDING = frozenset("须得要该需可妨能待还未没不难尚")
+MIND_DEFER = frozenset("由看请等让待任凭听随该")
+_QUOTED = re.compile(r"“([^“”]*)(?:”|$)|「([^「」]*)(?:」|$)|\"([^\"\n]*)\"")
+_BARE = re.compile(f"(?<=[{SPEECH_MARKS}])[：:](?!\\s*[“「\"])([^{re.escape(SENTENCE_ENDS)}\\n“”「」]+)")
+_MIND = re.compile(f"你([^{re.escape(_PUNCT)}]{{0,{MIND_WINDOW}}}?)({'|'.join(PLAYER_MIND)})")
+
+
+@dataclass(frozen=True, slots=True)
+class _Quote:
+    start: int      # 开引号（无引号的“某某道：……”为冒号之后）
+    end: int        # 收引号之后
+    words: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Voice:
+    names: frozenset[str]   # 可点名：may_name ∪ 说话者 ∪ 听者 ∪ 玩家
+    source: str             # 说法与模板原话：其中本就有的名字与状态词算有出处
+
+
+def _norm(s: str) -> str:
+    """比对引语用：去掉标点与空白。"""
+    return re.sub(r"[\W_]+", "", s)
+
+
+def _quotes(text: str) -> list[_Quote]:
+    found = [_Quote(m.start(), m.end(), next((g for g in m.groups() if g is not None), ""))
+             for m in _QUOTED.finditer(text)]
+    taken = [(q.start, q.end) for q in found]
+    found += [_Quote(m.start() + 1, m.end(), m.group(1)) for m in _BARE.finditer(text)
+              if not any(a <= m.start() < b for a, b in taken)]
+    return sorted(found, key=lambda q: q.start)
+
+
+def _mask(text: str, quotes: Sequence[_Quote]) -> str:
+    """引语内容换成占位符（位置不变）：找说话者、找替玩家拿的主意，都只看引号之外。"""
+    chars = list(text)
+    for q in quotes:
+        chars[q.start:q.end] = "□" * (q.end - q.start)
+    return "".join(chars)
+
+
+def _clauses(masked: str, lo: int, hi: int) -> list[tuple[int, int]]:
+    """[lo, hi) 按逗号、分号、冒号与已遮住的引语切成小句。"""
+    out: list[tuple[int, int]] = []
+    start = lo
+    for i in range(lo, hi + 1):
+        if i == hi or masked[i] in _CLAUSE:
+            if masked[start:i].strip():
+                out.append((start, i))
+            start = i + 1
+    return out
+
+
+def _subject(masked: str, forms: Iterable[str], selves: set[str], lo: int, hi: int,
+             embedded: bool) -> str | None:
+    """一个小句的主语：宾语位置与带“的”的称呼不算；embedded=True（引子所在的那一小句）时感知动词之后的称呼优先。"""
+    found: list[tuple[str, bool]] = []
+    for i, w in _mentions(masked[lo:hi], forms):
+        k = lo + i
+        before, after = masked[:k], masked[k + len(w):hi]
+        if any(before.endswith(m) for m in OBJECT_MARKERS) or after.startswith(POSSESSED):
+            continue
+        if w in ("他", "她") and before.endswith("其"):
+            continue
+        head = masked[lo:k].strip(_CLAUSE)
+        seen = any(v in masked[max(lo, k - PERCEPTION_WINDOW):k] for v in PERCEPTION)
+        if w in selves:                               # “你”：小句开头或承接词之后才是主语
+            if not head or head.endswith(SUBJECT_LEADS):
+                found.append((w, False))
+        elif len(head) <= SUBJECT_WINDOW or seen:     # NPC：小句开头几个字之内，或紧跟感知动词
+            found.append((w, seen))
+    if embedded and any(seen for _, seen in found):
+        return [w for w, seen in found if seen][-1]
+    return found[0][0] if found else None
+
+
+def _speaker_in(masked: str, forms: Iterable[str], selves: set[str], lo: int, hi: int) -> str | None:
+    """[lo, hi) 里离结尾最近的那个有主语的小句的主语（最后一小句是引子所在处）。"""
+    parts = _clauses(masked, lo, hi)
+    for n, (a, b) in enumerate(reversed(parts)):
+        who = _subject(masked, forms, selves, a, b, embedded=n == 0)
+        if who is not None:
+            return who
+    return None
+
+
+def _intro(lead: str) -> bool:
+    """引语前面紧挨着的是不是“某某道：”式的引子。"""
+    return lead.endswith(("：", ":", "，", ",", "一声")) or lead[-1:] in SPEECH_MARKS + "语曰"
+
+
+def _attribute(text: str, masked: str, quotes: Sequence[_Quote], k: int, spans: Sequence[tuple[int, int]],
+               forms: Iterable[str], selves: set[str],
+               whos: Sequence[tuple[str | None, bool]]) -> tuple[str | None, bool]:
+    """第 k 段引语的说话者（称呼）与归属是否确凿（有言说动词或冒号为证）。"""
+    q = quotes[k]
+    s = next((i for i, (a, b) in enumerate(spans) if a <= q.start < b), len(spans) - 1)
+    a = spans[s][0]
+    earlier = spans[s - 1] if s > 0 else None
+    prev = quotes[k - 1] if k else None
+    lo = max(a, prev.end) if prev else a
+    lead = text[lo:q.start].strip()
+    if not lead:
+        post = _clause_after(text, q.end, ATTRIBUTION_WINDOW)
+        if post and _post_attribution(text, q.end, q.end + len(post)):
+            who = _subject(masked, forms, selves, q.end, q.end + len(post), embedded=True)
+            if who is not None:
+                return who, True
+        if prev is not None and prev.start >= (earlier[0] if earlier else a):
+            return whos[k - 1]                      # 接着上一段引语说
+        return (_speaker_in(masked, forms, selves, *earlier) if earlier else None), False
+    if _intro(lead):
+        who = _speaker_in(masked, forms, selves, a, q.start)
+        if who is None and earlier:
+            who = _speaker_in(masked, forms, selves, *earlier)
+        return who, True
+    return None, False                              # 匾额、称谓、强调：不是谁说的话
+
+
+def _judge(words: str, voices: Sequence[_Voice], who: str, universe: Iterable[str],
+           statuses: frozenset[str]) -> list[Violation]:
+    """引语里点名的实体与状态词，须在每一个 voices 的许可之内（归属不明时即取交集）。"""
+    out: list[Violation] = []
+    universe = tuple(universe)
+    for v in voices:
+        sourced = {n for _, n in _mentions(v.source, universe)}
+        out += [Violation("quote_entity", f"{who}:{n}") for _, n in _mentions(words, universe)
+                if n not in v.names and n not in sourced]
+        for status, lexicon in STATUS_LEXICON.items():
+            if status not in statuses:
+                out += [Violation("quote_status", f"{who}:{status}:{w}")
+                        for w in _unsourced(words, v.source, lexicon, STATUS_EXCLUSIONS)]
+    return out
+
+
+def check_quotes(text: str, brief: SceneBrief, plan: RenderPlan, known_names: Iterable[str] = (), *,
+                 command: str = "", since: int = 0) -> tuple[Violation, ...]:
+    """台词闸门（与 check() 并用）：
+    - 归到玩家（你/本名/别称）名下的引语，去掉标点空白后须包含在玩家本回合的原话（brief.player_line 或 command）里，否则 puppet；
+      引号之外替玩家起念头、拿主意（“你当即决定”“你心中暗想”）同样是 puppet，除非玩家自己的输入里就有这个词
+    - 归到要说台词的 NPC 名下的：点名只许 may_name ∪ {说话者, 听者, 玩家} 与他那句说法/原话里本就有的名字，否则 quote_entity；
+      状态词只许本回合计划里有的状态、或他那句说法/原话里本就肯定说出的，否则 quote_status
+    - 确凿归到一个本回合既没开口、也没有台词的人名下：凭空多出的一句话，voice
+    - 归属不明（他/她、没找到说话者、匾额与称谓）：须同时满足所有说话者的许可（交集）；本回合没有台词时由 check() 把关
+    清单与外观描写里原样有的引语（别人的原话、匾额上的字）不另查。since：只查从该位置起的引语（流式时前面的句子已验收）。"""
+    people = dict(plan.people)
+    selves = {"你", *(f for f, n in plan.people if plan.viewer_name and n == plan.viewer_name)}
+    lines: dict[str, list[VoiceLine]] = {}
+    for vl in brief.lines:
+        lines.setdefault(vl.speaker_name, []).append(vl)
+    voices = {name: _Voice(frozenset({name, *selves, *(n for vl in vls for n in (*vl.may_name, vl.listener_name) if n)}),
+                           "\n".join(x for vl in vls for x in (vl.claim, vl.template) if x))
+              for name, vls in lines.items()}
+    universe = (set(known_names) | plan.names | plan.aliases | plan.hidden | set(people) | set(voices)
+                | {n for v in voices.values() for n in v.names}) - {"你"}
+    forms = set(people) | set(voices) | selves | set(PRONOUNS)
+    said = [s for s in (_norm(brief.player_line or ""), _norm(command)) if s]
+    source = _norm(plan.source)
+    quotes = _quotes(text)
+    masked = _mask(text, quotes)
+    spans = _spans(text)
+    out: list[Violation] = []
+    whos: list[tuple[str | None, bool]] = []
+    for k, q in enumerate(quotes):
+        who, sure = _attribute(text, masked, quotes, k, spans, forms, selves, whos)
+        whos.append((who, sure))
+        words = _norm(q.words)
+        if q.start < since or not words:
+            continue
+        if who in selves:
+            if not any(words in s for s in said):
+                out.append(Violation("puppet", q.words.strip()))
+            continue
+        name = people.get(who, who) if who else None
+        if name not in voices and name in plan.speakers:
+            continue                                # 确实开口、却没交来台词的人：由 check() 把关
+        if name not in voices and sure and name and name not in PRONOUNS:
+            out.append(Violation("voice", name))    # 别人的原话照搬到他嘴里也算：谁说了什么同样是事实
+            continue
+        if len(words) >= MIN_ALIAS and words in source:
+            continue
+        if name in voices:
+            out += _judge(q.words, [voices[name]], name, universe, plan.statuses)
+        elif voices:
+            out += _judge(q.words, list(voices.values()), "?", universe, plan.statuses)
+
+    # ---- 替玩家起念头、拿主意 ----
+    typed = f"{brief.player_line or ''}{command}"
+    for m in _MIND.finditer(masked, since):
+        gap, word = m.group(1), m.group(2)
+        span = next((b for a, b in spans if a <= m.start() < b), len(text))
+        asking = text[:span].rstrip().rstrip(_CLOSERS + '"')[-1:] in ("？", "?")
+        deferred = m.start() > 0 and masked[m.start() - 1] in MIND_DEFER | MIND_PENDING   # “由你决定”“须你拿主意”
+        if MIND_PENDING & set(gap) or deferred or asking or word in typed:
+            continue
+        out.append(Violation("puppet", m.group(0)))
     return tuple(dict.fromkeys(out))
 
 
