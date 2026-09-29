@@ -199,6 +199,9 @@ def test_reply_table_is_temper_times_attitude_times_act():
     assert reply_act(Social.APOLOGIZE, temper=-0.5, attitude=-2) == Social.REMARK
     assert reply_act(Social.INSULT, temper=0.8) == Social.INSULT
     assert reply_act(Social.GREET, attitude=-3) == Social.REMARK
+    assert reply_act(Social.COMMAND, temper=0.2, chatty=0.7) == Social.TAUNT, "嘴快的小姑娘被生人呵斥：挖苦一句，不会乖乖应承"
+    assert reply_act(Social.COMMAND, temper=0.2, attitude=1) == Social.AGREE
+    assert reply_act(Social.COMMAND, temper=-0.5) == Social.AGREE and reply_act(Social.COMMAND) == Social.REFUSE
     assert reply_act(None, question=True) == Social.EXPLAIN
 
 

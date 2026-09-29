@@ -47,7 +47,9 @@ def reply_act(incoming: Social | None, *, temper: float = 0.0, attitude: int = 0
             Social.TAUNT: Social.INSULT if hot else Social.REMARK if calm else Social.TAUNT,
             Social.THREATEN: Social.THREATEN if hot else Social.EXPLAIN if calm else Social.REFUSE,
             Social.CHALLENGE: Social.AGREE if hot else Social.REFUSE,
-            Social.COMMAND: Social.REFUSE if hot or cold else Social.AGREE,
+            # 被呵斥：火爆或有仇的顶回去；心存好感或性子温吞的才应承；不冷不热的——嘴快的挖苦一句，其余回绝
+            Social.COMMAND: (Social.REFUSE if hot or cold else Social.AGREE if attitude > 0 or calm
+                             else Social.TAUNT if chatty >= 0.5 else Social.REFUSE),
         }
         return table[incoming]                                   # type: ignore[index]
     if incoming in SOFT_SOCIAL:
