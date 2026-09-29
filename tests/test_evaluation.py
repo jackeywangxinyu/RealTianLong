@@ -4,7 +4,7 @@
 [OUTPUT]: 评测口径验收 E01–E03、E05、E06：被动损失不算搜身、行为计数与奖励权重无关、以世界为单位的区间与配对比较、
           “没差异 ≠ 等效”、永远等待基线把“保持初态”与“新达成”分开、结果带可溯源 manifest 且结果表写明 run 与提交；
           动态模型的温度只在校准世界上拟合；评审回归（动手缘由、无效循环与随机重掷、严格 JSON、run_id 含未提交改动、
-          跨种子汇总的分组与去重、两次运行按世界配对）
+          跨种子汇总的分组与去重及其“均值 ± 标准差”表、两次运行按世界配对、非报告 JSON 被拒绝）
 [POS]: tests 的统计口径层；证伪“指标从奖励推算”“把同一局的角色当独立样本”“把初态当学会”这三类错误
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -236,6 +236,15 @@ def test_seed_summary_only_pools_runs_that_differ_by_seed():
     assert main["train_seeds"] == [0, 1, 2] and main["table"]["ppo"]["goal_rate"]["mean"] == 0.5
 
 
+def test_seed_markdown_is_a_mean_sd_table_and_skips_single_seed_groups():
+    from tianlong.learning.results import seed_markdown, seed_summary
+    md = seed_markdown(seed_summary([_report(0, 0.2, "x"), _report(1, 0.4, "x"), _report(1, 0.9, "x", sha="d" * 40)]))
+    assert "| ppo | " in md and "0.300 ± 0.141" in md, "goal_rate 两个种子 0.2 / 0.4：均值 ± 样本标准差"
+    assert "`r0x`, `r1x`" in md and "train seeds [0, 1]" in md
+    assert "dddddddddd" not in md, "单种子的组没有方差可报，只在逐运行表里出现"
+    assert seed_markdown(seed_summary([_report(0, 0.2, "x")])) == ""
+
+
 def test_pair_reports_compares_two_runs_on_the_same_worlds(tmp_path):
     import json
 
@@ -252,3 +261,6 @@ def test_pair_reports_compares_two_runs_on_the_same_worlds(tmp_path):
     out = tmp_path / "new" / "dir" / "RESULTS.md"                       # 目录不存在也能写
     assert main([str(pa), str(pb), "--pair", str(pa), str(pb), "--out", str(out)]) == 0
     assert "跨运行配对比较" in out.read_text() and "ablate_predictions" in out.read_text()
+    (tmp_path / "bundle.json").write_text(json.dumps({"bundle_version": "bundle-v1", "files": {}}))
+    with pytest.raises(ValueError, match="bundle.json"):                 # 通配符带进来的部署包不渲染成空表
+        main([str(pa), str(tmp_path / "bundle.json")])

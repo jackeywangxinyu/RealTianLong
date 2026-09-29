@@ -1,12 +1,14 @@
 """
 [INPUT]: 依赖标准库 json / statistics / argparse / hashlib，learning/rl/stats 的 EpisodeLog / compare（纯 numpy，不需要 torch / ray）
-[OUTPUT]: 对外提供 load_reports()、seed_summary()（跨训练种子的均值与标准差）、pair_reports()（两份报告在同一批留出世界上的配对比较）、
-          markdown()（带 run_id 与提交号的结果表）、main()（python -m tianlong.learning.results 报告.json ... [--pair A.json B.json]... [--out 结果.md]）
+[OUTPUT]: 对外提供 load_reports()、seed_summary()（跨训练种子的均值与标准差）、seed_markdown()（汇总渲染成“均值 ± 标准差”表）、
+          pair_reports()（两份报告在同一批留出世界上的配对比较）、markdown()（带 run_id 与提交号的结果表）、
+          main()（python -m tianlong.learning.results 报告.json ... [--pair A.json B.json]... [--out 结果.md]）
 [POS]: learning 的结果出口：README 的表格由它从机器可读报告生成，每张表头写明 run_id、提交号、任务指纹与种子——
        手抄数字、混用不同版本的实验在这里没有入口。跨种子汇总只合并“同一提交（含未提交改动的哈希）+ 除种子外配置完全相同”的运行，
        同一种子重复跑的只留最新一次——换了预测器、轮数或提交的运行不会被当成种子方差；
+       汇总表只列至少两个种子的组（单种子没有方差可报，它的数字在逐运行表里）；
        训练期消融（有/无预测、有/无记忆）是另一次运行，用 --pair 按世界配对比较（每份报告带逐世界记录）；
-       动态模型报告按视角列出；比率指标一律带分子分母
+       动态模型报告按视角列出；比率指标一律带分子分母；不是报告的 JSON（部署包、剖析）明确拒绝
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -28,11 +30,17 @@ POLICY_COLS = ("goal_rate", "initial_goal_rate", "new_goal_achievement", "mainte
 
 
 def load_reports(paths: list[str | Path]) -> list[dict]:
-    out = []
+    """只收训练/评测报告（带 manifest.kind）：bundle.json、profile.json 之类混进来就明确拒绝，不渲染成空表。"""
+    out, bad = [], []
     for p in paths:
         d = json.loads(Path(p).read_text())
+        if not isinstance(d, dict) or not (d.get("manifest") or {}).get("kind"):
+            bad.append(str(p))
+            continue
         d["_path"] = str(p)
         out.append(d)
+    if bad:
+        raise ValueError(f"这些文件不是训练/评测报告（没有 manifest.kind）：{bad}")
     return out
 
 
@@ -79,6 +87,31 @@ def seed_summary(reports: list[dict]) -> dict:
         out[name] = {"commit": key[0], "diff": key[1], "runs": [r["manifest"]["run_id"] for r in rs],
                      "train_seeds": sorted(by_seed, key=str), "table": table}
     return out
+
+
+SEED_COLS = ("mean_return", *POLICY_COLS)
+
+
+def _mean_sd(cell: dict | None, seeds: int) -> str:
+    if cell is None:
+        return "—"
+    text = f"{cell['mean']:.3f}" + ("" if cell["sd"] is None else f" ± {cell['sd']:.3f}")
+    return text if cell["seeds"] == seeds else f"{text} (n={cell['seeds']})"     # 部分种子缺这一项时写明
+
+
+def seed_markdown(summary: dict) -> str:
+    """seed_summary() 的人读版本：每组一张“均值 ± 样本标准差”表，组头写明合并了哪些 run 与训练种子。"""
+    lines: list[str] = []
+    for name, g in summary.items():
+        n = len(g["train_seeds"])
+        if n < 2:
+            continue
+        lines += [f"##### {name}", "", f"runs {', '.join(f'`{r}`' for r in g['runs'])} · train seeds {g['train_seeds']}",
+                  "", "| 策略 | " + " | ".join(SEED_COLS) + " |", "|---|" + "---|" * len(SEED_COLS)]
+        for pol, row in g["table"].items():
+            lines.append(f"| {pol} | " + " | ".join(_mean_sd(row.get(c), n) for c in SEED_COLS) + " |")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def pair_reports(a: dict, b: dict, policy: str = "ppo", margin: float | None = None) -> dict:
@@ -144,9 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     reports = load_reports(a.reports)
     text = markdown(reports)
-    summary = seed_summary(reports)
-    if summary:
-        text += "\n#### 跨训练种子\n\n```json\n" + json.dumps(summary, indent=1, ensure_ascii=False) + "\n```\n"
+    seeds = seed_markdown(seed_summary(reports))
+    if seeds:
+        text += "\n#### 跨训练种子（均值 ± 标准差）\n\n" + seeds
     if a.pair:
         text += "\n#### 跨运行配对比较（同一批留出世界，A − B）\n\n| A | B | 配置差异 | 同一提交 | 目标达成率差 [95%] 判定 | 平均回报差 [95%] 判定 |\n" \
                 "|---|---|---|---|---|---|\n"

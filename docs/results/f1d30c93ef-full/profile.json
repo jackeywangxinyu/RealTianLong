@@ -1,0 +1,72 @@
+{
+  "device": "cuda",
+  "worlds": 30,
+  "steps": 12,
+  "task": {
+    "jianghu": 0.5,
+    "max_places": 5,
+    "max_items": 4,
+    "max_persons": 3,
+    "scroll_rate": 0.5,
+    "scroll_held": 0.0,
+    "hide_goal_items": 0.0,
+    "roles": 0.3,
+    "goals": [
+      "protect",
+      "acquire",
+      "deliver",
+      "guard",
+      "hostile",
+      "escape",
+      "defend"
+    ],
+    "horizon": 30
+  },
+  "stages": {
+    "predict_gnn_cpu": {
+      "mean_ms": 11.551,
+      "calls": 864,
+      "total_s": 9.98
+    },
+    "policy_forward_cuda": {
+      "mean_ms": 4.537,
+      "calls": 864,
+      "total_s": 3.92
+    },
+    "build_observation": {
+      "mean_ms": 0.921,
+      "calls": 864,
+      "total_s": 0.796
+    },
+    "predict_heuristic": {
+      "mean_ms": 0.637,
+      "calls": 864,
+      "total_s": 0.55
+    },
+    "belief_view+featurize": {
+      "mean_ms": 0.468,
+      "calls": 864,
+      "total_s": 0.404
+    },
+    "kernel_step": {
+      "mean_ms": 0.475,
+      "calls": 360,
+      "total_s": 0.171
+    },
+    "candidates": {
+      "mean_ms": 0.16,
+      "calls": 864,
+      "total_s": 0.138
+    },
+    "belief_revise": {
+      "mean_ms": 0.112,
+      "calls": 864,
+      "total_s": 0.097
+    },
+    "scenario": {
+      "mean_ms": 0.706,
+      "calls": 30,
+      "total_s": 0.021
+    }
+  }
+}

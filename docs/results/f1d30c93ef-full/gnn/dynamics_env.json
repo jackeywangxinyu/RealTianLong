@@ -1,0 +1,463 @@
+{
+  "success_acc": 0.9872,
+  "success_train_majority_baseline": 0.7552,
+  "success_brier": 0.0074,
+  "success_by_op": {
+    "ask": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=987",
+    "attack": "acc 0.804 · brier 0.114（训练集常数 0.250；test_const 0.249）· n=913",
+    "give": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=208",
+    "inspect": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=3199",
+    "lock": "acc 1.000 · brier 0.000（训练集常数 0.023；test_const 0.023）· n=504",
+    "move": "acc 1.000 · brier 0.000（训练集常数 0.193；test_const 0.192）· n=3471",
+    "put": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=695",
+    "study": "acc 1.000 · brier 0.000（训练集常数 0.070；test_const 0.070）· n=636",
+    "take": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=1292",
+    "tell": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=544",
+    "unlock": "acc 0.998 · brier 0.001（训练集常数 0.090；test_const 0.090）· n=548",
+    "use": "acc 0.994 · brier 0.004（训练集常数 0.003；test_const 0.003）· n=621",
+    "wait": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=782"
+  },
+  "holder_changed_recall": 0.9992,
+  "holder_changed_count": 4764,
+  "holder_unchanged_kept": 1.0,
+  "holder_predicted_change_precision": 0.9996,
+  "holder_unknown_wrongly_determined": null,
+  "holder_unknown_count": 0,
+  "holder_gone_recall": null,
+  "holder_gone_count": 0,
+  "holder_new_recall": null,
+  "holder_new_count": 0,
+  "attr_changed_acc": 0.9056,
+  "attr_changed_count": 1144,
+  "attr_changed_by_attr": {
+    "absorb": "0.000 (n=7)",
+    "evasion": "0.000 (n=3)",
+    "hidden": "0.998 (n=631)",
+    "locked": "1.000 (n=67)",
+    "poisoned": "0.792 (n=24)",
+    "subdued": "0.975 (n=121)",
+    "wounded": "0.694 (n=291)"
+  },
+  "attr_unchanged_kept": 0.9995,
+  "num_changed_by_attr": {
+    "subdued_left": "mae 0.019（不变基线 0.144） · n=1233",
+    "martial": "mae 0.067（不变基线 0.067） · n=2",
+    "progress_evasion": "mae 0.123（不变基线 0.200） · n=23",
+    "progress_absorb": "mae 0.089（不变基线 0.200） · n=25"
+  },
+  "discover_precision": null,
+  "discover_recall": null,
+  "discover_count": 0,
+  "obs_gain_mae": null,
+  "obs_gain_mae_train_mean_baseline": null,
+  "baseline_changed_recall": 0.0,
+  "baseline_unchanged_kept": 1.0,
+  "targets_cap": {
+    "obs_gain": 10
+  },
+  "success_temperature_fit_on_calib": 0.9512,
+  "success_brier_calibrated": 0.0074,
+  "success_by_op_calibrated": {
+    "ask": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=987",
+    "attack": "acc 0.804 · brier 0.113（训练集常数 0.250；test_const 0.249）· n=913",
+    "give": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=208",
+    "inspect": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=3199",
+    "lock": "acc 1.000 · brier 0.000（训练集常数 0.023；test_const 0.023）· n=504",
+    "move": "acc 1.000 · brier 0.000（训练集常数 0.193；test_const 0.192）· n=3471",
+    "put": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=695",
+    "study": "acc 1.000 · brier 0.000（训练集常数 0.070；test_const 0.070）· n=636",
+    "take": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=1292",
+    "tell": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=544",
+    "unlock": "acc 0.998 · brier 0.001（训练集常数 0.090；test_const 0.090）· n=548",
+    "use": "acc 0.994 · brier 0.004（训练集常数 0.003；test_const 0.003）· n=621",
+    "wait": "acc 1.000 · brier 0.000（训练集常数 0.000；test_const 0.000）· n=782"
+  },
+  "baselines_fit_on_train": {
+    "success_rate_by_op": {
+      "ask": 1.0,
+      "attack": 0.4937125748502994,
+      "give": 1.0,
+      "inspect": 1.0,
+      "lock": 0.021586931155192533,
+      "move": 0.7533672070328252,
+      "put": 1.0,
+      "study": 0.05721153846153846,
+      "take": 0.9997702733746842,
+      "tell": 1.0,
+      "unlock": 0.10191082802547771,
+      "use": 0.0035810205908683975,
+      "wait": 1.0
+    },
+    "success_rate": 0.7558333333333334,
+    "obs_gain_mean": 0.0,
+    "discover_rate": 0.0
+  },
+  "coverage_train": {
+    "samples": 50400,
+    "attr:absorb": 8,
+    "attr:evasion": 7,
+    "attr:hidden": 1963,
+    "attr:locked": 229,
+    "attr:poisoned": 86,
+    "attr:subdued": 393,
+    "attr:wounded": 1052,
+    "discover": 0,
+    "holder_changed": 16812,
+    "holder_gone": 0,
+    "holder_new": 0,
+    "num:martial": 0,
+    "num:progress_absorb": 50,
+    "num:progress_evasion": 69,
+    "num:subdued_left": 3825,
+    "obs_gain_positive": 0,
+    "op:ask": 3505,
+    "op:attack": 3340,
+    "op:give": 803,
+    "op:inspect": 11202,
+    "op:lock": 1714,
+    "op:move": 12399,
+    "op:put": 2316,
+    "op:study": 2080,
+    "op:take": 4353,
+    "op:tell": 1901,
+    "op:unlock": 1884,
+    "op:use": 2234,
+    "op:wait": 2669
+  },
+  "coverage_test": {
+    "samples": 14400,
+    "attr:absorb": 7,
+    "attr:evasion": 3,
+    "attr:hidden": 631,
+    "attr:locked": 67,
+    "attr:poisoned": 24,
+    "attr:subdued": 121,
+    "attr:wounded": 291,
+    "discover": 0,
+    "holder_changed": 4764,
+    "holder_gone": 0,
+    "holder_new": 0,
+    "num:martial": 2,
+    "num:progress_absorb": 25,
+    "num:progress_evasion": 23,
+    "num:subdued_left": 1233,
+    "obs_gain_positive": 0,
+    "op:ask": 987,
+    "op:attack": 913,
+    "op:give": 208,
+    "op:inspect": 3199,
+    "op:lock": 504,
+    "op:move": 3471,
+    "op:put": 695,
+    "op:study": 636,
+    "op:take": 1292,
+    "op:tell": 544,
+    "op:unlock": 548,
+    "op:use": 621,
+    "op:wait": 782
+  },
+  "timing_seconds": {
+    "data": 122.7,
+    "total": 1939.0,
+    "device": "cuda"
+  },
+  "split": {
+    "worlds": {
+      "test": 600,
+      "calib": 300,
+      "train": 2100
+    },
+    "samples": {
+      "train": 50400,
+      "calib": 7200,
+      "test": 14400
+    },
+    "unit_of_split": "world"
+  },
+  "model_selection": {
+    "criterion": "min calib_loss (calib worlds; test never used)",
+    "best_epoch": 13,
+    "best_calib_loss": 0.02924553937567719,
+    "resumed_from_epoch": null,
+    "history": [
+      {
+        "epoch": 1,
+        "train_loss": 0.10727,
+        "calib_loss": 0.042
+      },
+      {
+        "epoch": 2,
+        "train_loss": 0.04182,
+        "calib_loss": 0.04043
+      },
+      {
+        "epoch": 3,
+        "train_loss": 0.03888,
+        "calib_loss": 0.03755
+      },
+      {
+        "epoch": 4,
+        "train_loss": 0.03711,
+        "calib_loss": 0.03385
+      },
+      {
+        "epoch": 5,
+        "train_loss": 0.03269,
+        "calib_loss": 0.03556
+      },
+      {
+        "epoch": 6,
+        "train_loss": 0.03579,
+        "calib_loss": 0.03308
+      },
+      {
+        "epoch": 7,
+        "train_loss": 0.0316,
+        "calib_loss": 0.03295
+      },
+      {
+        "epoch": 8,
+        "train_loss": 0.03069,
+        "calib_loss": 0.03811
+      },
+      {
+        "epoch": 9,
+        "train_loss": 0.03185,
+        "calib_loss": 0.03323
+      },
+      {
+        "epoch": 10,
+        "train_loss": 0.03022,
+        "calib_loss": 0.05427
+      },
+      {
+        "epoch": 11,
+        "train_loss": 0.03021,
+        "calib_loss": 0.02927
+      },
+      {
+        "epoch": 12,
+        "train_loss": 0.02833,
+        "calib_loss": 0.03162
+      },
+      {
+        "epoch": 13,
+        "train_loss": 0.02949,
+        "calib_loss": 0.02925
+      },
+      {
+        "epoch": 14,
+        "train_loss": 0.02846,
+        "calib_loss": 0.03212
+      },
+      {
+        "epoch": 15,
+        "train_loss": 0.02854,
+        "calib_loss": 0.03001
+      },
+      {
+        "epoch": 16,
+        "train_loss": 0.02774,
+        "calib_loss": 0.03136
+      },
+      {
+        "epoch": 17,
+        "train_loss": 0.02822,
+        "calib_loss": 0.03068
+      },
+      {
+        "epoch": 18,
+        "train_loss": 0.02804,
+        "calib_loss": 0.03023
+      },
+      {
+        "epoch": 19,
+        "train_loss": 0.02744,
+        "calib_loss": 0.03116
+      },
+      {
+        "epoch": 20,
+        "train_loss": 0.02714,
+        "calib_loss": 0.03006
+      },
+      {
+        "epoch": 21,
+        "train_loss": 0.0267,
+        "calib_loss": 0.03328
+      },
+      {
+        "epoch": 22,
+        "train_loss": 0.02658,
+        "calib_loss": 0.03116
+      },
+      {
+        "epoch": 23,
+        "train_loss": 0.02614,
+        "calib_loss": 0.03062
+      },
+      {
+        "epoch": 24,
+        "train_loss": 0.02612,
+        "calib_loss": 0.02937
+      },
+      {
+        "epoch": 25,
+        "train_loss": 0.02589,
+        "calib_loss": 0.03023
+      },
+      {
+        "epoch": 26,
+        "train_loss": 0.02569,
+        "calib_loss": 0.03005
+      },
+      {
+        "epoch": 27,
+        "train_loss": 0.02512,
+        "calib_loss": 0.03017
+      },
+      {
+        "epoch": 28,
+        "train_loss": 0.02479,
+        "calib_loss": 0.03265
+      },
+      {
+        "epoch": 29,
+        "train_loss": 0.0245,
+        "calib_loss": 0.03413
+      },
+      {
+        "epoch": 30,
+        "train_loss": 0.02422,
+        "calib_loss": 0.0316
+      },
+      {
+        "epoch": 31,
+        "train_loss": 0.0236,
+        "calib_loss": 0.03499
+      },
+      {
+        "epoch": 32,
+        "train_loss": 0.02343,
+        "calib_loss": 0.03511
+      },
+      {
+        "epoch": 33,
+        "train_loss": 0.02307,
+        "calib_loss": 0.03495
+      },
+      {
+        "epoch": 34,
+        "train_loss": 0.02274,
+        "calib_loss": 0.0355
+      },
+      {
+        "epoch": 35,
+        "train_loss": 0.02205,
+        "calib_loss": 0.03821
+      },
+      {
+        "epoch": 36,
+        "train_loss": 0.02188,
+        "calib_loss": 0.03764
+      },
+      {
+        "epoch": 37,
+        "train_loss": 0.02144,
+        "calib_loss": 0.038
+      },
+      {
+        "epoch": 38,
+        "train_loss": 0.02122,
+        "calib_loss": 0.03889
+      },
+      {
+        "epoch": 39,
+        "train_loss": 0.02106,
+        "calib_loss": 0.03914
+      },
+      {
+        "epoch": 40,
+        "train_loss": 0.02092,
+        "calib_loss": 0.03925
+      }
+    ]
+  },
+  "manifest": {
+    "run_id": "9ba915748234",
+    "kind": "dynamics_env",
+    "git_sha": "f1d30c93efe861a86a6176652fd49e4de3fa9c9e",
+    "git_dirty": false,
+    "git_diff_sha256": null,
+    "created_at": "2026-09-29T10:13:37+00:00",
+    "versions": {
+      "schema": "1970b1daeec8028ca716a68bdface8b3",
+      "features": "features-v2",
+      "attributes": "ce8dd6ecb53063904ca7e93383fea626",
+      "goals": "goals-v2",
+      "reward": "reward-v2",
+      "candidates": "candidates-v2:aadc9fd6f2b4adb7058d3e33e9e50568",
+      "kernel": "kernel-v1",
+      "observation": "1a4506a301e7227ea99c3009fcd9b1db",
+      "python": "3.13.15",
+      "deps": {
+        "torch": "2.11.0+cu128",
+        "torch-geometric": "2.8.0.post1",
+        "ray": "2.58.0",
+        "numpy": "2.1.3",
+        "gymnasium": "1.2.2",
+        "langgraph": "1.2.11",
+        "neo4j": "6.3.1",
+        "qdrant-client": "1.19.1"
+      }
+    },
+    "task": {
+      "jianghu": 0.5,
+      "max_places": 5,
+      "max_items": 4,
+      "max_persons": 3,
+      "scroll_rate": 0.5,
+      "scroll_held": 0.3,
+      "hide_goal_items": 0.3,
+      "roles": 0.3,
+      "goals": [
+        "protect",
+        "acquire",
+        "deliver",
+        "guard",
+        "hostile",
+        "escape",
+        "defend"
+      ],
+      "horizon": 30
+    },
+    "task_fingerprint": "866ea181155acd6b1a6bf294adc04548",
+    "config": {
+      "view": "env",
+      "worlds": 3000,
+      "steps": 24,
+      "epochs": 40,
+      "batch": 64,
+      "lr": 0.002,
+      "hidden": 128,
+      "seed": 0,
+      "val_frac": 0.2,
+      "calib_frac": 0.1,
+      "jianghu": 0.5,
+      "scroll_rate": 0.5,
+      "scroll_held": 0.3,
+      "hide_goal_items": 0.3,
+      "roles": 0.3,
+      "max_places": 5,
+      "max_items": 4,
+      "max_persons": 3,
+      "device": "auto",
+      "workers": 6
+    },
+    "seeds": {
+      "data": 0,
+      "split_test_and_calib": 0
+    },
+    "device": "cuda",
+    "model_scope": "isolated_action"
+  }
+}
