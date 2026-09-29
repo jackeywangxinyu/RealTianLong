@@ -1,6 +1,7 @@
 """
 [INPUT]: 依赖 core 的 EntitySketch / Kind / Fact / PerceivedEvent / Percept / Modality / Op / Outcome / Rel / Social
-[OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_experience()、render_percept()、REASONS / SUCCESS_NOTES / ATTR_WORDS、
+[OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_experience()、render_percept()、consequences()（事件的看得见的后果）、
+          REASONS / SUCCESS_NOTES / ATTR_WORDS、
           SOCIAL_VERBS（没有原话的言语按言语行为写成动作：“向钟灵打了个招呼”）
 [POS]: language 的确定性文本层（无 LLM）；memory 用它生成经历文本，narrator 在无模型时用它兜底——同一套措辞，两处复用。
        所见清单按所在处归拢成人话（也是交给声音模型的事实清单：更短、更像话，每条事实照旧都在）
@@ -183,8 +184,8 @@ def render_percept(p: Percept, names: Names, viewer: str, me: str = "我") -> st
     if p.event is None:
         return "；".join(render_fact(f, names, viewer, me) for f in p.facts)
     text = render_experience(p.modality, p.event, names, viewer, me)
-    consequences = _consequences(p, names, viewer, me)
-    return text + ("——" + "，".join(consequences) if consequences else "")
+    after = consequences(p, names, viewer, me)
+    return text + ("——" + "，".join(after) if after else "")
 
 
 def _scene(p: Percept, names: Names, viewer: str, me: str) -> str:
@@ -201,7 +202,7 @@ def _scene(p: Percept, names: Names, viewer: str, me: str) -> str:
                     for where, who in groups.items())
 
 
-def _consequences(p: Percept, names: Names, viewer: str, me: str) -> list[str]:
+def consequences(p: Percept, names: Names, viewer: str, me: str) -> list[str]:
     """事件带来的看得见的后果：谁受伤中毒被制、学成了什么、发现了什么暗道与藏匿之物。"""
     out: list[str] = []
     hidden = {f.prop.subject for f in p.facts if f.prop.is_attr and f.prop.attr_key == "hidden" and f.holds}
