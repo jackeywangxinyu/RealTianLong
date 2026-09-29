@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 tianlong.learning 的 featurize / samples / datagen / model / train / predictor，conftest 的 make_intent
-[OUTPUT]: 学习层测试：特征语义（极性/方向/可信度）、批处理指针偏移、张量级认知隔离、小规模训练胜过“不变”基线、GNN 预测器接入决策流程
+[OUTPUT]: 学习层测试：特征语义（极性/方向/可信度）、批处理指针偏移、张量级认知隔离、小规模训练胜过“不变”基线、过期检查点被明确拒绝、GNN 预测器接入决策流程
 [POS]: tests 的 GNN 层；验证“先隔离信息、再做消息传递”与“预测保留不确定性”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -91,6 +91,20 @@ def test_tiny_training_beats_no_change_baseline():
     _, m = train_dynamics(TrainConfig(view="env", worlds=50, epochs=6, seed=1, jianghu=0.0), log=lambda *_: None)
     assert m["changed_recall"] > 0.3, m          # 基线为 0
     assert m["unchanged_kept"] > 0.97, m          # 基线为 1，不能为了抓变化而乱改事实
+
+
+def test_stale_checkpoint_is_refused_with_a_clear_error(tmp_path):
+    """词表一变（新增行动/属性），旧模型在加载时就被拒绝，而不是在张量形状上报错。"""
+    from tianlong.learning.featurize import VOCAB, StaleModel
+    from tianlong.learning.model import DynamicsModel
+    from tianlong.learning.predictor import GNNPredictor
+
+    ckpt = {"state_dict": DynamicsModel(16).state_dict(), "config": {"hidden": 16}}
+    torch.save(ckpt, tmp_path / "old.pt")
+    with pytest.raises(StaleModel, match="重训"):
+        GNNPredictor.load(tmp_path / "old.pt")
+    torch.save({**ckpt, "vocab": VOCAB}, tmp_path / "new.pt")
+    assert GNNPredictor.load(tmp_path / "new.pt").model is not None
 
 
 def test_gnn_predictor_plugs_into_npc_pipeline():

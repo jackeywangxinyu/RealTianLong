@@ -4,6 +4,7 @@
 [OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()
 [POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
        --world 选择世界（默认天龙八部·无量山），--store/--save 选择持久化与存档，--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC
+       （缺模型或词表过期时一句话说明并退出）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -76,14 +77,18 @@ def main(argv: list[str] | None = None) -> int:
         from tianlong.persistence.neo4j_store import Neo4jWorldStore
         store = Neo4jWorldStore.from_env()
     predictor, policies, max_cands = None, None, 64
-    if args.predictor == "gnn":
-        from tianlong.learning.predictor import GNNPredictor
-        predictor = GNNPredictor.load(f"{args.artifacts}/dynamics_agent.pt")
-    if args.policy == "learned":
-        from tianlong.learning.rl.policy import LearnedPolicy
-        learned = LearnedPolicy.load(f"{args.artifacts}/policy_ppo.pt")
-        policies = dict.fromkeys(scenario.npcs, learned)
-        max_cands = learned.spec.max_cands
+    try:
+        if args.predictor == "gnn":
+            from tianlong.learning.predictor import GNNPredictor
+            predictor = GNNPredictor.load(f"{args.artifacts}/dynamics_agent.pt")
+        if args.policy == "learned":
+            from tianlong.learning.rl.policy import LearnedPolicy
+            learned = LearnedPolicy.load(f"{args.artifacts}/policy_ppo.pt")
+            policies = dict.fromkeys(scenario.npcs, learned)
+            max_cands = learned.spec.max_cands
+    except (FileNotFoundError, ValueError) as e:     # 缺模型或模型过期（StaleModel）：说清楚，不甩一屏张量报错
+        print(f"无法加载训练好的模型：{e}")
+        return 2
     session = GameSession(scenario, store=store, llm=llm, policies=policies, predictor=predictor,
                           max_candidates=max_cands)
     debug = args.debug

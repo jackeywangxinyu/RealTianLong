@@ -25,6 +25,7 @@ from torch_geometric.loader import DataLoader
 from tianlong.cognition.view import VIEW_ATTRS
 from tianlong.core import Op
 from tianlong.learning.datagen import RolloutConfig, collect
+from tianlong.learning.featurize import VOCAB
 from tianlong.learning.model import DynamicsModel, DynamicsOutput
 from tianlong.learning.samples import Sample, to_data
 
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = TrainConfig(**args)
     model, metrics = train_dynamics(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": model.state_dict(), "config": asdict(cfg), "metrics": metrics},
+    torch.save({"state_dict": model.state_dict(), "config": asdict(cfg), "metrics": metrics, "vocab": VOCAB},
                out_dir / f"dynamics_{cfg.view}.pt")
     (out_dir / f"dynamics_{cfg.view}.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False))
     print(json.dumps(metrics, indent=2, ensure_ascii=False))

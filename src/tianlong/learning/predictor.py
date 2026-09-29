@@ -1,5 +1,5 @@
 """
-[INPUT]: 依赖 torch / torch_geometric 的 Batch，learning/model 的 DynamicsModel，learning/samples 的 agent_query / to_data，
+[INPUT]: 依赖 torch / torch_geometric 的 Batch，learning/model 的 DynamicsModel，learning/samples 的 agent_query / to_data，learning/featurize 的 check_vocab，
          agents/predictors 的 Prediction，cognition 的 BeliefStore / Candidate
 [OUTPUT]: 对外提供 GNNPredictor（OutcomePredictor 协议的 GNN 实现）
 [POS]: learning 与 agents 的接缝：训练好的角色视角动态模型以“预测器”身份接入 LangGraph 决策流程，
@@ -17,6 +17,7 @@ from torch_geometric.data import Batch
 
 from tianlong.agents.predictors import Prediction
 from tianlong.cognition import BeliefStore, Candidate
+from tianlong.learning.featurize import check_vocab
 from tianlong.learning.model import DynamicsModel
 from tianlong.learning.samples import agent_query, to_data
 
@@ -28,6 +29,7 @@ class GNNPredictor:
     @classmethod
     def load(cls, path: str | Path) -> GNNPredictor:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        check_vocab(ckpt, path)
         model = DynamicsModel(ckpt["config"]["hidden"])
         model.load_state_dict(ckpt["state_dict"])
         return cls(model)

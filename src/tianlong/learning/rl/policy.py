@@ -1,5 +1,5 @@
 """
-[INPUT]: 依赖 torch，learning/rl 的 GraphPolicyNet / ObsSpec / encode_observation，agents/policies 的 Choice / Situation
+[INPUT]: 依赖 torch，learning/rl 的 GraphPolicyNet / ObsSpec / encode_observation，learning/featurize 的 check_vocab，agents/policies 的 Choice / Situation
 [OUTPUT]: 对外提供 LearnedPolicy（Policy 协议的神经网络实现）
 [POS]: learning/rl 与 agents 的接缝：训练好的策略以“策略”身份接入 LangGraph 决策图，替换 ScriptedPolicy 而不改图。
        游玩时运行的是训练好的网络，不在每次玩家输入后临时重新训练
@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from tianlong.agents.policies import Choice, Situation
+from tianlong.learning.featurize import check_vocab
 from tianlong.learning.rl.module import GraphPolicyNet
 from tianlong.learning.rl.observation import ObsSpec, encode_observation
 
@@ -26,6 +27,7 @@ class LearnedPolicy:
     @classmethod
     def load(cls, path: str | Path) -> LearnedPolicy:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
+        check_vocab(ckpt, path)
         net = GraphPolicyNet(ckpt["config"]["hidden"])
         net.load_state_dict(ckpt["state_dict"])
         return cls(net)

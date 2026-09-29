@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 
 from tianlong.core import Op
+from tianlong.learning.featurize import VOCAB
 from tianlong.learning.rl.env import TianlongEnv
 from tianlong.learning.rl.module import CandidateScoringModule, GraphPolicyNet
 from tianlong.learning.rl.rewards import FALSE_ACCUSATION
@@ -233,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     report["seconds"] = round(time.time() - t0, 1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": ppo.state_dict(), "config": asdict(cfg)}, out_dir / "policy_ppo.pt")
+    torch.save({"state_dict": ppo.state_dict(), "config": asdict(cfg), "vocab": VOCAB}, out_dir / "policy_ppo.pt")
     (out_dir / "policy_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0

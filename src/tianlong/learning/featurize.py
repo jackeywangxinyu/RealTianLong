@@ -1,7 +1,7 @@
 """
-[INPUT]: 依赖 numpy，cognition 的 GraphView / VIEW_ATTRS / EVENT_KIND，cognition 的 Candidate，core 的 Op / Manner / Modality / Kind / Rel
-[OUTPUT]: 对外提供特征词表常量（NODE_KINDS / REL_VOCAB / F_NODE / F_EDGE / N_OPS / N_MANNERS）、GraphTensors、featurize()、
-         ActionCode、encode_action()
+[INPUT]: 依赖 numpy，cognition 的 GraphView / VIEW_ATTRS / EVENT_KIND，cognition 的 Candidate，core 的 Op / Manner / Modality / Kind / Rel / digest
+[OUTPUT]: 对外提供特征词表常量（NODE_KINDS / REL_VOCAB / F_NODE / F_EDGE / N_OPS / N_MANNERS）、词表指纹 VOCAB 与 check_vocab() / StaleModel、
+         GraphTensors、featurize()、ActionCode、encode_action()
 [POS]: learning 的输入边界：只接受 GraphView——角色入口的张量在构造上就拿不到世界真相。
        关系类型（含极性与方向）编码进边特征，与可信度/时效/传闻一起交给支持 edge_dim 的卷积；
        numpy 是中立格式：动态模型转成 PyG Data，RL 环境把它填充成定长观测
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from tianlong.cognition import EVENT_KIND, VIEW_ATTRS, Candidate, GraphView
-from tianlong.core import Kind, Manner, Modality, Op, Rel
+from tianlong.core import Kind, Manner, Modality, Op, Rel, digest
 
 # ============================================================
 #  词表
@@ -45,6 +45,20 @@ OP_INDEX = {o: i for i, o in enumerate(Op)}
 MANNER_INDEX = {m: i for i, m in enumerate(Manner)}
 HOLDER_KINDS = (Kind.PLACE.value, Kind.SURFACE.value, Kind.PERSON.value)
 LOCATED_KINDS = (Kind.PERSON.value, Kind.ITEM.value, Kind.SURFACE.value)
+
+# 词表指纹：检查点记下训练时的词表。新增行动或属性后旧模型的张量形状就对不上——
+# 与其在 load_state_dict 里报一串维度错误，不如在加载时直说“请重训”
+VOCAB = digest(NODE_KINDS, EVENT_KINDS, MODALITIES, REL_VOCAB, VIEW_ATTRS, tuple(o.value for o in Op),
+               tuple(m.value for m in Manner))
+
+
+class StaleModel(ValueError):
+    """检查点的特征词表与当前代码不一致。"""
+
+
+def check_vocab(ckpt: dict, path: object) -> None:
+    if ckpt.get("vocab") != VOCAB:
+        raise StaleModel(f"{path} 是用另一套特征词表训练的（行动或属性有增减），请按 README“训练与结果”重训")
 
 
 @dataclass(frozen=True)
