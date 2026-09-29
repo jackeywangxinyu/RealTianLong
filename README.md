@@ -63,6 +63,43 @@ python -m tianlong --store neo4j --save 我的存档
 
 游戏内：`/beliefs` 查看你自己的认知，`/debug` 切换开发者视角（真相与 NPC 决策理由）。
 
+### 网页试玩与部署
+
+只游玩网页，不必安装 PyTorch、RLlib 或 Neo4j。使用 Python 3.11–3.13：
+
+```bash
+python3.12 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[web]'
+python -m tianlong.runtime.web
+```
+
+每个浏览器拥有独立的一局，世界与最近 200 回合文字默认保存在 `.cache/web-saves/` 的 SQLite 文件中。
+刷新页面、重启服务都能接续；“重开”只重开自己的游戏。同一浏览器的多个标签页共用存档。
+浏览器重试同一个请求编号不会重复推进时间；断线后重新连接可取回已完成的叙述。
+保留浏览器 Cookie 与磁盘存档才能继续原来的一局，清除 Cookie 后会开始新游戏。
+
+已安装官方 `cloudflared` 时，可以启动免费的外网试玩入口：
+
+```bash
+python scripts/serve_public.py --port 8765
+```
+
+入口会输出在终端，并记录在 `.cache/public/deployment.json`；Ctrl+C 同时关闭游戏服务与隧道。
+这是本机转发的试玩环境：电脑必须保持在线，重新启动隧道会换地址。Quick Tunnel 不支持 SSE，
+所以此脚本使用 JSON 回合接口；普通部署默认仍为逐句 SSE。
+未配置 `GEMINI_API_KEY` 时使用模板叙述与规则解释器，页面会标明；有密钥时使用模型叙述。
+
+云服务器可运行仓库的 Dockerfile，并保留 `/data` 挂载卷：
+
+```bash
+docker build -t realtianlong-web .
+docker run --rm -p 8000:8000 -v tianlong-saves:/data realtianlong-web
+```
+
+`PORT` 设置监听端口，`TIANLONG_DATA_DIR` 设置存档目录；直接运行 Python 时可用 `--host 0.0.0.0`、
+`--data-dir` 与 `--transport json` 配置。对外部署应经 HTTPS 反向代理访问。
+
 ## 设计验收用例：仓库钥匙
 
 玩家在仓库，守卫在入口，船长在港口；钥匙在桌上、属于船长、匹配锁着的仓库门。
@@ -317,6 +354,7 @@ pytest -m slow                          # PPO 冒烟
 ```
 
 CI（`.github/workflows/ci.yml`）跑两份：只装 dev 的核心零依赖套件，与装齐学习层（`constraints.txt` 锁定版本）+ Neo4j 服务的全量套件。
+网页部署还可单独安装 `.[web,dev]` 运行会话、SQLite 存档和 HTTP 回归测试，无需训练依赖。
 
 | 边界 | 实现 | 可证伪断言 |
 |---|---|---|

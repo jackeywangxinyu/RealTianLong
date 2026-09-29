@@ -41,3 +41,6 @@ test_hedge.py: 首字对冲验收，主模型准时就不请替补；迟到则�
 test_lead.py: 先声验收，玩家自己这一步写成确定的人话（拿到了、到了哪、原话照引、失败说明原因）；只说玩家自己、不抢旁人的言行，干等不抢先；同一回合同一句
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+网页部署回归补充：test_web 验证 Cookie 隔离、刷新对话、跨进程恢复、缓存淘汰恢复、重复请求、旧标签页、非法输入与断线后继续记录。
+test_store_contract 和 test_memory_plans 的后端契约包含 SQLite；test_resume 对内存与 SQLite 对比连续运行与读档接续。

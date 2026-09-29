@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode / Obligation / Said / SocialCue，persistence/store 的 TurnEnvelope
 [OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode /
-          obligation（待答与待回话，命题可缺）/ said（闲话无命题、带言语行为）/ cue 社交线索 / attitudes 态度 / envelope 请求进度）；
+          obligation（待答与待回话，命题可缺）/ said（闲话无命题、带言语行为）/ cue 社交线索 / attitudes 态度 / envelope 请求进度 / world 全世界 / mind 完整认知 / memory 经历）；
           旧记录缺新键时取缺省（言语行为为无、态度为空）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -12,11 +12,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from tianlong.cognition import Belief, Episode, Obligation, Said
+from tianlong.cognition import Belief, BeliefStore, Episode, Obligation, Said
 from tianlong.cognition.agenda import SocialCue
 from tianlong.core import (
     AddRelation,
     Change,
+    Entity,
     EntitySketch,
     Event,
     Fact,
@@ -34,7 +35,9 @@ from tianlong.core import (
     RemoveRelation,
     SetAttr,
     Social,
+    WorldState,
 )
+from tianlong.core.memories import MemoryRecord
 from tianlong.persistence.store import TurnEnvelope
 
 J = dict[str, Any]
@@ -224,3 +227,49 @@ def envelope_from(d: J, narration: str | None = None) -> TurnEnvelope:
                         tuple(int(t) for t in d["ticks"]), tuple(percept_from(p) for p in d["percepts"]),
                         tuple(d["fresh"]), bool(d["done"]), d.get("source", "rules"), narration,
                         tuple(intent_from(i) for i in d.get("followups", ())), bool(d.get("reaction", False)))
+
+
+def world_to(s: WorldState) -> J:
+    return {"seed": s.seed, "version": s.version, "clock": s.clock,
+            "entities": [{"id": e.id, "kind": e.kind.value, "name": e.name, "attrs": list(e.attrs)}
+                         for e in s.entities.values()],
+            "relations": [list(r.sort_key()) for r in s.sorted_relations()]}
+
+
+def world_from(d: J) -> WorldState:
+    return WorldState.build(d["seed"], d["clock"],
+                            [Entity(e["id"], Kind(e["kind"]), e["name"], tuple(tuple(a) for a in e["attrs"]))
+                             for e in d["entities"]],
+                            [Relation(s, Rel(r), t) for s, r, t in d["relations"]], d["version"])
+
+
+def mind_to(s: BeliefStore) -> J:
+    return {"owner": s.owner, "entities": [sketch_to(e) for e in s.entities.values()],
+            "beliefs": [{"prop": prop_to(b.prop), **belief_to(b)} for b in s.sorted_beliefs()],
+            "episodes": [episode_to(e) for e in s.episodes], "trust": dict(s.trust), "last_tick": s.last_tick,
+            "surveyed": dict(s.surveyed), "searched": dict(s.searched),
+            "obligations": [obligation_to(o) for o in s.obligations], "said": [said_to(x) for x in s.said],
+            "cues": [cue_to(c) for c in s.cues], "attitudes": dict(s.attitudes),
+            "company": dict(s.company), "allies": list(s.allies)}
+
+
+def mind_from(d: J) -> BeliefStore:
+    sketches = [sketch_from(e) for e in d["entities"]]
+    beliefs = [belief_from(prop_from(b["prop"]), b) for b in d["beliefs"]]
+    return BeliefStore(d["owner"], {s.id: s for s in sketches}, {b.prop: b for b in beliefs},
+                       tuple(episode_from(e) for e in d["episodes"]), d["trust"], d["last_tick"],
+                       d["surveyed"], d["searched"], tuple(obligation_from(o) for o in d["obligations"]),
+                       tuple(said_from(s) for s in d["said"]), tuple(cue_from(c) for c in d["cues"]),
+                       d["attitudes"], d["company"], tuple(d["allies"]))
+
+
+def memory_to(m: MemoryRecord) -> J:
+    return {"id": m.id, "world_id": m.world_id, "branch_id": m.branch_id, "owner": m.owner,
+            "kind": m.kind, "text": m.text, "occurred_at": m.occurred_at, "known_at": m.known_at,
+            "source": m.source, "subjects": list(m.subjects), "informant": m.informant, "verdict": m.verdict}
+
+
+def memory_from(d: J) -> MemoryRecord:
+    return MemoryRecord(d["id"], d["world_id"], d["branch_id"], d["owner"], d["kind"], d["text"],
+                        d["occurred_at"], d["known_at"], d["source"], tuple(d["subjects"]),
+                        d.get("informant"), d.get("verdict"))

@@ -23,3 +23,5 @@ rl/: 强化学习（见 rl/CLAUDE.md）
 __init__.py: 包入口（torch / torch_geometric / ray 为可选依赖）
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
+datagen 的样本构造依赖延迟到 collect 路径导入；own_effect_slots/observation_gain 的纯规则计算无需 PyTorch。

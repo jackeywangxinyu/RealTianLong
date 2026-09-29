@@ -22,6 +22,7 @@ from tianlong.persistence import (
     CommitBatch,
     InMemoryWorldStore,
     RequestConflict,
+    SQLiteWorldStore,
     TurnEnvelope,
     VersionConflict,
 )
@@ -49,10 +50,13 @@ def _neo4j_store():
         pytest.skip(f"Neo4j 不可达: {e}")
 
 
-@pytest.fixture(params=["memory", pytest.param("neo4j", marks=pytest.mark.neo4j)])
-def store(request):
+@pytest.fixture(params=["memory", "sqlite", pytest.param("neo4j", marks=pytest.mark.neo4j)])
+def store(request, tmp_path):
     if request.param == "memory":
         yield InMemoryWorldStore()
+        return
+    if request.param == "sqlite":
+        yield SQLiteWorldStore(tmp_path / "world.sqlite3")
         return
     s = _neo4j_store()
     s.created = []  # type: ignore[attr-defined]
