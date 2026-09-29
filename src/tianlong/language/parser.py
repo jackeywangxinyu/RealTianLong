@@ -215,6 +215,17 @@ def _residue(t: str, ms: Sequence[Mention], hits: Sequence[tuple[int, int, Op]])
     return rest
 
 
+def _clean_name(t: str, residue: str) -> str | None:
+    """剩下的字只有在原句里连成一片、且在句尾或标点前自然收住时，才当作一个名字说出口（“研读北冥神功”）；
+    否则（“学着龚光杰的样子比划两下”）宁可说“这样东西”，也不说出半个词。"""
+    i = t.find(residue)
+    end = i + len(residue)
+    body = t.rstrip("".join(_PUNCT))
+    if not 2 <= len(residue) <= 6 or i == -1 or not (end >= len(body) or t[end] in _PUNCT):
+        return None
+    return residue
+
+
 def _first_quote(t: str) -> str | None:
     for left, right in _QUOTES:
         a = t.find(left)
@@ -289,6 +300,22 @@ def pose_of(text: str, names: Sequence[str] = ()) -> str:
     return s.strip().rstrip("".join(_PUNCT))[:40]
 
 
+_NAME_STOP = "，,。！!？?来去了着向对朝往给在上里 "
+
+
+def _unknown_name(rest: str) -> str | None:
+    """“掏出”之后那个不认识的东西叫什么：None = 后面不是名字；"" = 是个名字但词界说不准（宁可不说，也不说出半个词）。
+    只有在标点、虚字或句尾自然收住（不是被长度截断）才采用，“怀里的闪电貂”取“的”之后那段。"""
+    m = re.match(rf"[^{_NAME_STOP}]{{1,8}}", rest)
+    if m is None:
+        return None
+    end = m.end()
+    if end < len(rest) and rest[end] not in _NAME_STOP:
+        return ""                          # 被长度截断：“大理段氏的金牌，喝令……”
+    name = m.group(0).split("的")[-1]
+    return name if 2 <= len(name) <= 6 else ""
+
+
 def wield_problem(text: str, store: BeliefStore, aliases: Aliases | None = None) -> str | None:
     """“掏出/拔出/亮出……”声称手里有某物：认识但不在身上、或根本不认识，就是编造前提——给出场内的否定。"""
     t = text.strip().lower()
@@ -311,9 +338,9 @@ def wield_problem(text: str, store: BeliefStore, aliases: Aliases | None = None)
                 if m.kind == Kind.ITEM and m.eid not in held and sk is not None:
                     return f"你身上并没有{sk.name}。"
             else:
-                name = re.match(r"[^，,。！!？?来去了着向对朝往给在上里 ]{1,6}", t[j:])
+                name = _unknown_name(t[j:])
                 if name is not None:
-                    return f"你身上并没有{name.group(0)}。"
+                    return f"你身上并没有{name}。" if name else "你身上并没有这样东西。"
             i = t.find(w, i + 1)
     return None
 
@@ -384,7 +411,9 @@ def _parse_as(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention],
         return held[0] if len(held) == 1 and not residue else None
 
     def lacking(template: str) -> Parsed:
-        return _unclear(template.format(residue) if residue else _ASKS[op])
+        if not residue:
+            return _unclear(_ASKS[op])
+        return _unclear(template.format(_clean_name(t, residue) or "这样东西"))
 
     target = obj = None
     social: Social | None = None

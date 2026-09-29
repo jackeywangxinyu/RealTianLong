@@ -544,11 +544,12 @@ def engine_metrics(engine: Mapping[str, Any]) -> list[dict[str, Any]]:
     out.append(_metric("G1", "叙述句子被闸门丢弃的比例", "≤ 5%", "不适用（没有模型叙述）" if ratio is None else f"{ratio:.1%}",
                        None if ratio is None else ratio <= 0.05, len(llm_turns),
                        "" if exact or not llm_turns else "会话未暴露丢弃句数：以违规条数近似", ratio))
-    present = [t for t in turns if t.get("npc_present")]
+    present = [t for t in turns if t.get("npc_present")                  # 追问、场外问答不推进时间：NPC 无从开口
+               and t.get("advanced", t.get("label") == "advanced")]
     spoke = sum(1 for t in present if t.get("npc_spoke"))
     out.append(_metric("N1", "有 NPC 在场的回合里 NPC 开口", "≥ 50%", _rate(spoke, len(present)),
                        spoke / len(present) >= 0.5 if present else None, len(present),
-                       "在场按真相；开口 = NPC 的言语事件、玩家听到的 NPC 言语或会话给出的台词"))
+                       "只数推进了时间的回合；在场按真相；开口 = NPC 的言语事件、玩家听到的 NPC 言语或会话给出的台词"))
     return out + [common["F2"], common["P1"]]
 
 
