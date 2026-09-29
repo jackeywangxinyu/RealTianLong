@@ -19,7 +19,7 @@ from tianlong.cognition import BeliefStore, Candidate, belief_view, world_view  
 from tianlong.core import Op  # noqa: E402
 from tianlong.kernel import Kernel  # noqa: E402
 from tianlong.learning.featurize import F_EDGE, F_NODE, REL_VOCAB, featurize  # noqa: E402
-from tianlong.learning.samples import agent_sample, env_sample, to_data  # noqa: E402
+from tianlong.learning.samples import GONE, UNKNOWN, agent_sample, env_sample, to_data  # noqa: E402
 from tianlong.scenarios import build_warehouse  # noqa: E402
 
 from .conftest import make_intent  # noqa: E402
@@ -72,7 +72,7 @@ def test_batching_offsets_pointers(warehouse):
     assert int(a.holder_next_idx[key_row]) == a.act_actor[0], "标签：钥匙的下一容纳者是玩家"
 
 
-def test_agent_label_keeps_unknown_unknown(warehouse):
+def test_agent_label_separates_gone_from_unknown(warehouse):
     s = warehouse.state
     guard = BeliefStore("guard").revise_all(warehouse.priors["guard"])[0]
     r = Kernel().step(s, [make_intent("player", Op.TAKE, "key", based_on=0)])
@@ -82,29 +82,35 @@ def test_agent_label_keeps_unknown_unknown(warehouse):
     smp = agent_sample(before, after, r.state.clock, "guard", Candidate(Op.MOVE, "warehouse", "door_main"), True)
     key_pos = list(smp.located).index(smp.graph.index_of("key"))
     assert smp.holder_now[key_pos] == smp.graph.index_of("table")
-    assert smp.holder_next[key_pos] == -1, "进门后：钥匙不在桌上，但去向未知"
+    assert smp.holder_next[key_pos] == GONE, "进门后：钥匙确知不在桌上、去向不明——不是“仍不知道”"
+    player_pos = list(smp.located).index(smp.graph.index_of("captain"))
+    assert smp.holder_next[player_pos] in (UNKNOWN, smp.holder_now[player_pos]), "没有负证据的就不是 GONE"
 
 
 def test_tiny_training_beats_no_change_baseline():
     from tianlong.learning.train import TrainConfig, train_dynamics
     # 冒烟只验证流水线可学（底图分布）；江湖化分布的效果由全量训练报告给出（README“训练与结果”）
     _, m = train_dynamics(TrainConfig(view="env", worlds=50, epochs=6, seed=1, jianghu=0.0), log=lambda *_: None)
-    assert m["changed_recall"] > 0.3, m          # 基线为 0
-    assert m["unchanged_kept"] > 0.97, m          # 基线为 1，不能为了抓变化而乱改事实
+    assert m["holder_changed_recall"] > 0.3, m          # 基线为 0
+    assert m["holder_unchanged_kept"] > 0.97, m          # 基线为 1，不能为了抓变化而乱改事实
+    assert m["coverage_train"]["op:move"] > 0 and "baselines_fit_on_train" in m
 
 
-def test_stale_checkpoint_is_refused_with_a_clear_error(tmp_path):
-    """词表一变（新增行动/属性），旧模型在加载时就被拒绝，而不是在张量形状上报错。"""
-    from tianlong.learning.featurize import VOCAB, StaleModel
+def test_stale_or_wrong_view_checkpoint_is_refused_with_a_clear_error(tmp_path):
+    """规格一变（属性/行动/预测目标增减），旧模型在加载时就被拒绝；全知（env）模型不能冒充角色预测器（C01）。"""
     from tianlong.learning.model import DynamicsModel
     from tianlong.learning.predictor import GNNPredictor
+    from tianlong.learning.schema import SCHEMA, StaleModel
 
     ckpt = {"state_dict": DynamicsModel(16).state_dict(), "config": {"hidden": 16}}
-    torch.save(ckpt, tmp_path / "old.pt")
+    torch.save({**ckpt, "vocab": "old"}, tmp_path / "old.pt")
     with pytest.raises(StaleModel, match="重训"):
         GNNPredictor.load(tmp_path / "old.pt")
-    torch.save({**ckpt, "vocab": VOCAB}, tmp_path / "new.pt")
-    assert GNNPredictor.load(tmp_path / "new.pt").model is not None
+    torch.save({**ckpt, "schema": SCHEMA, "view": "env"}, tmp_path / "env.pt")
+    with pytest.raises(StaleModel, match="视角"):
+        GNNPredictor.load(tmp_path / "env.pt")
+    torch.save({**ckpt, "schema": SCHEMA, "view": "agent"}, tmp_path / "agent.pt")
+    assert GNNPredictor.load(tmp_path / "agent.pt").model is not None
 
 
 def test_gnn_predictor_plugs_into_npc_pipeline():

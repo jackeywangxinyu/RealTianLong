@@ -1,10 +1,11 @@
 """
-[INPUT]: 依赖 torch，ray.rllib 的 PPOConfig / RLModuleSpec / MultiRLModuleSpec，learning/rl 的 env / module / observation
+[INPUT]: 依赖 torch，ray.rllib 的 PPOConfig / RLModuleSpec / MultiRLModuleSpec，learning/rl 的 env / module / observation，learning/schema 的 SCHEMA
 [OUTPUT]: 对外提供 RLConfig、collect_demos()、behavior_clone()、evaluate()、train_ppo()、main()（python -m tianlong.learning.rl.train）
 [POS]: learning/rl 的训练与验收流水线：模仿学习初始化（脚本策略示范）→ PPO（同一策略网络被所有角色共享参数，但各自观测各自的认知）→
        留出种子上对照 随机 / 脚本 / 模仿 / PPO，并做“去掉世界模型预测特征”的消融，回答“每个组件究竟增加了什么”；
        评测同时数“冤枉人”与“动手”两种手段；env_runners/gpus 让同一 CLI 在 Colab 上并行采样、GPU 学习；
-       示范者约 99% 时刻在等待，模仿学习按 bc_wait_share 平衡两类样本并单独报告非等待动作的准确率，否则会学成“永远等待”
+       示范者约 99% 时刻在等待，模仿学习按 bc_wait_share 平衡两类样本并单独报告非等待动作的准确率，否则会学成“永远等待”；
+       策略检查点带规格指纹、视角 policy 与训练时的 ObsSpec
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -23,10 +24,10 @@ import torch
 import torch.nn.functional as F
 
 from tianlong.core import Op
-from tianlong.learning.featurize import VOCAB
 from tianlong.learning.rl.env import TianlongEnv
 from tianlong.learning.rl.module import CandidateScoringModule, GraphPolicyNet
 from tianlong.learning.rl.rewards import FALSE_ACCUSATION
+from tianlong.learning.schema import FEATURES_VERSION, SCHEMA
 
 Obs = dict[str, np.ndarray]
 PolicyFn = Callable[[TianlongEnv, dict[str, Obs]], dict[str, int]]
@@ -195,7 +196,8 @@ def train_ppo(cfg: RLConfig, init: GraphPolicyNet | None, log=print) -> GraphPol
             "npc": RLModuleSpec(module_class=CandidateScoringModule, model_config=model_config)}))
         .env_runners(num_env_runners=cfg.env_runners)
         .learners(num_learners=0, num_gpus_per_learner=cfg.gpus)
-        .training(lr=cfg.lr, train_batch_size_per_learner=cfg.train_batch, minibatch_size=250, num_epochs=4,
+        .training(lr=cfg.lr, train_batch_size_per_learner=cfg.train_batch,
+                  minibatch_size=min(250, cfg.train_batch), num_epochs=4,
                   gamma=0.97, lambda_=0.95, entropy_coeff=cfg.entropy, vf_loss_coeff=0.5, clip_param=0.2)
         .debugging(seed=cfg.seed)
     )
@@ -249,7 +251,9 @@ def main(argv: list[str] | None = None) -> int:
     report["seconds"] = round(time.time() - t0, 1)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": ppo.state_dict(), "config": asdict(cfg), "vocab": VOCAB}, out_dir / "policy_ppo.pt")
+    torch.save({"state_dict": ppo.state_dict(), "config": asdict(cfg), "schema": SCHEMA,
+                "features_version": FEATURES_VERSION, "view": "policy", "obs_spec": asdict(env.obs_spec)},
+               out_dir / "policy_ppo.pt")
     (out_dir / "policy_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0

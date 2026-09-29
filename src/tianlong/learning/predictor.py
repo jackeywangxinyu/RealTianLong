@@ -1,9 +1,12 @@
 """
-[INPUT]: 依赖 torch / torch_geometric 的 Batch，learning/model 的 DynamicsModel，learning/samples 的 agent_query / to_data，learning/featurize 的 check_vocab，
-         agents/predictors 的 Prediction，cognition 的 BeliefStore / Candidate
-[OUTPUT]: 对外提供 GNNPredictor（OutcomePredictor 协议的 GNN 实现）
+[INPUT]: 依赖 torch / torch_geometric 的 Batch，learning/model 的 DynamicsModel，learning/samples 的 agent_query / to_data，
+         learning/schema 的 check_schema，agents/predictors 的 Prediction，cognition 的 BeliefStore / Candidate
+[OUTPUT]: 对外提供 GNNPredictor（OutcomePredictor 协议的 GNN 实现）、GAIN_SCALE
 [POS]: learning 与 agents 的接缝：训练好的角色视角动态模型以“预测器”身份接入 LangGraph 决策流程，
-       替换 HeuristicPredictor 而不改策略与图。输入只有角色认知；输出保留概率——预测不是事实
+       替换 HeuristicPredictor 而不改策略与图。输入只有角色认知；输出保留概率——预测不是事实。
+       加载时同时核对规格指纹与视角：全知（env）模型不能冒充角色的主观预测。
+       预期获知来自“有效新观察数”头（扣除行动本身的直接效果），而不是位置变化概率之和——
+       确定地走到已知的地方不算获知，原地仔细查看却可能有所发现
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -17,9 +20,11 @@ from torch_geometric.data import Batch
 
 from tianlong.agents.predictors import Prediction
 from tianlong.cognition import BeliefStore, Candidate
-from tianlong.learning.featurize import check_vocab
 from tianlong.learning.model import DynamicsModel
 from tianlong.learning.samples import agent_query, to_data
+from tianlong.learning.schema import check_schema
+
+GAIN_SCALE = 5.0    # 期望有效新观察数 → [0, 1] 的尺度：五条以上视为“收获很大”
 
 
 class GNNPredictor:
@@ -29,7 +34,7 @@ class GNNPredictor:
     @classmethod
     def load(cls, path: str | Path) -> GNNPredictor:
         ckpt = torch.load(path, map_location="cpu", weights_only=True)
-        check_vocab(ckpt, path)
+        check_schema(ckpt, path, view="agent")
         model = DynamicsModel(ckpt["config"]["hidden"])
         model.load_state_dict(ckpt["state_dict"])
         return cls(model)
@@ -41,14 +46,7 @@ class GNNPredictor:
         if not cands:
             return []
         samples = [agent_query(store, now, store.owner, c) for c in cands]
-        batch = Batch.from_data_list([to_data(s) for s in samples])
-        out = self.model(batch)
+        out = self.model(Batch.from_data_list([to_data(s) for s in samples]))
         success = torch.sigmoid(out.success)
-        # 预期获知量：每个可定位节点“下一刻认为的位置不同于现在”的概率之和（关心的物品加倍），截断到 [0, 1]
-        probs = torch.softmax(out.holder, dim=-1)
-        p_change = 1.0 - probs.gather(1, out.holder_now.unsqueeze(1)).squeeze(1)
-        focus = set(interests)
-        weights = torch.tensor([2.0 if s.graph.node_ids[i] in focus else 1.0 for s in samples for i in s.located])
-        owner = batch.batch[batch.located]
-        gain = torch.zeros(len(cands)).index_add_(0, owner, p_change * weights).clamp(0, 1)
+        gain = (out.obs_gain / GAIN_SCALE).clamp(0, 1)
         return [Prediction(float(success[i]), float(gain[i]), "gnn") for i in range(len(cands))]

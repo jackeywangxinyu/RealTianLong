@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from tianlong.cognition import BeliefStore, belief_view, candidates
@@ -121,9 +123,18 @@ def test_p03_hearsay_does_not_carry_true_appearance():
 def test_p04_unseen_appearance_is_unknown_not_false():
     _, store = _tell_about_vial("poisoned")
     node = next(n for n in belief_view(store, 999).nodes if n.id == "vial")
-    assert dict(node.attrs)["small"] == 0.0 and dict(node.attrs)["weapon"] == 0.0, "没见过：未知，而不是“不小/不是兵刃”"
+    assert not node.knows("small") and not node.knows("weapon") and not node.knows("cures"), \
+        "没见过：未知（缺席），而不是“不小/不是兵刃/不治什么”"
     seen = next(n for n in belief_view(store, 999).nodes if n.id == "key")
-    assert dict(seen.attrs)["small"] == 1.0 and dict(seen.attrs)["weapon"] == -1.0, "亲眼见过：外观确知"
+    assert seen.value("small") is True and seen.value("weapon") is False, "亲眼见过：外观确知"
+    if importlib.util.find_spec("numpy") is not None:
+        from tianlong.learning.featurize import featurize
+        from tianlong.learning.schema import ATTR_BLOCK
+        g = featurize(belief_view(store, 999))
+        vial, key = g.x[g.index_of("vial")], g.x[g.index_of("key")]
+        assert vial[ATTR_BLOCK["small"].known] == 0 and vial[ATTR_BLOCK["small"].start] == 0, "张量里：未知 = known 0"
+        assert key[ATTR_BLOCK["weapon"].known] == 1 and key[ATTR_BLOCK["weapon"].start] == -1, "已知的否"
+        assert vial[ATTR_BLOCK["locked"].known] == -1, "药瓶锁没锁：不适用，不是未知"
 
 
 def test_p05_hearsay_place_is_not_described_as_seen():

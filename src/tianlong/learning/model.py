@@ -1,10 +1,12 @@
 """
 [INPUT]: 依赖 torch，torch_geometric 的 TransformerConv / global_mean_pool / global_max_pool / to_dense_batch，
-         learning/featurize 的维度常量
-[OUTPUT]: 对外提供 RelationalEncoder（带边特征的关系图编码器）、DynamicsModel（行动条件化的后果预测器）、DynamicsOutput
+         learning/schema 的维度常量与预测目标规格
+[OUTPUT]: 对外提供 RelationalEncoder（带边特征的关系图编码器）、DynamicsModel（行动条件化的后果预测器）、DynamicsOutput、loss_terms()
 [POS]: learning 的 GNN 本体。编码器用 TransformerConv(edge_dim)：关系类型/极性/方向与可信度/时效/传闻都在边特征里，
-       RGCN 类卷积会丢掉这些认知语义。动态模型回答“这个行动之后会怎样”：成败、每个可定位节点的下一容纳者（含“未知”）、属性三态。
-       位置头带一个可学习的“惯性”项：大多数事实不变，模型只需学会何时改变
+       RGCN 类卷积会丢掉这些认知语义。动态模型回答“这个行动之后会怎样”，覆盖范围由 schema.TARGETS 声明：
+       成败、可定位节点的下一容纳者（含 UNKNOWN 与 GONE 两个空类）、动态布尔属性三态、动态数值属性（值 + 是否已知）、
+       是否认识新实体、有效新观察数。行动条件化包含言语命题（谓词、主语、宾语、极性、提问）。
+       位置与已知性各带可学习的“惯性”项：大多数事实不变，模型只需学会何时改变
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -13,12 +15,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch_geometric.nn import TransformerConv, global_max_pool, global_mean_pool
 from torch_geometric.utils import to_dense_batch
 
-from tianlong.cognition.view import VIEW_ATTRS
-from tianlong.learning.featurize import F_EDGE, F_NODE, N_MANNERS, N_OPS
+from tianlong.learning.schema import (
+    DYN_BOOL,
+    DYN_NUM,
+    F_EDGE,
+    F_NODE,
+    N_MANNERS,
+    N_OPS,
+    N_TOPICS,
+    OBS_GAIN_CAP,
+)
 
 
 def _mlp(i: int, h: int, o: int) -> nn.Sequential:
@@ -43,13 +54,35 @@ class RelationalEncoder(nn.Module):
         return h
 
 
+class ActionEncoder(nn.Module):
+    """ActionCode → 行动向量 + 逐节点角色标记（目标/对象/行动者/命题主语/命题宾语）。策略网络与动态模型共用同一种编码。"""
+
+    ROLES = 5
+
+    def __init__(self, d: int) -> None:
+        super().__init__()
+        self.op_emb = nn.Embedding(N_OPS, 16)
+        self.manner_emb = nn.Embedding(N_MANNERS, 8)
+        self.topic_emb = nn.Embedding(N_TOPICS + 1, 8)            # 0 = 无命题
+        self.mix = _mlp(16 + 8 + 8 + 2 + self.ROLES * d, d, d)
+
+    def forward(self, h: Tensor, op: Tensor, manner: Tensor, topic: Tensor, flags: Tensor,
+                refs: list[tuple[Tensor, Tensor]]) -> Tensor:
+        picked = [h[idx] * has.unsqueeze(-1).float() for idx, has in refs]
+        return self.mix(torch.cat([self.op_emb(op), self.manner_emb(manner), self.topic_emb(topic), flags, *picked], -1))
+
+
 @dataclass
 class DynamicsOutput:
     success: Tensor        # [B] logit
-    holder: Tensor         # [M, Nmax + 1] logit，最后一类 = 未知
-    attr: Tensor           # [N, A, 3] logit
-    holder_now: Tensor     # [M] 当前容纳者的类别下标（由输入推出，供惯性基线与指标使用）
-    holder_next: Tensor    # [M] 监督目标类别下标
+    holder: Tensor         # [M, Nmax + 2] logit，末两类 = UNKNOWN、GONE
+    holder_now: Tensor     # [M] 当前容纳者类别（由输入推出，供惯性基线与指标使用）
+    holder_next: Tensor    # [M] 监督目标类别
+    attr: Tensor           # [N, len(DYN_BOOL), 3] logit
+    num: Tensor            # [N, len(DYN_NUM)] 缩放后的值
+    num_known: Tensor      # [N, len(DYN_NUM)] logit
+    discover: Tensor       # [B] logit
+    obs_gain: Tensor       # [B] 期望条数（0 ~ OBS_GAIN_CAP）
 
 
 class DynamicsModel(nn.Module):
@@ -57,36 +90,32 @@ class DynamicsModel(nn.Module):
         super().__init__()
         d = hidden
         self.encoder = RelationalEncoder(d, layers, heads)
-        self.op_emb = nn.Embedding(N_OPS, 16)
-        self.manner_emb = nn.Embedding(N_MANNERS, 8)
-        self.action = _mlp(16 + 8 + 3 * d, d, d)
-        self.condition = _mlp(2 * d + 3, d, d)                       # 行动条件化：节点知道自己是目标/对象/行动者
+        self.action = ActionEncoder(d)
+        self.condition = _mlp(2 * d + ActionEncoder.ROLES, d, d)   # 行动条件化：节点知道自己在行动里扮演什么
         self.post = nn.ModuleList(TransformerConv(d, d // heads, heads=heads, edge_dim=F_EDGE) for _ in range(2))
         self.post_norms = nn.ModuleList(nn.LayerNorm(d) for _ in range(2))
         self.success_head = _mlp(3 * d, d, 1)
         self.query = _mlp(2 * d, d, d)
         self.key = nn.Linear(d, d)
-        self.null_head = _mlp(2 * d, d, 1)
-        self.inertia = nn.Parameter(torch.tensor(3.0))                # 事实倾向于保持不变
-        self.attr_head = _mlp(2 * d, d, len(VIEW_ATTRS) * 3)
+        self.null_head = _mlp(2 * d, d, 2)                           # UNKNOWN / GONE
+        self.inertia = nn.Parameter(torch.tensor(3.0))               # 事实倾向于保持不变
+        self.attr_head = _mlp(2 * d, d, len(DYN_BOOL) * 3)
+        self.num_head = _mlp(2 * d, d, len(DYN_NUM) * 2)
+        self.known_inertia = nn.Parameter(torch.tensor(3.0))
+        self.discover_head = _mlp(3 * d, d, 1)
+        self.gain_head = _mlp(3 * d, d, 1)
 
     def forward(self, data) -> DynamicsOutput:
         x, ei, ea, batch = data.x, data.edge_index, data.edge_attr, data.batch
         h = self.encoder(x, ei, ea)
         n, b = h.size(0), int(data.act_op.numel())
+        refs = [(data.act_target, data.act_has_target), (data.act_obj, data.act_has_obj),
+                (data.act_actor, data.act_has_actor), (data.act_topic_subj, data.act_has_topic_subj),
+                (data.act_topic_val, data.act_has_topic_val)]
+        a = self.action(h, data.act_op, data.act_manner, data.act_topic_pred, data.act_topic_flags, refs)   # [B, d]
 
-        def pick(idx: Tensor, has: Tensor) -> Tensor:
-            return h[idx] * has.unsqueeze(-1).float()
-
-        a = self.action(torch.cat([
-            self.op_emb(data.act_op), self.manner_emb(data.act_manner),
-            pick(data.act_target, data.act_has_target), pick(data.act_obj, data.act_has_obj),
-            pick(data.act_actor, data.act_has_actor),
-        ], dim=-1))                                                      # [B, d]
-
-        flags = torch.zeros(n, 3, device=h.device)
-        for col, idx, has in ((0, data.act_target, data.act_has_target), (1, data.act_obj, data.act_has_obj),
-                              (2, data.act_actor, data.act_has_actor)):
+        flags = torch.zeros(n, ActionEncoder.ROLES, device=h.device)
+        for col, (idx, has) in enumerate(refs):
             flags[idx[has], col] = 1.0
         h = h + self.condition(torch.cat([h, a[batch], flags], dim=-1))
         for conv, norm in zip(self.post, self.post_norms, strict=True):
@@ -95,7 +124,7 @@ class DynamicsModel(nn.Module):
         pooled = torch.cat([global_mean_pool(h, batch, b), global_max_pool(h, batch, b), a], dim=-1)
         success = self.success_head(pooled).squeeze(-1)
 
-        # ---- 位置指针：located 节点 i 对同图内每个容纳者 j 打分 + “未知”类 ----
+        # ---- 位置指针：located 节点 i 对同图内每个容纳者 j 打分 + UNKNOWN / GONE ----
         dense, mask = to_dense_batch(h, batch, batch_size=b)            # [B, Nmax, d]
         holder_ok, _ = to_dense_batch(data.is_holder, batch, batch_size=b, fill_value=False)
         offset = torch.zeros(b, dtype=torch.long, device=h.device)
@@ -107,15 +136,42 @@ class DynamicsModel(nn.Module):
         k = self.key(dense[g])                                          # [M, Nmax, d]
         scores = (k @ q.unsqueeze(-1)).squeeze(-1) / q.size(-1) ** 0.5
         nmax = scores.size(1)
-        now_cls = torch.where(data.holder_now_null, nmax, data.holder_now_idx - offset[g])
-        next_cls = torch.where(data.holder_next_null, nmax, data.holder_next_idx - offset[g])
-        current = torch.zeros_like(scores, dtype=torch.bool)
-        has_now = ~data.holder_now_null
-        current[has_now, now_cls[has_now]] = True
-        scores = (scores + self.inertia * current.float()).masked_fill(~(mask[g] & holder_ok[g]), float("-inf"))
-        null = self.null_head(torch.cat([h[loc], a[g]], dim=-1))
-        null = null + self.inertia * data.holder_now_null.float().unsqueeze(-1)
-        holder = torch.cat([scores, null], dim=-1)
 
-        attr = self.attr_head(torch.cat([h, a[batch]], dim=-1)).view(n, len(VIEW_ATTRS), 3)
-        return DynamicsOutput(success, holder, attr, now_cls, next_cls)
+        def cls(idx: Tensor, kind: Tensor) -> Tensor:
+            return torch.where(kind == 0, idx - offset[g], torch.where(kind == -1, nmax, nmax + 1))
+
+        now_cls, next_cls = cls(data.holder_now_idx, data.holder_now_kind), cls(data.holder_next_idx,
+                                                                                  data.holder_next_kind)
+        current = F.one_hot(now_cls, nmax + 2).float()
+        scores = scores.masked_fill(~(mask[g] & holder_ok[g]), float("-inf"))
+        holder = torch.cat([scores, self.null_head(torch.cat([h[loc], a[g]], dim=-1))], dim=-1)
+        holder = holder + self.inertia * current
+
+        ha = torch.cat([h, a[batch]], dim=-1)
+        attr = self.attr_head(ha).view(n, len(DYN_BOOL), 3)
+        num_out = self.num_head(ha).view(n, len(DYN_NUM), 2)
+        num = data.num_now + num_out[..., 0]                             # 残差：大多数数值不变
+        known = num_out[..., 1] + self.known_inertia * (2 * data.num_now_known.float() - 1)
+        discover = self.discover_head(pooled).squeeze(-1)
+        gain = F.softplus(self.gain_head(pooled).squeeze(-1)).clamp(max=OBS_GAIN_CAP)
+        return DynamicsOutput(success, holder, now_cls, next_cls, attr, num, known, discover, gain)
+
+
+def loss_terms(out: DynamicsOutput, data) -> dict[str, Tensor]:
+    """每个预测目标一项损失；角色视角才有的目标（发现、观察增益、已知性变化）只在角色样本上计。"""
+    zero = out.success.sum() * 0
+    terms = {"success": F.binary_cross_entropy_with_logits(out.success, data.success)}
+    terms["holder"] = F.cross_entropy(out.holder, out.holder_next) if out.holder.numel() else zero
+    m = data.bool_mask & ((data.bool_now != 1) | (data.bool_next != 1))
+    terms["attr"] = F.cross_entropy(out.attr[m], data.bool_next[m]) if m.any() else zero
+    vm = data.num_mask & data.num_next_known
+    terms["num"] = F.mse_loss(out.num[vm], data.num_next[vm]) if vm.any() else zero
+    agent_nodes = data.is_agent[data.batch].unsqueeze(-1) & data.num_mask
+    terms["known"] = F.binary_cross_entropy_with_logits(out.num_known[agent_nodes],
+                                                        data.num_next_known[agent_nodes].float()) \
+        if agent_nodes.any() else zero
+    ag = data.is_agent
+    terms["discover"] = F.binary_cross_entropy_with_logits(out.discover[ag], data.discover[ag]) if ag.any() else zero
+    terms["obs_gain"] = F.smooth_l1_loss(out.obs_gain[ag] / OBS_GAIN_CAP, data.obs_gain[ag] / OBS_GAIN_CAP) \
+        if ag.any() else zero
+    return terms

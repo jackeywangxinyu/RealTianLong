@@ -19,7 +19,8 @@ from tianlong.cognition.candidates import Candidate, candidates
 from tianlong.cognition.view import (
     EVENT_KIND,
     EVENT_RELS,
-    VIEW_ATTRS,
+    ONEWAY_TO,
+    VIEW_RELS,
     GraphView,
     ViewEdge,
     ViewNode,
@@ -31,5 +32,5 @@ __all__ = [
     "DEFAULT_TRUST", "FIRSTHAND", "Belief", "BeliefChange", "BeliefStore", "Episode", "confidence_of",
     "effective_confidence",
     "Candidate", "candidates",
-    "EVENT_KIND", "EVENT_RELS", "VIEW_ATTRS", "GraphView", "ViewEdge", "ViewNode", "belief_view", "world_view",
+    "EVENT_KIND", "EVENT_RELS", "ONEWAY_TO", "VIEW_RELS", "GraphView", "ViewEdge", "ViewNode", "belief_view", "world_view",
 ]

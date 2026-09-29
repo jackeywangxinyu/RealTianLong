@@ -2,7 +2,7 @@
 [INPUT]: 依赖 ray.rllib 的 MultiAgentEnv，gymnasium，kernel 的 Kernel，cognition 的 BeliefStore / candidates，
          agents 的 HeuristicPredictor / ScriptedPolicy / Situation / OutcomePredictor，scenarios/procedural 的 random_scenario，
          learning/rl 的 observation / rewards
-[OUTPUT]: 对外提供 TianlongEnv（RLlib 多智能体环境）、MAX_PERSONS
+[OUTPUT]: 对外提供 TianlongEnv（RLlib 多智能体环境，crops 暴露每个角色最近一次观测的裁剪报告）、MAX_PERSONS
 [POS]: learning/rl 的训练环境：每个角色一个智能体，同一 tick 同时出招、由同一个内核统一结算——与线上完全相同的转移机制。
        观测只来自各自的认知图；奖励来自真实目标进展。expert_actions() 给出脚本策略的示范，供模仿学习与评测；
        last_events 暴露上一步的真实事件，只供评测统计行为，不进观测
@@ -19,7 +19,7 @@ from tianlong.agents.predictors import HeuristicPredictor, OutcomePredictor, Pre
 from tianlong.cognition import BeliefStore, Candidate, candidates
 from tianlong.core import Op, derive_seed, make_id
 from tianlong.kernel import Kernel
-from tianlong.learning.rl.observation import ObsSpec, encode_observation, observation_space
+from tianlong.learning.rl.observation import CropReport, ObsSpec, build_observation, observation_space
 from tianlong.learning.rl.rewards import goal_achieved, step_reward
 from tianlong.scenarios.procedural import random_scenario
 
@@ -44,6 +44,7 @@ class TianlongEnv(MultiAgentEnv):
         self._episodes = 0
         self._cands: dict[str, tuple[Candidate, ...]] = {}
         self._preds: dict[str, tuple[Prediction, ...]] = {}
+        self.crops: dict[str, CropReport] = {}    # 每个角色最近一次观测的裁剪报告：超预算必须看得见
         self.last_events: tuple = ()
 
     # ------------------------------------------------------------
@@ -93,8 +94,10 @@ class TianlongEnv(MultiAgentEnv):
         interests = list(profile.interests())
         cands = candidates(store, interests, self.obs_spec.max_cands)
         preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests))
-        self._cands[agent], self._preds[agent] = cands, preds
-        return encode_observation(store, self.state.clock, profile, cands, preds, self.obs_spec)
+        ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec)
+        # 动作编号对应裁剪后保留的候选：引用放不下的候选不会以悬空指针出现在策略面前
+        self._cands[agent], self._preds[agent], self.crops[agent] = ob.candidates, ob.predictions, ob.report
+        return ob.obs
 
     def expert_actions(self) -> dict[str, int]:
         out = {}

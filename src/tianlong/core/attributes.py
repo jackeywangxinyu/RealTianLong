@@ -1,8 +1,8 @@
 """
-[INPUT]: 依赖 core/schema 的 Kind
+[INPUT]: 依赖 core/schema 的 Kind，core/ids 的 digest
 [OUTPUT]: 对外提供 AttrType / Access / AttrSpec / ATTRIBUTES / ATTR_SPECS / SKILLS / DEFAULT_EDGE / 按获知途径派生的集合
-          （OBSERVABLE_ATTRS / STATUS_ATTRS / PRIVATE_ATTRS / TACTILE_ATTRS / INTROSPECTIVE_ATTRS）、is_private_attr()、applies()、
-          true_value()（从实体存储值 + 时钟派生规则真正使用的值）
+          （OBSERVABLE_ATTRS / STATUS_ATTRS / PRIVATE_ATTRS / TACTILE_ATTRS / INTROSPECTIVE_ATTRS）、DYNAMIC_ATTRS、ATTRS_VERSION、
+          is_private_attr()、applies()、true_value()（从实体存储值 + 时钟派生规则真正使用的值）
 [POS]: core 的类型化属性规格——整个系统关于“实体有哪些属性、什么类型、谁能以什么途径知道、会不会被行动改变”的唯一真相源。
        kernel 据此决定感知给谁什么，cognition 据此把认知投影成“值 + 是否已知 + 是否适用”，learning 据此构造特征列与预测目标。
        数值不再一律压成布尔：内力、锋利、难度、进度、点穴剩余时限都以数值进入环境模型
@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from tianlong.core.ids import digest
 from tianlong.core.schema import Kind
 
 if TYPE_CHECKING:
@@ -80,11 +81,16 @@ ATTRIBUTES: tuple[AttrSpec, ...] = (
     _a("subdued", _B, (_P,), Access.STATUS, dynamic=True),  # 由 subdued_until 与时钟派生
     _a("subdued_left", _N, (_P,), Access.HIDDEN, scale=20.0, dynamic=True),
     # ---- 内在 ----
-    _a("martial", _N, (_P,), Access.INTROSPECTIVE, dynamic=True),
+    _a("martial", _N, (_P,), Access.INTROSPECTIVE, scale=1.5, dynamic=True),
     *(_a(s, _B, (_P,), Access.INTROSPECTIVE, dynamic=True) for s in SKILLS),
     *(_a(f"progress_{s}", _N, (_P,), Access.INTROSPECTIVE, scale=5.0, dynamic=True) for s in SKILLS),
 )
 ATTR_SPECS: dict[str, AttrSpec] = {a.key: a for a in ATTRIBUTES}
+# 行动会改变的属性：动态模型的属性预测目标（布尔三态 + 数值回归），声明即覆盖范围
+DYNAMIC_ATTRS: tuple[str, ...] = tuple(a.key for a in ATTRIBUTES if a.dynamic)
+# 规格指纹：属性的增删、类型、获知途径或尺度一变，依赖它的模型与存档都必须知道
+ATTRS_VERSION = digest(tuple((a.key, a.type.value, tuple(sorted(k.value for k in a.kinds)), a.access.value, a.scale,
+                              a.categories, a.dynamic) for a in ATTRIBUTES))
 
 
 def applies(kind: Kind | str, key: str) -> bool:

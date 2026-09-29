@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate，core 的 Op / Rel / Proposition / Kind
-[OUTPUT]: 对外提供 Prediction、OutcomePredictor 协议、HeuristicPredictor（基于信念的先验预测器）
+[OUTPUT]: 对外提供 Prediction、PRED_FIELDS（进入策略观测的预测字段，顺序即列序）、OutcomePredictor 协议、HeuristicPredictor（基于信念的先验预测器）
 [POS]: agents 的后果预测接口；回答“这个候选行动可能发生什么”，只看角色认知，保留不确定性。
        learning 训练出的 GNN 预测器实现同一协议后即可替换，策略代码不动
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -21,6 +21,10 @@ class Prediction:
     success: float     # 行动成功的主观概率
     info_gain: float   # 预期获得新信息的程度（0~1）
     note: str = ""
+
+
+# 进入策略观测的预测字段（0~1）：观测契约按它排列列，新增字段只需在这里登记
+PRED_FIELDS = ("success", "info_gain")
 
 
 class OutcomePredictor(Protocol):

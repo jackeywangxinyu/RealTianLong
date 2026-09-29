@@ -2,7 +2,8 @@
 [INPUT]: 依赖 core 的 Op / Manner / Kind / Rel / Fact / Proposition / Intent / signature_error，cognition/beliefs 的 BeliefStore
 [OUTPUT]: 对外提供 Candidate（结构化候选行动）、candidates()（从个人认知生成候选集）
 [POS]: cognition 的行动空间；候选对象只来自角色的认知图——按角色“以为”的世界剪枝是合理的，按真实世界剪枝则是泄密。
-       策略（脚本/RL）与预测器都在这个候选集上工作
+       策略（脚本/RL）与预测器都在这个候选集上工作。超出上限时按行动族轮转配额截断（等待、移动、言语、查看、物件、
+       动手、施用、锁、研读各轮流取一个，族内与目标相关的在前）：物件组合再多也挤不掉交流、观察与等待
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -15,11 +16,19 @@ from tianlong.cognition.beliefs import BeliefStore
 from tianlong.core import Fact, Intent, Kind, Manner, Op, Proposition, Rel
 from tianlong.core.grammar import signature_error
 
-# 截断优先级：身体行动在前，组合爆炸的言语在后——人多时截断只会丢掉一部分“说什么”，不会丢掉“动手”
+# 候选的规范顺序（下标即策略的动作编号）：WAIT 永居首位，其余按操作、再按对象
 _PRIORITY = (Op.WAIT, Op.MOVE, Op.ATTACK, Op.USE, Op.TAKE, Op.PUT, Op.GIVE, Op.UNLOCK, Op.LOCK, Op.INSPECT, Op.STUDY,
              Op.TELL, Op.ASK)
 _OP_ORDER = {op: i for i, op in enumerate(_PRIORITY)}
-assert set(_OP_ORDER) == set(Op), "新增操作必须在截断优先级中登记"
+assert set(_OP_ORDER) == set(Op), "新增操作必须在规范顺序中登记"
+# 截断配额：按行动族轮转取候选。族的顺序决定预算极紧时谁先入选——交流与观察排在组合爆炸的物件操作之前
+FAMILIES: tuple[tuple[str, frozenset[Op]], ...] = (
+    ("wait", frozenset({Op.WAIT})), ("move", frozenset({Op.MOVE})), ("speech", frozenset({Op.TELL, Op.ASK})),
+    ("inspect", frozenset({Op.INSPECT})), ("handle", frozenset({Op.TAKE, Op.PUT, Op.GIVE})),
+    ("combat", frozenset({Op.ATTACK})), ("care", frozenset({Op.USE})), ("locks", frozenset({Op.UNLOCK, Op.LOCK})),
+    ("study", frozenset({Op.STUDY})),
+)
+assert set().union(*(ops for _, ops in FAMILIES)) == set(Op), "新增操作必须归入某个行动族"
 _WHILE_SUBDUED = frozenset({Op.WAIT, Op.TELL, Op.ASK})
 
 
@@ -47,6 +56,7 @@ def candidates(
     store: BeliefStore, interests: Iterable[str] | None = None, max_count: int | None = None
 ) -> tuple[Candidate, ...]:
     """角色此刻“想得到”的全部行动。interests 限定言语话题涉及的物品（默认：所有认识的物品）。"""
+    interests = list(interests) if interests is not None else None
     me = store.owner
     here = store.location_of(me)
 
@@ -121,4 +131,24 @@ def candidates(
         out = [c for c in out if c.op in _WHILE_SUBDUED]   # 自知穴道被制：只剩开口与等待
     valid = [c for c in out if signature_error(c.op, kind, c.target, c.obj, c.topic) is None]
     ordered = [valid[0], *sorted(set(valid[1:]), key=Candidate.sort_key)]  # WAIT 永远在首位，截断时不丢
-    return tuple(ordered[:max_count] if max_count else ordered)
+    if max_count and len(ordered) > max_count:
+        ordered = _budgeted(ordered, max_count, set(interests or ()))
+    return tuple(ordered)
+
+
+def _budgeted(ordered: list[Candidate], budget: int, focus: set[str]) -> list[Candidate]:
+    """行动族轮转配额：每轮每族取一个（族内与目标相关者优先），直到用完预算；入选者保持规范顺序。"""
+    def relevant(c: Candidate) -> bool:
+        refs = {c.target, c.obj}
+        if c.topic is not None:
+            refs |= {c.topic.prop.subject, c.topic.prop.value if isinstance(c.topic.prop.value, str) else None}
+        return bool(refs & focus)
+
+    queues = [sorted((c for c in ordered if c.op in ops), key=lambda c: (not relevant(c), c.sort_key()))
+              for _, ops in FAMILIES]
+    chosen: set[Candidate] = set()
+    while len(chosen) < budget and any(queues):
+        for q in queues:
+            if q and len(chosen) < budget:
+                chosen.add(q.pop(0))
+    return [c for c in ordered if c in chosen]

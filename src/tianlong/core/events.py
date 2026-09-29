@@ -1,8 +1,10 @@
 """
 [INPUT]: 依赖 core/schema 的 Op / Manner / Kind，core/changes 的 Change，core/propositions 的 Fact，core/entities 的 Scalar
-[OUTPUT]: 对外提供 Intent / Outcome / Event / PerceivedEvent / Modality / EntitySketch（含亲见/只闻其名）/ Percept / Observation
+[OUTPUT]: 对外提供 Intent / Outcome / Event / PerceivedEvent / Modality / EntitySketch（含亲见/只闻其名）/ Percept / Observation、
+          结算原因封闭词表 RULE_REASONS / ADMISSION_REASONS / REASONS 与 reason_key()
 [POS]: core 的因果链数据：意图 → 事件（真相，含变化）→ 观察（服务端溯源记录）→ 感知（角色可见的片面内容）；
-       MOVE 的 obj 是所走的路线（门），目的地与路线一起构成行动，内核不替角色挑路
+       MOVE 的 obj 是所走的路线（门），目的地与路线一起构成行动，内核不替角色挑路；
+       原因词表是 kernel（产出）与 learning（编码）之间的契约
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -44,6 +46,32 @@ class Outcome(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"    # 尝试了但没成功（门锁着、东西不在）——失败本身也是事实
     REJECTED = "rejected"  # 根本没进入世界：语法非法、过时版本
+
+
+# ============================================================
+#  结算原因的封闭词表：规则只能使用登记过的原因（kernel/resolution 在构造时校验），
+#  learning 据此把事件节点的“原因”编码成定长特征——新增原因必须先在这里登记，词表指纹随之改变
+# ============================================================
+
+RULE_REASONS: tuple[str, ...] = (
+    # 尚未触及世界的尝试
+    "out_of_reach", "not_found", "not_holding", "already_there", "already_held", "self_target", "subdued",
+    "nothing_to_learn", "already_learned", "route_not_here", "route_mismatch", "not_adjacent",
+    # 触及世界之后的失败
+    "held_by_other", "door_locked", "one_way", "wrong_key", "already_locked", "already_unlocked", "no_effect",
+    "parried", "evaded",
+    # 成功但有进境之分
+    "mastered", "progress",
+)
+ADMISSION_REASONS: tuple[str, ...] = ("unknown_actor", "duplicate_actor", "stale", "unknown_op", "syntax")
+REASONS: tuple[str, ...] = RULE_REASONS + ADMISSION_REASONS
+
+
+def reason_key(reason: str | None) -> str | None:
+    """语法拒绝带着细节（"syntax: ..."），归一到词表里的 "syntax"。"""
+    if reason is None:
+        return None
+    return "syntax" if reason.startswith("syntax") else reason
 
 
 @dataclass(frozen=True, slots=True)

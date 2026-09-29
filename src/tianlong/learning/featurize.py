@@ -1,8 +1,9 @@
 """
-[INPUT]: 依赖 numpy，cognition 的 GraphView / VIEW_ATTRS / EVENT_KIND，cognition 的 Candidate，core 的 Op / Manner / Modality / Kind / Rel / digest
-[OUTPUT]: 对外提供特征词表常量（NODE_KINDS / REL_VOCAB / F_NODE / F_EDGE / N_OPS / N_MANNERS）、词表指纹 VOCAB 与 check_vocab() / StaleModel、
-         GraphTensors、featurize()、ActionCode、encode_action()
-[POS]: learning 的输入边界：只接受 GraphView——角色入口的张量在构造上就拿不到世界真相。
+[INPUT]: 依赖 numpy，learning/schema 的列布局与词表，cognition 的 GraphView / Candidate，core 的 Scalar / reason_key
+[OUTPUT]: 对外提供 GraphTensors、featurize()、ActionCode、encode_action()、bool_tri()（布尔属性三态读回）、num_known()（数值属性读回），
+          并再导出 schema 的维度常量（F_NODE / F_EDGE / REL_VOCAB / N_OPS / N_MANNERS / OP_INDEX / MANNER_INDEX / HOLDER_KINDS / LOCATED_KINDS）
+[POS]: learning 的输入编码器：只接受 GraphView——角色入口的张量在构造上就拿不到世界真相。
+       按 schema 的列布局把“已知值”写进节点列，未知留零且 known=0，不适用 known=-1；
        关系类型（含极性与方向）编码进边特征，与可信度/时效/传闻一起交给支持 edge_dim 的卷积；
        numpy 是中立格式：动态模型转成 PyG Data，RL 环境把它填充成定长观测
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -14,51 +15,46 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from tianlong.cognition import EVENT_KIND, VIEW_ATTRS, Candidate, GraphView
-from tianlong.core import Kind, Manner, Modality, Op, Rel, digest
-
-# ============================================================
-#  词表
-# ============================================================
-
-NODE_KINDS = (*(k.value for k in Kind), EVENT_KIND)
-EVENT_KINDS = (*(o.value for o in Op), "noise")
-MODALITIES = tuple(m.value for m in Modality)
-_WORLD_RELS = tuple(r.value for r in Rel)
-_EVENT_RELS = ("OCCURRED_AT", "BY", "ON", "WITH")
-
-# 关系词表：(关系, 否定, 反向)。世界关系有正负极性；事件关系只有正。每条边都配一条反向边，让信息双向流动
-REL_VOCAB: tuple[tuple[str, bool, bool], ...] = tuple(
-    (r, neg, rev)
-    for r in (*_WORLD_RELS, *_EVENT_RELS)
-    for neg in ((False, True) if r in _WORLD_RELS else (False,))
-    for rev in (False, True)
+from tianlong.cognition import Candidate, GraphView
+from tianlong.core import REASONS, Kind, applies
+from tianlong.core.attributes import AttrType
+from tianlong.learning.schema import (
+    AGE_SCALE,
+    ATTR_BLOCK,
+    ATTR_BLOCKS,
+    EV_MODALITY,
+    EV_OP,
+    EV_OUTCOME,
+    EV_REASON,
+    EV_TOPIC,
+    EV_TOPIC_HOLDS,
+    EV_TOPIC_QUERY,
+    EVENT_OPS,
+    F_EDGE,
+    F_NODE,
+    MANNER_INDEX,
+    MODALITIES,
+    N_MANNERS,
+    N_OPS,
+    NODE_KINDS,
+    OP_INDEX,
+    OUTCOMES,
+    REL_INDEX,
+    REL_VOCAB,
+    SELF_COL,
+    TOPIC_INDEX,
+    AttrBlock,
 )
-_REL_INDEX = {k: i for i, k in enumerate(REL_VOCAB)}
 
-F_NODE = len(NODE_KINDS) + len(VIEW_ATTRS) + 1 + len(EVENT_KINDS) + len(MODALITIES)
-F_EDGE = len(REL_VOCAB) + 3          # + 可信度、时效、传闻
-AGE_SCALE = 120.0                    # 两小时以上的时效视为同等陈旧
-N_OPS = len(Op)
-N_MANNERS = len(Manner)
-OP_INDEX = {o: i for i, o in enumerate(Op)}
-MANNER_INDEX = {m: i for i, m in enumerate(Manner)}
+__all__ = [
+    "F_EDGE", "F_NODE", "HOLDER_KINDS", "LOCATED_KINDS", "MANNER_INDEX", "N_MANNERS", "N_OPS", "OP_INDEX", "REL_VOCAB",
+    "ActionCode", "GraphTensors", "bool_tri", "encode_action", "featurize", "num_known",
+]
+
 HOLDER_KINDS = (Kind.PLACE.value, Kind.SURFACE.value, Kind.PERSON.value)
 LOCATED_KINDS = (Kind.PERSON.value, Kind.ITEM.value, Kind.SURFACE.value)
-
-# 词表指纹：检查点记下训练时的词表。新增行动或属性后旧模型的张量形状就对不上——
-# 与其在 load_state_dict 里报一串维度错误，不如在加载时直说“请重训”
-VOCAB = digest(NODE_KINDS, EVENT_KINDS, MODALITIES, REL_VOCAB, VIEW_ATTRS, tuple(o.value for o in Op),
-               tuple(m.value for m in Manner))
-
-
-class StaleModel(ValueError):
-    """检查点的特征词表与当前代码不一致。"""
-
-
-def check_vocab(ckpt: dict, path: object) -> None:
-    if ckpt.get("vocab") != VOCAB:
-        raise StaleModel(f"{path} 是用另一套特征词表训练的（行动或属性有增减），请按 README“训练与结果”重训")
+_REASON_INDEX = {r: i for i, r in enumerate(REASONS)}
+_KINDS = {k.value: k for k in Kind}
 
 
 @dataclass(frozen=True)
@@ -82,24 +78,38 @@ class GraphTensors:
         return len(self.node_ids)
 
 
+# ============================================================
+#  属性块：值 + known（1 已知 / 0 未知 / -1 不适用）
+# ============================================================
+
+
+def _write_attr(row: np.ndarray, b: AttrBlock, value: object) -> None:
+    row[b.known] = 1.0
+    if b.type == AttrType.BOOL:
+        row[b.start] = 1.0 if value else -1.0
+    elif b.type == AttrType.NUM:
+        row[b.start] = float(np.clip(float(value) / b.scale, -1.0, 1.0))  # type: ignore[arg-type]
+    elif value in b.categories:
+        row[b.start + b.categories.index(value)] = 1.0          # type: ignore[arg-type]
+
+
 def featurize(view: GraphView) -> GraphTensors:
     ids = view.node_ids()
     index = {eid: i for i, eid in enumerate(ids)}
     x = np.zeros((len(ids), F_NODE), dtype=np.float32)
-    k0, a0 = len(NODE_KINDS), len(NODE_KINDS) + len(VIEW_ATTRS)
-    e0 = a0 + 1
-    m0 = e0 + len(EVENT_KINDS)
     for i, n in enumerate(view.nodes):
-        x[i, NODE_KINDS.index(n.kind)] = 1.0
-        attrs = dict(n.attrs)
-        for j, a in enumerate(VIEW_ATTRS):
-            x[i, k0 + j] = attrs.get(a, 0.0)
-        x[i, a0] = 1.0 if n.is_self else 0.0
-        for key, val in n.attrs:
-            if key.startswith("op:") and key[3:] in EVENT_KINDS:
-                x[i, e0 + EVENT_KINDS.index(key[3:])] = val
-            elif key.startswith("modality:") and key[9:] in MODALITIES:
-                x[i, m0 + MODALITIES.index(key[9:])] = val
+        row = x[i]
+        row[NODE_KINDS.index(n.kind)] = 1.0
+        row[SELF_COL] = 1.0 if n.is_self else 0.0
+        kind = _KINDS.get(n.kind)
+        known = dict(n.attrs)
+        for b in ATTR_BLOCKS:
+            if kind is None or not applies(kind, b.key):
+                row[b.known] = -1.0
+            elif b.key in known:
+                _write_attr(row, b, known[b.key])
+        if n.event:
+            _write_event(row, dict(n.event))
 
     src, dst, attr = [], [], []
     for e in view.edges:
@@ -107,7 +117,7 @@ def featurize(view: GraphView) -> GraphTensors:
             continue
         for rev in (False, True):
             feat = np.zeros(F_EDGE, dtype=np.float32)
-            feat[_REL_INDEX[(e.rel, not e.holds, rev)]] = 1.0
+            feat[REL_INDEX[(e.rel, not e.holds, rev)]] = 1.0
             feat[-3] = e.confidence
             feat[-2] = min(e.age, AGE_SCALE) / AGE_SCALE
             feat[-1] = 1.0 if e.hearsay else 0.0
@@ -120,9 +130,44 @@ def featurize(view: GraphView) -> GraphTensors:
     return GraphTensors(ids, tuple(n.kind for n in view.nodes), x, edge_index, edge_attr)
 
 
+def _one_hot(row: np.ndarray, span: slice, vocab: tuple[str, ...], value: object) -> None:
+    if value in vocab:
+        row[span.start + vocab.index(value)] = 1.0     # type: ignore[arg-type]
+
+
+def _write_event(row: np.ndarray, ev: dict) -> None:
+    _one_hot(row, EV_OP, EVENT_OPS, ev.get("op"))
+    _one_hot(row, EV_MODALITY, MODALITIES, ev.get("modality"))
+    _one_hot(row, EV_OUTCOME, OUTCOMES, ev.get("outcome"))
+    if ev.get("reason") in _REASON_INDEX:
+        row[EV_REASON.start + _REASON_INDEX[ev["reason"]]] = 1.0
+    if ev.get("topic_pred") in TOPIC_INDEX:
+        row[EV_TOPIC.start + TOPIC_INDEX[ev["topic_pred"]]] = 1.0
+        row[EV_TOPIC_HOLDS] = 1.0 if ev.get("topic_holds") else -1.0
+        row[EV_TOPIC_QUERY] = 1.0 if ev.get("topic_query") else 0.0
+
+
 # ============================================================
-#  行动编码：操作 + 方式 + 目标/对象/行动者 在图中的位置（-1 表示无）
-#  言语的命题内容不进入动态模型：它不改变物理世界，只改变听者的说法
+#  读回：动态属性的预测目标直接从节点列取，保证“输入怎么编码、标签就怎么定义”
+# ============================================================
+
+
+def bool_tri(x: np.ndarray, key: str) -> np.ndarray:
+    """[N] 布尔属性三态：-1 否 / 0 未知或不适用 / 1 是。"""
+    b = ATTR_BLOCK[key]
+    return np.where(x[:, b.known] > 0.5, x[:, b.start], 0.0).astype(np.float32)
+
+
+def num_known(x: np.ndarray, key: str) -> tuple[np.ndarray, np.ndarray]:
+    """[N] 数值属性（已缩放）与是否已知。"""
+    b = ATTR_BLOCK[key]
+    known = x[:, b.known] > 0.5
+    return np.where(known, x[:, b.start], 0.0).astype(np.float32), known
+
+
+# ============================================================
+#  行动编码：操作 + 方式 + 目标/对象（MOVE 为路线门）/行动者 + 言语命题（谓词、主语、宾语、极性、是否提问）
+#  下标为 -1 表示无；言语命题的主语/宾语也是图中的节点——换一个话题、换一个说法，就是另一个行动
 # ============================================================
 
 
@@ -133,8 +178,21 @@ class ActionCode:
     target: int
     obj: int
     actor: int
+    topic_pred: int = -1
+    topic_subj: int = -1
+    topic_val: int = -1
+    topic_holds: float = 0.0
+    topic_query: float = 0.0
 
 
 def encode_action(g: GraphTensors, actor: str, cand: Candidate) -> ActionCode:
+    pred, subj, val, holds, query = -1, -1, -1, 0.0, 0.0
+    if cand.topic is not None:
+        p = cand.topic.prop
+        pred = TOPIC_INDEX.get(p.predicate, -1)
+        subj = g.index_of(p.subject)
+        val = g.index_of(p.value) if isinstance(p.value, str) else -1
+        holds = 1.0 if cand.topic.holds else -1.0
+        query = 1.0 if p.value is None else 0.0
     return ActionCode(OP_INDEX[cand.op], MANNER_INDEX[cand.manner], g.index_of(cand.target), g.index_of(cand.obj),
-                      g.index_of(actor))
+                      g.index_of(actor), pred, subj, val, holds, query)
