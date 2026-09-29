@@ -1,10 +1,11 @@
 """
 [INPUT]: 依赖 core 的 WorldState / Event / Percept / Fact 等，kernel/space 的空间查询，kernel/resolution 的 Resolution
-[OUTPUT]: 对外提供 Fragment（行动留下的可感知片段）、Witnessing（一次事件的目击上下文）、scene_percept()、make_percept()、
-          change_facts()、attr_fact()、sketches_for()、audibility()、SILENT_FAILURES
+[OUTPUT]: 对外提供 Fragment（行动留下的可感知片段）、Witnessing（一次事件的目击上下文）、scene_percept()、self_knowledge()、
+          make_percept()、change_facts()、attr_fact()、sketches_for()、in_sight()、audibility()、SILENT_FAILURES
 [POS]: kernel 的感知物理：决定“谁以何种方式、获得事件的哪一部分”。观察不按行动的“目标”投影，而按行动在物理世界里
        实际留下的片段投影——失败的移动没有抵达，目的地的人就什么也看不见；内部失败原因与未说出口的意图默认不进目击。
        外观只给亲眼所见：言语提到的实体、隔墙听见的地点、门那头的地点都只有名字（seen=False），不读取真实外观。
+       自我感知（内力、所学、进度、手中之物的手感）只进本人的环顾，永不给旁人。
        规则通过覆写 fragments()/perceive() 组合这些积木，加新行动不改本模块
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -17,7 +18,9 @@ from dataclasses import dataclass, replace
 
 from tianlong.core import (
     OBSERVABLE_ATTRS,
+    SKILLS,
     STATUS_ATTRS,
+    TACTILE_ATTRS,
     AddRelation,
     Change,
     EntitySketch,
@@ -36,6 +39,7 @@ from tianlong.core import (
     derive_seed,
     is_private_attr,
 )
+from tianlong.core.attributes import true_value
 from tianlong.kernel import space
 from tianlong.kernel.resolution import Resolution
 
@@ -323,5 +327,23 @@ def scene_percept(s: WorldState, observer: str) -> Percept:
     for door, other in space.neighbors(s, place, visible_only=True):
         facts.append(Fact(Proposition.rel(door, Rel.CONNECTS, place)))
         facts.append(Fact(Proposition.rel(door, Rel.CONNECTS, other)))
+    facts.extend(self_knowledge(s, observer))
     scopes = (place, *space.surfaces_in(s, place))
     return make_percept(s, Modality.SCENE, None, tuple(facts), scopes, vantage=place)
+
+
+def self_knowledge(s: WorldState, observer: str) -> tuple[Fact, ...]:
+    """自我感知：自己的内力、所学、修习进度，以及手里东西的手感（锋利、淬毒、所载武功）。
+    这些事实只进本人的环顾——私密属性“不外泄”指的是不给旁人，而不是连自己都不知道自己。"""
+    me = s.entity(observer)
+    out = [Fact(Proposition.attr(observer, "martial", round(float(true_value(me, "martial", s.clock)), 3)))]
+    for skill in SKILLS:
+        out.append(Fact(Proposition.attr(observer, skill, True), bool(me.get(skill, False))))
+        out.append(Fact(Proposition.attr(observer, f"progress_{skill}", int(me.get(f"progress_{skill}", 0) or 0))))
+    for item in space.contents(s, observer):
+        e = s.entity(item)
+        for key in sorted(TACTILE_ATTRS):
+            v = true_value(e, key, s.clock)
+            out.append(Fact(Proposition.attr(item, key, True), v) if isinstance(v, bool)
+                       else Fact(Proposition.attr(item, key, v)))
+    return tuple(out)

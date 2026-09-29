@@ -1,8 +1,8 @@
 """
 [INPUT]: 依赖标准库 enum / dataclasses
-[OUTPUT]: 对外提供 Kind / Rel / RelSpec / RELATIONS / Op / Manner / OpSignature / OP_SIGNATURES / OBSERVABLE_ATTRS / STATUS_ATTRS /
-          PRIVATE_ATTRS / is_private_attr / is_functional
-[POS]: core 的领域词汇表；kernel 据此裁定物理，cognition 据此生成候选与修正信念，learning 据此构造特征维度
+[OUTPUT]: 对外提供 Kind / Rel / RelSpec / RELATIONS / ATTR_PREFIX / Op / Manner / OpSignature / OP_SIGNATURES / is_functional
+[POS]: core 的领域词汇表；kernel 据此裁定物理，cognition 据此生成候选与修正信念，learning 据此构造特征维度。
+       属性的类型与获知途径在 core/attributes（唯一真相源）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -59,15 +59,6 @@ RELATIONS: dict[Rel, RelSpec] = {
 
 # 属性命题的谓词前缀：命题 (door, "attr.locked", True)
 ATTR_PREFIX = "attr."
-
-# 肉眼可见的静态外观；locked / hidden / alertness 等必须通过交互或推理获知
-OBSERVABLE_ATTRS = frozenset({"small", "weapon", "cures"})   # 瓷瓶上写着“解药”，一眼可知
-# 动态身体状态：环顾时对在场者如实可见，以带极性的属性事实进入信念（“他受伤了/没受伤”）
-STATUS_ATTRS = ("wounded", "poisoned", "subdued")
-# 永不以事实形式外泄的内部数值（内力、修习进度等）：旁人只能从后果推断
-PRIVATE_ATTRS = frozenset({"martial", "subdued_until"})
-PRIVATE_PREFIXES = ("progress_",)
-
 
 def is_functional(predicate: str) -> bool:
     """谓词是否构成互斥槽位：属性天然互斥；关系看 RelSpec。"""
@@ -131,7 +122,3 @@ OP_SIGNATURES: dict[Op, OpSignature] = {
     Op.STUDY: OpSignature(target=_k(Kind.ITEM)),
     Op.USE: OpSignature(target=_k(Kind.PERSON), obj=_k(Kind.ITEM)),
 }
-
-
-def is_private_attr(key: str) -> bool:
-    return key in PRIVATE_ATTRS or key.startswith(PRIVATE_PREFIXES)

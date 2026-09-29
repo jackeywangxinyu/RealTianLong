@@ -191,10 +191,17 @@ def test_jianghu_layer_keeps_base_world_intact():
             assert wuxia.profiles[h].goals[:len(p.goals)] == p.goals, "原有目标保留，江湖目标只追加"
 
 
-def test_private_attrs_never_reach_any_percept(kernel):
+def test_private_attrs_never_reach_other_people(kernel):
+    """私密属性（内力、进度、点穴时限）永不外泄给旁人；本人的环顾里有自我感知。"""
     s = dojo(b=0.1, absorb=True)
     for spec in [("b", Op.STUDY, "book"), ("a", Op.ATTACK, "b"), ("a", Op.ATTACK, "b"), ("a", Op.ATTACK, "b")]:
         r = step(kernel, s, spec)
         for o in r.observations:
-            assert not any(f.prop.is_attr and is_private_attr(f.prop.attr_key) for f in o.percept.facts), o
+            leaked = [f for f in o.percept.facts
+                      if f.prop.is_attr and is_private_attr(f.prop.attr_key) and f.prop.subject != o.observer]
+            assert not leaked, o
+            if o.percept.modality != Modality.SCENE:
+                assert not any(f.prop.is_attr and is_private_attr(f.prop.attr_key) for f in o.percept.facts), o
         s = r.state
+    mine = next(o.percept for o in r.observations if o.observer == "b" and o.percept.modality == Modality.SCENE)
+    assert Fact(Proposition.attr("b", "progress_evasion", 1)) in mine.facts, "自己读到哪了，自己清楚"

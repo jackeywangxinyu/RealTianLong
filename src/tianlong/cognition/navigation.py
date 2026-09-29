@@ -79,6 +79,22 @@ def route_to(store: BeliefStore, dest: str) -> tuple[str, str] | None:
     return step, routes_between(store, here, step)[0]
 
 
+def believed_distance(store: BeliefStore, a: str, b: str) -> int | None:
+    """沿认为存在、方向可走的门的最短跳数；地图上走不到返回 None。"""
+    dist = {a: 0}
+    queue = deque([a])
+    places = sorted(e for e, sk in store.entities.items() if sk.kind == Kind.PLACE)
+    while queue:
+        cur = queue.popleft()
+        if cur == b:
+            return dist[cur]
+        for nxt in places:
+            if nxt not in dist and routes_between(store, cur, nxt):
+                dist[nxt] = dist[cur] + 1
+                queue.append(nxt)
+    return None
+
+
 def next_hop(store: BeliefStore, dest: str) -> str | None:
     hop = route_to(store, dest)
     return hop[0] if hop else None

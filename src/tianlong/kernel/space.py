@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 core/world 的 WorldState，core/schema 的 Kind / Rel
 [OUTPUT]: 对外提供 holder_of / place_of / neighbors / passable / hops / persons_in / surfaces_in / contents /
-          visible_in / is_concealed / is_night / is_subdued / status_of / martial_power / venomous
+          visible_in / is_concealed / is_night / is_subdued / status_of / martial_power / venomous / WorldReader（目标语义的真相读者）
 [POS]: kernel 的空间与身体物理；行动规则与感知规则共享的“谁在哪、能看到什么、隔几道门、身手如何”查询，全部只读。
        暗门（hidden）不出现在环顾里，只能靠仔细查看发现（night_only 的只在夜里显形）；单向通道（oneway）只能往一头走
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import deque
 
 from tianlong.core import clock
+from tianlong.core.attributes import DEFAULT_EDGE
 from tianlong.core.schema import Kind, Rel
 from tianlong.core.world import WorldState
 
@@ -124,7 +125,7 @@ def visible_in(s: WorldState, place: str, viewer: str, reveal_hidden: bool = Fal
 #  被制住（点穴）以 subdued_until 表示，时限一过自行解开——状态随时钟流逝，无需定时器
 # ============================================================
 
-WEAPON_BONUS = 0.2
+WEAPON_BONUS = DEFAULT_EDGE
 
 
 def is_night(s: WorldState) -> bool:
@@ -160,3 +161,41 @@ def martial_power(s: WorldState, person: str) -> float:
 def venomous(s: WorldState, person: str) -> bool:
     return any(s.attr(w, "venom", False) for w in weapons_of(s, person))
 
+
+# ============================================================
+#  WorldReader：目标语义（core/goals）的“真相读者”——奖励与评测用，角色永远拿不到它
+# ============================================================
+
+
+class WorldReader:
+    def __init__(self, s: WorldState) -> None:
+        self.s = s
+
+    def holder(self, eid: str) -> str | None:
+        return holder_of(self.s, eid) if self.s.has_entity(eid) else None
+
+    def place(self, eid: str) -> str | None:
+        return place_of(self.s, eid) if self.s.has_entity(eid) else None
+
+    def owners(self, item: str) -> tuple[str, ...]:
+        return self.s.sources(item, Rel.OWNS)
+
+    def status(self, person: str, status: str) -> bool | None:
+        return status_of(self.s, person, status) if self.s.has_entity(person) else None
+
+    def persons_at(self, place: str) -> tuple[str, ...]:
+        return persons_in(self.s, place)
+
+    def distance(self, a: str, b: str) -> int | None:
+        """沿可通行方向的门（不论锁否）的最短跳数。"""
+        dist = {a: 0}
+        queue = deque([a])
+        while queue:
+            cur = queue.popleft()
+            if cur == b:
+                return dist[cur]
+            for door, nxt in neighbors(self.s, cur):
+                if nxt not in dist and passable(self.s, door, nxt):
+                    dist[nxt] = dist[cur] + 1
+                    queue.append(nxt)
+        return None
