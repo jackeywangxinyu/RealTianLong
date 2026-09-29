@@ -115,7 +115,7 @@ python -m tianlong.learning.profile --worlds 20 --out artifacts/profile.json
 
 两个训练 CLI 都支持 `--resume true`：GNN 按轮续训（与不中断逐位相同），PPO 从最近一次保存的权重接续；换了配置的断点会被拒绝，`--resume` 本身不进 run_id。
 
-**Colab**：更大规模与多训练种子在 Colab GPU 上跑同一套命令——[`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb)（由 `scripts/make_colab_notebook.py` 生成，`--commit <40 位提交>` 填入固定提交）。笔记本检出固定提交（代码来自 Drive 上的 git bundle 或 GitHub，从不嵌套克隆、从不静默用旧提交），按 `constraints.txt` 锁定版本安装，全量测试失败即停，按本机核数自动分配并行进程（A100 运行时约 12 核，全流程约 1.5–2 小时；T4 标准运行时 2 核约 8–10 小时），产物全部写进 `MyDrive/RealTianLong/runs/<运行名>/`，断线后重新“全部运行”会跳过已完成的阶段；私有仓库的令牌只经环境变量注入一次性请求头，不进 remote、git 配置与日志。
+**Colab**：更大规模与多训练种子在 Colab GPU 上跑同一套命令——[`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb)（由 `scripts/make_colab_notebook.py` 生成，`--commit <40 位提交>` 填入固定提交）。笔记本检出固定提交（代码来自 Drive 上的 git bundle 或 GitHub，从不嵌套克隆、从不静默用旧提交），按 `constraints.txt` 锁定版本安装，全量测试失败即停，按本机核数自动分配并行进程（速度取决于 CPU 核数；GPU 只用于 GNN 训练与学习器，显存需求远小于 16 GB——选每计算单元核数最多的运行时，不必选贵的 GPU），产物全部写进 `MyDrive/RealTianLong/runs/<运行名>/`，断线后重新“全部运行”会跳过已完成的阶段；私有仓库的令牌只经环境变量注入一次性请求头，不进 remote、git 配置与日志。
 
 口径（见 `learning/rl/evaluation.py`、`learning/train.py`）：
 
