@@ -69,6 +69,6 @@ def test_dotenv_fills_only_missing(tmp_path, monkeypatch):
 def test_cli_runs_scripted_input(monkeypatch, capsys):
     lines = iter(["拿走桌上的钥匙", "/beliefs", "/debug", "等待", "/quit"])
     monkeypatch.setattr("builtins.input", lambda _: next(lines))
-    assert main(["--llm", "none"]) == 0
+    assert main(["--world", "warehouse", "--llm", "none"]) == 0
     out = capsys.readouterr().out
     assert "钥匙在我身上" in out and "── 真相 ──" in out

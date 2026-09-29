@@ -15,7 +15,12 @@ from tianlong.cognition.beliefs import BeliefStore
 from tianlong.core import Fact, Intent, Kind, Manner, Op, Proposition, Rel
 from tianlong.core.grammar import signature_error
 
-_OP_ORDER = {op: i for i, op in enumerate(Op)}
+# 截断优先级：身体行动在前，组合爆炸的言语在后——人多时截断只会丢掉一部分“说什么”，不会丢掉“动手”
+_PRIORITY = (Op.WAIT, Op.MOVE, Op.ATTACK, Op.USE, Op.TAKE, Op.PUT, Op.GIVE, Op.UNLOCK, Op.LOCK, Op.INSPECT, Op.STUDY,
+             Op.TELL, Op.ASK)
+_OP_ORDER = {op: i for i, op in enumerate(_PRIORITY)}
+assert set(_OP_ORDER) == set(Op), "新增操作必须在截断优先级中登记"
+_WHILE_SUBDUED = frozenset({Op.WAIT, Op.TELL, Op.ASK})
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,15 +73,18 @@ def candidates(
 
     out: list[Candidate] = [Candidate(Op.WAIT)]
 
-    # ---- 移动：经由认为存在的门，去认为相邻的地点 ----
+    # ---- 移动：经由认为存在的门（含自己发现的暗门），去认为相邻的地点；确知是单向且方向不对的才剪掉 ----
     for d in doors:
+        oneway = next((b.prop.value for b in store.positives(d, "attr.oneway")), None)
         for b in store.positives(d, Rel.CONNECTS.value):
-            if b.prop.value != here:
+            if b.prop.value != here and (oneway is None or oneway == b.prop.value):
                 out.append(Candidate(Op.MOVE, target=b.prop.value))  # type: ignore[arg-type]
+                out.append(Candidate(Op.MOVE, target=b.prop.value, manner=Manner.CAREFUL))  # type: ignore[arg-type]
 
-    # ---- 物件：拿认为在身边的，放/给/开锁用手里的 ----
+    # ---- 物件：拿认为在身边的（含认为已被制住者身上的），放/给/开锁用手里的 ----
+    helpless = {p for p in persons if store.holds(Proposition.attr(p, "subdued", True))}
     for item in of_kind(Kind.ITEM):
-        if item not in held and is_here(item):
+        if item not in held and (is_here(item) or store.location_of(item) in helpless):
             out += [Candidate(Op.TAKE, item), Candidate(Op.TAKE, item, manner=Manner.CAREFUL)]
     for item in held:
         for dest in (*places_here, *surfaces):
@@ -92,6 +100,11 @@ def candidates(
     # ---- 查看 ----
     out += [Candidate(Op.INSPECT, t) for t in (*places_here, *surfaces, *persons)]
 
+    # ---- 武斗、修习、施用：对在场者动手；研读手中之物；把手中之物用在在场者或自己身上 ----
+    out += [Candidate(Op.ATTACK, p) for p in persons]
+    out += [Candidate(Op.STUDY, i) for i in held]
+    out += [Candidate(Op.USE, p, i) for i in held for p in (*persons, me)]
+
     # ---- 言语：说出自己相信的下落；询问不知下落的东西或人 ----
     for p in persons:
         for subject in topics:
@@ -103,6 +116,8 @@ def candidates(
             # 以为知道也可以问：当面质问、求证，都是合理的言语行动
             out.append(Candidate(Op.ASK, p, topic=Fact(Proposition.rel(subject, Rel.AT, None), True)))
 
+    if store.holds(Proposition.attr(me, "subdued", True)):
+        out = [c for c in out if c.op in _WHILE_SUBDUED]   # 自知穴道被制：只剩开口与等待
     valid = [c for c in out if signature_error(c.op, kind, c.target, c.obj, c.topic) is None]
     ordered = [valid[0], *sorted(set(valid[1:]), key=Candidate.sort_key)]  # WAIT 永远在首位，截断时不丢
     return tuple(ordered[:max_count] if max_count else ordered)

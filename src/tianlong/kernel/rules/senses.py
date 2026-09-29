@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 kernel/rules/base 的 ActionRule，kernel/space 的可见性查询，kernel/perception 的 Witnessing
-[OUTPUT]: 对外提供 InspectRule
-[POS]: kernel/rules 的主动感知；仔细查看能发现藏匿物、搜身能发现藏在身上的小物件，并给出“完整看清”的负证据范围
+[OUTPUT]: 对外提供 InspectRule（含暗门发现）
+[POS]: kernel/rules 的主动感知；仔细查看能发现藏匿物与暗门（夜现的只在夜里）、搜身能发现藏在身上的小物件，并给出“完整看清”的负证据范围
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -29,6 +29,21 @@ def _found(s: WorldState, holders: tuple[str, ...]) -> tuple[Fact, ...]:
     return tuple(facts)
 
 
+def _secret_passages(s: WorldState, here: str, via: str) -> tuple[Fact, ...]:
+    """仔细查看地点（或暗门所系的线索物，如玉璧）才能发现暗门；night_only 的暗门只在夜里显形。"""
+    facts: list[Fact] = []
+    for door, other in space.neighbors(s, here):
+        if not s.attr(door, "hidden", False):
+            continue
+        if via != here and s.attr(door, "clue") != via:
+            continue
+        if s.attr(door, "night_only", False) and not space.is_night(s):
+            continue
+        facts += [Fact(Proposition.rel(door, Rel.CONNECTS, here)), Fact(Proposition.rel(door, Rel.CONNECTS, other)),
+                  Fact(Proposition.attr(door, "hidden", True))]
+    return tuple(facts)
+
+
 class InspectRule(ActionRule):
     op = Op.INSPECT
     loudness_base = 0.2
@@ -53,7 +68,10 @@ class InspectRule(ActionRule):
             if space.place_of(s, target) != here:
                 return fail("out_of_reach")
             holders = (target,)
-        return succeed(learned=_found(s, holders), scopes=holders)
+        found = _found(s, holders)
+        if kind in (Kind.PLACE, Kind.SURFACE):
+            found += _secret_passages(s, here, target)
+        return succeed(learned=found, scopes=holders)
 
     def perceive(self, w: Witnessing) -> Iterator[tuple[str, Percept]]:
         # 在场者看见搜查过程，也看见搜出了什么（但不获得“完整看清”的范围）

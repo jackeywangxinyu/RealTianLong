@@ -30,6 +30,7 @@ from tianlong.core.grammar import signature_error
 from tianlong.kernel import space
 from tianlong.kernel.invariants import assert_invariants
 from tianlong.kernel.perception import Witnessing, make_percept, scene_percept
+from tianlong.kernel.resolution import fail
 from tianlong.kernel.rules import ActionRule, default_rules
 from tianlong.kernel.rules.base import MANNER_INITIATIVE
 
@@ -82,7 +83,10 @@ class Kernel:
         for it in sorted(admitted, key=lambda i: (-self._initiative(s, i), i.id)):
             rule = self._rules[it.op]
             place = space.place_of(working, it.actor)
-            res = rule.resolve(working, it)
+            if space.is_subdued(working, it.actor) and not rule.usable_when_subdued:
+                res = fail("subdued")      # 穴道被制，动弹不得
+            else:
+                res = rule.resolve(working, it)
             after = working.apply(res.changes) if res.changes else working
             evt = Event(make_id("evt", s.seed, s.version, it.id), s.clock, it, place,
                         res.outcome, res.reason, res.changes)

@@ -8,8 +8,8 @@
 成员清单
 beliefs.py: Belief/Episode/BeliefChange/BeliefStore，revise() 修正规则，positives() 允许同槽多值并存，effective_confidence() 让易变事实（位置/锁）按 60 分钟半衰期变旧，信任度来自角色设定，episodes 保留近期经历作为 GNN 事件节点
 navigation.py: believed_place() 沿认为的 AT 链找地点，next_hop() 沿认为存在的门 BFS——地图错了就会走错
-view.py: GraphView 统一图投影，world_view() 全知入口（仅环境动态学习）与 belief_view() 角色入口；边带可信度/时效/极性/传闻标记；learning 只接受 GraphView，隔离由类型边界保证
-candidates.py: Candidate 结构化候选行动 + candidates()，候选对象只来自认知图（按"以为"剪枝合理，按真相剪枝即泄密），确知钥匙不配才剪掉开锁；话题涵盖关心的物品与认识的人；WAIT 永居首位
+view.py: GraphView 统一图投影，world_view() 全知入口（仅环境动态学习）与 belief_view() 角色入口；节点带外观与身体状态三态、边带可信度/时效/极性/传闻标记；learning 只接受 GraphView，隔离由类型边界保证
+candidates.py: Candidate 结构化候选行动 + candidates()，候选对象只来自认知图（按"以为"剪枝合理，按真相剪枝即泄密），确知钥匙不配/通道单向才剪掉；含动手、研读、施用、悄悄移动、搜走被制者之物；自知被制只剩开口与等待；截断时身体行动优先于组合爆炸的言语；WAIT 永居首位
 __init__.py: 包入口
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

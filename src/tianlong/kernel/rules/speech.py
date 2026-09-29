@@ -19,6 +19,7 @@ from tianlong.kernel.rules.base import ActionRule
 class _SpeechRule(ActionRule):
     loudness_base = 0.3
     initiative = 0.5
+    usable_when_subdued = True    # 点了穴道，嘴还能说
 
     def resolve(self, s: WorldState, it: Intent) -> Resolution:
         listener = it.target

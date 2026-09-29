@@ -22,7 +22,6 @@ from tianlong.agents.port import AgentPort
 from tianlong.agents.predictors import HeuristicPredictor, OutcomePredictor, Prediction
 from tianlong.cognition import Candidate, candidates
 from tianlong.core import Intent, Op, make_id
-from tianlong.core.profiles import GoalKind
 from tianlong.language.speaker import Speaker, TemplateSpeaker
 from tianlong.language.templates import Names, render_experience
 
@@ -49,9 +48,7 @@ class NpcContext:
     max_candidates: int = 64
 
     def interests(self) -> list[str]:
-        return sorted({g.item for g in self.port.profile.goals} | {
-            g.recipient for g in self.port.profile.goals if g.kind == GoalKind.DELIVER and g.recipient
-        })
+        return list(self.port.profile.interests())
 
 
 def checkpoint_serde() -> JsonPlusSerializer:

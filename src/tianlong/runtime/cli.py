@@ -1,9 +1,9 @@
 """
-[INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，scenarios 的 build_warehouse，language/llm 的 llm_from_env，
+[INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，scenarios 的 SCENARIOS 注册表，language/llm 的 llm_from_env，
          language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/predictor、learning/rl/policy
 [OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()
 [POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
-       --store/--save 选择持久化与存档，--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC
+       --world 选择世界（默认天龙八部·无量山），--store/--save 选择持久化与存档，--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -20,10 +20,9 @@ from tianlong.core import Fact
 from tianlong.language.llm import llm_from_env
 from tianlong.language.templates import render_fact
 from tianlong.runtime.session import GameSession, TurnReport
-from tianlong.scenarios import build_warehouse
+from tianlong.scenarios import SCENARIOS
 
-_HELP = "指令示例：拿走桌上的钥匙 / 去仓库入口 / 用钥匙打开仓库门 / 问守卫钥匙在哪 / 等待\n" \
-        "元指令：/beliefs 查看你的认知  /debug 切换开发者视角  /quit 退出"
+_META = "元指令：/beliefs 查看你的认知  /debug 切换开发者视角  /quit 退出"
 
 
 def _debug_lines(r: TurnReport) -> list[str]:
@@ -33,7 +32,8 @@ def _debug_lines(r: TurnReport) -> list[str]:
             out.append(f"  {e.actor} {e.op.value} {e.intent.target or ''} {e.intent.obj or ''} → {e.outcome.value}"
                        f"{' (' + e.reason + ')' if e.reason else ''}")
     for d in r.deliberations:
-        out.append(f"  [{d.agent}] {d.intent.op.value} {d.intent.target or ''} ← {d.rationale}")
+        if d.intent.op.value != "wait":
+            out.append(f"  [{d.agent}] {d.intent.op.value} {d.intent.target or ''} ← {d.rationale}")
     out.append("  ⏱ " + " ".join(f"{k}={v}ms" for k, v in r.timings.items()))
     return out
 
@@ -53,6 +53,7 @@ def load_dotenv(path: Path = Path(".env")) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tianlong", description="图世界文字游戏")
     ap.add_argument("--llm", choices=["auto", "none"], default="auto", help="auto：有 GEMINI_API_KEY 则启用")
+    ap.add_argument("--world", choices=sorted(SCENARIOS), default="wuliang", help="wuliang：天龙八部·无量山；warehouse：仓库钥匙")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--store", choices=["memory", "neo4j"], default="memory", help="neo4j：读取 NEO4J_URI 等环境变量")
     ap.add_argument("--save", default=None, help="存档名（作为 world_id，Neo4j 下可跨进程保留）")
@@ -67,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
 
     llm = llm_from_env() if args.llm == "auto" else None
-    scenario = build_warehouse(args.seed)
+    scenario = SCENARIOS[args.world](args.seed)
     if args.save:
         scenario = replace(scenario, world_id=args.save)
     store = None
@@ -87,8 +88,11 @@ def main(argv: list[str] | None = None) -> int:
                           max_candidates=max_cands)
     debug = args.debug
     print(f"【{session.clock()}】{'（Gemini 叙述）' if llm else '（模板叙述）'}")
+    if scenario.setting and not session.resumed:
+        print(scenario.setting + "\n")
     print(session.intro())
-    print(_HELP)
+    print(scenario.hints)
+    print(_META)
     while True:
         try:
             text = input("\n> ").strip()

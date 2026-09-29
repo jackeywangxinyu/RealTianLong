@@ -28,6 +28,7 @@ class ActionRule(ABC):
     op: ClassVar[Op]
     loudness_base: ClassVar[float] = 0.3
     initiative: ClassVar[float] = 0.5   # 同一 tick 内的先手基线：越快的动作越先生效
+    usable_when_subdued: ClassVar[bool] = False   # 被点了穴仍能做的事（说话、等待）
 
     @abstractmethod
     def resolve(self, s: WorldState, it: Intent) -> Resolution: ...

@@ -1,98 +1,43 @@
 """
-[INPUT]: 依赖 cognition 的 BeliefStore / Candidate / navigation，core 的 Op / Manner / Rel / Kind / Modality / Profile / Goal，agents/predictors 的 Prediction
-[OUTPUT]: 对外提供 Situation / Choice / Policy 协议、ScriptedPolicy（角色条件化的规则策略）
-[POS]: agents 的决策接口；策略回答“我更愿意选择什么”，只在候选集上选。ScriptedPolicy 是阶段 A 的初始策略，
-       也是阶段 C 模仿学习的示范者；训练后的 RL 策略实现同一协议即可替换
+[INPUT]: 依赖 agents/policy_kit 的 Situation / Choice / Policy / PolicyKit，agents/tactics 的 MartialTactics，
+         cognition/navigation 的 believed_place，core 的 Op / Manner / Rel / Kind / Modality / Fact / Proposition，core/profiles 的 Goal / GoalKind
+[OUTPUT]: 对外提供 ScriptedPolicy（角色条件化的规则策略），并再导出 Situation / Choice / Policy
+[POS]: agents 的决策作曲者：自救 → 还手 → 救治盟友 → 回应提问 → 按目标（守护/获取/递送/守地/寻仇/灭口/护人，受时间闸门约束）→
+       查探响动 → 等待。它是阶段 A 的初始策略，也是阶段 C 模仿学习的示范者；RL 策略实现同一协议即可替换
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Protocol
 
-from tianlong.agents.predictors import Prediction
-from tianlong.cognition import BeliefStore, Candidate
-from tianlong.cognition.navigation import believed_place, next_hop
+from tianlong.agents.policy_kit import Choice, Policy, Situation
+from tianlong.agents.tactics import MartialTactics
+from tianlong.cognition.navigation import believed_place
 from tianlong.core import Fact, Kind, Manner, Modality, Op, Proposition, Rel
-from tianlong.core.profiles import Goal, GoalKind, Profile
+from tianlong.core.profiles import Goal, GoalKind
 
-
-@dataclass(frozen=True)
-class Situation:
-    agent: str
-    profile: Profile
-    beliefs: BeliefStore
-    now: int
-    candidates: tuple[Candidate, ...]
-    predictions: tuple[Prediction, ...]
-    memories: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class Choice:
-    index: int        # 候选集下标：策略永远只能在候选集中选
-    rationale: str
-
-
-class Policy(Protocol):
-    def choose(self, situation: Situation) -> Choice: ...
+__all__ = ["Choice", "Policy", "ScriptedPolicy", "Situation"]
 
 
 # ============================================================
 #  ScriptedPolicy
-#  优先级：回应提问 → 按目标顺序处理 → 查探守护范围内的响动 → 等待
 #  所有判断都来自信念与近期经历；“最近做过”由 SELF 经历判断，避免反复盘问同一个人
 # ============================================================
 
-RECENT = 5
 
-
-class ScriptedPolicy:
+class ScriptedPolicy(MartialTactics):
     def choose(self, sit: Situation) -> Choice:
-        steps: list[Callable[[Situation], Choice | None]] = [self._answer_questions]
-        steps += [self._goal_step(g) for g in sit.profile.goals]
+        steps: list[Callable[[Situation], Choice | None]] = [
+            self._cure_self, self._retaliate, self._heal_allies, self._answer_questions,
+        ]
+        steps += [self._goal_step(g) for g in sit.profile.goals if g.active(sit.now)]
         steps += [self._investigate_noise]
         for step in steps:
             choice = step(sit)
             if choice is not None:
                 return choice
         return Choice(0, "没什么要做的，原地等待")
-
-    # ------------------------------------------------------------
-    #  通用积木
-    # ------------------------------------------------------------
-
-    @staticmethod
-    def _pick(sit: Situation, why: str, op: Op, target: str | None = None, obj: str | None = None,
-              manner: Manner | None = None, topic: Fact | None = None) -> Choice | None:
-        for i, c in enumerate(sit.candidates):
-            if c.op == op and c.target == target and (obj is None or c.obj == obj) \
-                    and (manner is None or c.manner == manner) and (topic is None or c.topic == topic):
-                return Choice(i, why)
-        return None
-
-    @staticmethod
-    def _did_recently(sit: Situation, op: Op, target: str) -> bool:
-        return any(
-            ep.modality == Modality.SELF and ep.event.kind == op.value and ep.event.target == target
-            and sit.now - ep.tick <= RECENT
-            for ep in sit.beliefs.episodes
-        )
-
-    @staticmethod
-    def _said(sit: Situation, listener: str, fact: Fact) -> bool:
-        """近期经历里是否已经对此人说过这句话（说过就不必追着再说）。"""
-        return any(
-            ep.modality == Modality.SELF and ep.event.kind == Op.TELL.value
-            and ep.event.target == listener and ep.event.topic == fact
-            for ep in sit.beliefs.episodes
-        )
-
-    def _go_towards(self, sit: Situation, place: str | None, why: str) -> Choice | None:
-        hop = next_hop(sit.beliefs, place) if place else None
-        return self._pick(sit, why, Op.MOVE, hop) if hop else None
 
     # ------------------------------------------------------------
     #  回应提问：如实说出自己最相信的下落
@@ -119,9 +64,15 @@ class ScriptedPolicy:
             GoalKind.PROTECT: lambda s: self._protect(s, g),
             GoalKind.ACQUIRE: lambda s: self._acquire(s, g),
             GoalKind.DELIVER: lambda s: self._deliver(s, g),
+            GoalKind.GUARD: lambda s: self._guard(s, g),
+            GoalKind.HOSTILE: lambda s: self._hostile(s, g),
+            GoalKind.ESCAPE: lambda s: self._escape(s, g),
+            GoalKind.DEFEND: lambda s: self._defend(s, g),
         }[g.kind]
 
     def _protect(self, sit: Situation, g: Goal) -> Choice | None:
+        if g.item is None:
+            return None
         b, me = sit.beliefs, sit.agent
         here = b.location_of(me)
         owners = b.subjects(Rel.OWNS.value, g.item)
@@ -191,6 +142,8 @@ class ScriptedPolicy:
         return None
 
     def _acquire(self, sit: Situation, g: Goal) -> Choice | None:
+        if g.item is None:
+            return None
         b, me = sit.beliefs, sit.agent
         loc = b.location_of(g.item)
         if loc is None or loc == me:
@@ -200,6 +153,8 @@ class ScriptedPolicy:
         return self._go_towards(sit, believed_place(b, loc), f"去找{self._name(b, g.item)}")
 
     def _deliver(self, sit: Situation, g: Goal) -> Choice | None:
+        if g.item is None:
+            return None
         b, me = sit.beliefs, sit.agent
         if b.location_of(g.item) != me:
             return self._acquire(sit, g)
@@ -223,8 +178,3 @@ class ScriptedPolicy:
                 if choice is not None:
                     return choice
         return None
-
-    @staticmethod
-    def _name(b: BeliefStore, eid: str) -> str:
-        sk = b.sketch(eid)
-        return sk.name if sk else eid

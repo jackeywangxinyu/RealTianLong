@@ -1,7 +1,9 @@
 """
 [INPUT]: 依赖 core/world 的 WorldState，core/schema 的 Kind / Rel
-[OUTPUT]: 对外提供 holder_of / place_of / neighbors / door_between / hops / persons_in / surfaces_in / contents / visible_in / is_concealed
-[POS]: kernel 的空间物理；行动规则与感知规则共享的“谁在哪、能看到什么、隔几道门”查询，全部只读
+[OUTPUT]: 对外提供 holder_of / place_of / neighbors / door_between / passable / hops / persons_in / surfaces_in / contents /
+          visible_in / is_concealed / is_night / is_subdued / status_of / martial_power / venomous
+[POS]: kernel 的空间与身体物理；行动规则与感知规则共享的“谁在哪、能看到什么、隔几道门、身手如何”查询，全部只读。
+       暗门（hidden）不出现在环顾里，只能靠仔细查看发现（night_only 的只在夜里显形）；单向通道（oneway）只能往一头走
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -9,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from tianlong.core import clock
 from tianlong.core.schema import Kind, Rel
 from tianlong.core.world import WorldState
 
@@ -51,23 +54,31 @@ def surfaces_in(s: WorldState, place: str) -> tuple[str, ...]:
 # ============================================================
 
 
-def neighbors(s: WorldState, place: str) -> tuple[tuple[str, str], ...]:
-    """(门, 对面地点) 列表，按门 ID 排序。"""
+def neighbors(s: WorldState, place: str, visible_only: bool = False) -> tuple[tuple[str, str], ...]:
+    """(门, 对面地点) 列表，按门 ID 排序；visible_only 时略去暗门。"""
     out = []
     for door in s.sources(place, Rel.CONNECTS):
+        if visible_only and s.attr(door, "hidden", False):
+            continue
         for other in s.targets(door, Rel.CONNECTS):
             if other != place:
                 out.append((door, other))
     return tuple(out)
 
 
+def passable(s: WorldState, door: str, dest: str) -> bool:
+    """单向通道（断崖、塌落的隧道）只能通往 oneway 所指的一端。"""
+    oneway = s.attr(door, "oneway")
+    return oneway is None or oneway == dest
+
+
 def door_between(s: WorldState, a: str, b: str) -> str | None:
-    """a、b 之间优先返回未上锁的门，否则返回任意一扇；不相邻返回 None。"""
+    """a→b 之间优先返回可通行（未锁、方向对）的门，否则返回任意一扇；不相邻返回 None。"""
     doors = [d for d, other in neighbors(s, a) if other == b]
     if not doors:
         return None
-    unlocked = [d for d in doors if not s.attr(d, "locked", False)]
-    return (unlocked or doors)[0]
+    usable = [d for d in doors if not s.attr(d, "locked", False) and passable(s, d, b)]
+    return (usable or doors)[0]
 
 
 def hops(s: WorldState, src: str, max_hops: int) -> dict[str, int]:
@@ -114,3 +125,47 @@ def visible_in(s: WorldState, place: str, viewer: str, reveal_hidden: bool = Fal
         elif kind == Kind.PERSON:
             seen.extend(i for i in contents(s, e) if not is_concealed(s, i))
     return tuple(seen)
+
+
+# ============================================================
+#  昼夜与身体
+#  身手 = 内力底子（martial）+ 最锋利的兵刃（edge），受伤减损、中毒减半；
+#  被制住（点穴）以 subdued_until 表示，时限一过自行解开——状态随时钟流逝，无需定时器
+# ============================================================
+
+WEAPON_BONUS = 0.2
+
+
+def is_night(s: WorldState) -> bool:
+    return clock.is_night(s.clock)
+
+
+def is_subdued(s: WorldState, person: str) -> bool:
+    return int(s.attr(person, "subdued_until", 0) or 0) > s.clock
+
+
+def status_of(s: WorldState, person: str, status: str) -> bool:
+    if status == "subdued":
+        return is_subdued(s, person)
+    return bool(s.attr(person, status, False))
+
+
+def weapons_of(s: WorldState, person: str) -> tuple[str, ...]:
+    return tuple(i for i in contents(s, person) if s.attr(i, "weapon", False))
+
+
+def martial_power(s: WorldState, person: str) -> float:
+    power = float(s.attr(person, "martial", 0.0) or 0.0)
+    weapons = weapons_of(s, person)
+    if weapons:
+        power += max(float(s.attr(w, "edge", WEAPON_BONUS) or WEAPON_BONUS) for w in weapons)
+    if s.attr(person, "wounded", False):
+        power -= 0.2
+    if s.attr(person, "poisoned", False):
+        power *= 0.5
+    return power
+
+
+def venomous(s: WorldState, person: str) -> bool:
+    return any(s.attr(w, "venom", False) for w in weapons_of(s, person))
+

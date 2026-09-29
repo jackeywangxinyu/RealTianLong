@@ -106,4 +106,5 @@ def build_warehouse(seed: int = 7) -> Scenario:
             trust=(("guard", 0.9),),
         ),
     }
-    return Scenario("warehouse", state, profiles, priors)
+    hints = "指令示例：拿走桌上的钥匙 / 去仓库入口 / 用钥匙打开仓库门 / 问守卫钥匙在哪 / 等待"
+    return Scenario("warehouse", state, profiles, priors, hints=hints)

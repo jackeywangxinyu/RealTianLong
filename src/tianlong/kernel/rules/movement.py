@@ -30,6 +30,9 @@ class MoveRule(ActionRule):
         door = space.door_between(s, here, dest)
         if door is None:
             return fail("not_adjacent")
+        if not space.passable(s, door, dest):
+            # 断崖只能往下：试过才知道爬不回去
+            return fail("one_way", (Fact(Proposition.attr(door, "oneway", s.attr(door, "oneway"))),))
         if s.attr(door, "locked", False):
             # 推不开门本身就是获知：这扇门锁着
             return fail("door_locked", (Fact(Proposition.attr(door, "locked", True)),))
@@ -45,6 +48,7 @@ class WaitRule(ActionRule):
     op = Op.WAIT
     loudness_base = 0.0
     initiative = 0.0
+    usable_when_subdued = True
 
     def resolve(self, s: WorldState, it: Intent) -> Resolution:
         return succeed()

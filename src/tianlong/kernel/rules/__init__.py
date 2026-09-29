@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from tianlong.core import Op
 from tianlong.kernel.rules.base import ActionRule
+from tianlong.kernel.rules.combat import AttackRule
+from tianlong.kernel.rules.cultivation import StudyRule, UseRule
 from tianlong.kernel.rules.handling import GiveRule, PutRule, TakeRule
 from tianlong.kernel.rules.locks import LockRule, UnlockRule
 from tianlong.kernel.rules.movement import MoveRule, WaitRule
@@ -20,6 +22,7 @@ def default_rules() -> dict[Op, ActionRule]:
     rules: list[ActionRule] = [
         MoveRule(), WaitRule(), TakeRule(), PutRule(), GiveRule(),
         UnlockRule(), LockRule(), InspectRule(), TellRule(), AskRule(),
+        AttackRule(), StudyRule(), UseRule(),
     ]
     table = {r.op: r for r in rules}
     missing = set(Op) - set(table)

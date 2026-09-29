@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from tianlong.core import (
     OBSERVABLE_ATTRS,
+    STATUS_ATTRS,
     AddRelation,
     Change,
     EntitySketch,
@@ -27,6 +28,7 @@ from tianlong.core import (
     SetAttr,
     WorldState,
     derive_seed,
+    is_private_attr,
 )
 from tianlong.kernel import space
 from tianlong.kernel.resolution import Resolution
@@ -58,7 +60,11 @@ def change_facts(changes: Iterable[Change]) -> tuple[Fact, ...]:
         elif isinstance(c, RemoveRelation):
             out.append(Fact(Proposition.of(c.rel), False))
         elif isinstance(c, SetAttr):
-            out.append(attr_fact(c.entity, c.key, c.old, c.new))
+            if c.key == "subdued_until":
+                # 点穴的时限是私密数值；旁人看到的只是“他被制住了”
+                out.append(Fact(Proposition.attr(c.entity, "subdued", True), True))
+            elif not is_private_attr(c.key):
+                out.append(attr_fact(c.entity, c.key, c.old, c.new))
     return tuple(out)
 
 
@@ -220,7 +226,11 @@ def scene_percept(s: WorldState, observer: str) -> Percept:
             facts.append(Fact(Proposition.rel(e, Rel.AT, holder)))
     # 自己身上的东西自己清楚（包括藏在身上的小物件）
     facts.extend(Fact(Proposition.rel(i, Rel.AT, observer)) for i in space.contents(s, observer))
-    for door, other in space.neighbors(s, place):
+    # 在场者（含自己）的身体状态一目了然：受伤、中毒、被制住，带极性进入信念
+    for p in dict.fromkeys((observer, *space.persons_in(s, place))):
+        facts.extend(Fact(Proposition.attr(p, st, True), space.status_of(s, p, st)) for st in STATUS_ATTRS)
+    # 暗门不在环顾之列：只能靠仔细查看发现
+    for door, other in space.neighbors(s, place, visible_only=True):
         facts.append(Fact(Proposition.rel(door, Rel.CONNECTS, place)))
         facts.append(Fact(Proposition.rel(door, Rel.CONNECTS, other)))
     scopes = (place, *space.surfaces_in(s, place))

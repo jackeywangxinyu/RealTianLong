@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore，core 的 Intent / Op
 [OUTPUT]: 对外提供 Scheduler（谁在本 tick 需要完整决策）
-[POS]: agents 的节流阀；调度依据是游戏时间与事件：有新经历、手头有事、闲置太久才完整决策，其余人执行低成本例行动作（原地等待）。
+[POS]: agents 的节流阀；调度依据是游戏时间与事件：有新经历、手头有事、约定的时辰到了、闲置太久才完整决策，其余人执行低成本例行动作（原地等待）。
        不在玩家眼前的角色也照常推进，但不必每分钟都跑一遍完整流程
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from tianlong.cognition import BeliefStore
 from tianlong.core import Intent, Op
+from tianlong.core.profiles import Profile
 
 
 @dataclass
@@ -25,10 +26,13 @@ class Scheduler:
         self.idle_interval = idle_interval
         self._marks: dict[str, _Mark] = {}
 
-    def due(self, agent: str, store: BeliefStore, now: int) -> bool:
+    def due(self, agent: str, store: BeliefStore, now: int, profile: Profile | None = None) -> bool:
         mark = self._marks.get(agent)
         if mark is None or mark.busy or now - mark.tick >= self.idle_interval:
             return True
+        if profile is not None and any(g.not_before is not None and mark.tick < g.not_before <= now
+                                       for g in profile.goals):
+            return True                                               # 约定的时辰到了（“入夜动身”）
         return any(ep.tick >= mark.tick for ep in store.episodes)  # 上次决策之后有了新经历
 
     def record(self, agent: str, now: int, intent: Intent) -> None:

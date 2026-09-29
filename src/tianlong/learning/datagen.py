@@ -60,7 +60,7 @@ def collect(cfg: RolloutConfig) -> Rollouts:
         for _ in range(cfg.steps):
             actor = rng.choice(agents)
             profile = sc.profiles[actor]
-            interests = sorted({g.item for g in profile.goals})
+            interests = list(profile.interests())
             cands = candidates(stores[actor], interests)
             if rng.random() < cfg.epsilon:
                 cand = _stratified(rng, cands)

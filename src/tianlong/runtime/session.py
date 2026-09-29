@@ -23,9 +23,9 @@ from tianlong.agents.predictors import HeuristicPredictor, OutcomePredictor
 from tianlong.agents.scheduler import Scheduler
 from tianlong.cognition import BeliefStore
 from tianlong.cognition.navigation import believed_place
-from tianlong.core import Event, Fact, Intent, Op, Rel, clock_label, make_id
+from tianlong.core import Event, Fact, Intent, Op, Percept, Rel, clock_label, make_id, minutes_until_night
 from tianlong.language.llm import LLMClient
-from tianlong.language.narrator import Narrator
+from tianlong.language.narrator import Narrator, lore_keys
 from tianlong.language.parser import IntentParser, Parsed
 from tianlong.language.speaker import LLMSpeaker, Speaker, TemplateSpeaker
 from tianlong.language.templates import render_fact
@@ -49,6 +49,9 @@ class TurnReport:
     timings: dict[str, float] = field(default_factory=dict)  # 各阶段耗时（毫秒）：系统成本可观测
 
 
+MAX_WAIT = 240   # 一次最多等四个时辰（240 分钟）
+
+
 class _Stopwatch:
     def __init__(self) -> None:
         self._t = time.perf_counter()
@@ -56,7 +59,7 @@ class _Stopwatch:
 
     def lap(self, name: str) -> None:
         now = time.perf_counter()
-        self.laps[name] = round((now - self._t) * 1000, 1)
+        self.laps[name] = round(self.laps.get(name, 0.0) + (now - self._t) * 1000, 1)   # 多 tick 时累加
         self._t = now
 
 
@@ -91,8 +94,9 @@ class GameSession:
             self.authority = WorldAuthority.found(store, scenario, branch_id)
         self.orchestrator = Orchestrator()
         self.scheduler = Scheduler()
-        self.parser = IntentParser(llm)
-        self.narrator = Narrator(llm)
+        self.parser = IntentParser(llm, aliases=scenario.aliases)
+        self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style)
+        self._described: set[str] = set()      # 已向玩家描写过外观的实体：只在初见时描写
         self.speaker: Speaker = LLMSpeaker(llm) if llm else TemplateSpeaker()
         self.policies = dict(policies or {})
         self.predictor = predictor or HeuristicPredictor()
@@ -117,7 +121,9 @@ class GameSession:
         me = self.beliefs(self.player)
         if not self.resumed:
             prior = self.scenario.priors.get(self.player, ())
-            return self.narrator.narrate(self.player, prior, me.entities, show_scene=True)
+            fresh = lore_keys(self.player, prior, self.narrator.lore)
+            self._described.update(fresh)
+            return self.narrator.narrate(self.player, prior, me.entities, show_scene=True, fresh=fresh)
         here = believed_place(me, self.player)
         around = [
             render_fact(Fact(b.prop, True), me.entities, self.player, me="你")
@@ -141,11 +147,41 @@ class GameSession:
         if parsed.candidate is None:
             return TurnReport(clock_label(head.clock), parsed, parsed.clarification or "……", advanced=False,
                               timings=clock.laps)
-        iid = make_id("int", self.ref.world_id, self.ref.branch_id, self.player, head.version)
-        player_intent = parsed.candidate.to_intent(iid, self.player, head.version, parsed.utterance)
-        return self._advance(parsed, player_intent, clock)
+        # ---- 一次输入可能跨越多个 tick（“等到天黑”），身边一有动静就停下 ----
+        ticks = self._ticks_for(parsed, head.clock)
+        percepts, events, deliberations, settlement = [], [], [], None
+        for k in range(ticks):
+            now = self.authority.head()
+            iid = make_id("int", self.ref.world_id, self.ref.branch_id, self.player, now.version)
+            intent = parsed.candidate.to_intent(iid, self.player, now.version, parsed.utterance)
+            settlement, delibs = self._tick(intent, clock)
+            mine = [o.percept for o in settlement.observations_of(self.player)]
+            percepts += mine
+            events += settlement.events
+            deliberations += delibs
+            if k < ticks - 1 and self._interrupted(mine):
+                break
+        me = self.beliefs(self.player)
+        fresh = [key for key in lore_keys(self.player, percepts, self.narrator.lore) if key not in self._described]
+        self._described.update(fresh)
+        narration = self.narrator.narrate(self.player, percepts, me.entities, fresh=fresh)
+        if ticks > 1:
+            narration += f"\n（不觉已是{clock_label(self.authority.head().clock)}）"
+        clock.lap("narrate")
+        return TurnReport(clock_label(head.clock), parsed, narration, True, tuple(events),
+                          tuple(deliberations), settlement, clock.laps)
 
-    def _advance(self, parsed: Parsed, player_intent: Intent, clock: _Stopwatch) -> TurnReport:
+    def _ticks_for(self, parsed: Parsed, now: int) -> int:
+        if parsed.candidate is None or parsed.candidate.op != Op.WAIT:
+            return 1
+        wanted = minutes_until_night(now) if parsed.until == "night" else parsed.repeat
+        return max(1, min(wanted, MAX_WAIT))
+
+    def _interrupted(self, percepts: list[Percept]) -> bool:
+        """有人在身边做了什么、说了什么、或传来响动——等待就此打住，让玩家决定。"""
+        return any(p.event is not None and p.event.actor != self.player for p in percepts)
+
+    def _tick(self, player_intent: Intent, clock: _Stopwatch) -> tuple[Settlement, list[Deliberation]]:
         head = self.authority.head()
         due, routine = self._npc_split(head.clock)
         deliberations = self.orchestrator.decide(self._contexts(due, head.version, head.clock))
@@ -159,11 +195,7 @@ class GameSession:
         clock.lap("settle")
         self.indexer.drain()
         clock.lap("index")
-        percepts = [o.percept for o in settlement.observations_of(self.player)]
-        narration = self.narrator.narrate(self.player, percepts, self.beliefs(self.player).entities)
-        clock.lap("narrate")
-        return TurnReport(clock_label(head.clock), parsed, narration, True, settlement.events,
-                          tuple(deliberations), settlement, clock.laps)
+        return settlement, deliberations
 
     # ------------------------------------------------------------
     #  NPC 装配：每个角色只拿到自己的 port
@@ -172,7 +204,7 @@ class GameSession:
     def _npc_split(self, now: int) -> tuple[list[str], list[str]]:
         due, routine = [], []
         for a in self.scenario.npcs:
-            (due if self.scheduler.due(a, self.beliefs(a), now) else routine).append(a)
+            (due if self.scheduler.due(a, self.beliefs(a), now, self.scenario.profiles[a]) else routine).append(a)
         return due, routine
 
     def _contexts(self, agents: list[str], version: int, now: int) -> dict[str, NpcContext]:

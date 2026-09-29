@@ -87,7 +87,7 @@ class TianlongEnv(MultiAgentEnv):
     def _observe(self, agent: str):
         store = self.stores[agent]
         profile = self.scenario.profiles[agent]
-        interests = sorted({g.item for g in profile.goals})
+        interests = list(profile.interests())
         cands = candidates(store, interests, self.obs_spec.max_cands)
         preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests))
         self._cands[agent], self._preds[agent] = cands, preds

@@ -11,7 +11,7 @@ src/tianlong/memory/ - 可回忆经历：记忆写入策略、嵌入、向量索
 src/tianlong/language/ - 开放语义：模板文本、LLM 接入、对白、玩家输入解析与叙述
 src/tianlong/agents/ - 智能体：LangGraph 单角色决策图、多角色扇出编排、脚本策略、后果预测、调度
 src/tianlong/learning/ - 学习：PyG 关系动态模型（环境/角色两入口）、RLlib 模仿学习 + PPO 角色策略（1 子目录: rl）
-src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知
+src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知（1 子目录: tianlong 天龙八部，第一幕无量山）
 src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言
 scripts/ - 本地基础设施脚本（无 Docker 环境下的 Neo4j）

@@ -34,10 +34,10 @@ class TakeRule(ActionRule):
             return fail("already_held")
         if holder is None or space.place_of(s, item) != space.place_of(s, it.actor):
             return fail("not_found")
-        if s.kind(holder) == Kind.PERSON:
-            # 近在眼前被别人拿着：伸手时自然看清了
+        if s.kind(holder) == Kind.PERSON and not space.is_subdued(s, holder):
+            # 近在眼前被别人拿着：伸手时自然看清了（对方被制住时则可以搜走）
             return fail("held_by_other", (Fact(Proposition.rel(item, Rel.AT, holder)),))
-        if not _within_reach(s, it.actor, holder):
+        if s.kind(holder) != Kind.PERSON and not _within_reach(s, it.actor, holder):
             return fail("out_of_reach")
         changes = relocate(item, holder, it.actor)
         if s.attr(item, "hidden", False):

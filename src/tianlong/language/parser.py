@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate，core 的 Op / Manner / Kind / Rel / Fact / Proposition / signature_error，
          language/llm 的 LLMClient / LLMUnavailable / parse_json
-[OUTPUT]: 对外提供 Parsed、IntentParser（规则优先、LLM 兜底）、rule_parse()、normalize()
+[OUTPUT]: 对外提供 Parsed（含等待时长）、IntentParser（规则优先、LLM 兜底、场景别称）、rule_parse()、normalize()
 [POS]: language 的输入解析；把玩家自由文本变成结构化候选行动。可引用的实体只来自玩家自己的认知图——
        LLM 看不到、也无法指向玩家不认识的东西；解析结果仍要回到 kernel 结算，失败本身也是游戏内容
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from tianlong.cognition import BeliefStore, Candidate
@@ -26,6 +27,8 @@ class Parsed:
     utterance: str | None = None
     clarification: str | None = None   # 解析不了时给玩家的追问
     source: str = "rules"
+    repeat: int = 1                    # 等待的分钟数（“等一炷香”= 30）
+    until: str | None = None           # 等到某个时刻（"night"）：会话层按时钟换算
 
 
 # ============================================================
@@ -38,19 +41,28 @@ _OPS: list[tuple[Op, tuple[str, ...]]] = [
     (Op.TELL, ("告诉", "说", "tell")),
     (Op.UNLOCK, ("开锁", "解锁", "打开", "unlock")),
     (Op.LOCK, ("锁上", "上锁", "lock")),
+    (Op.ATTACK, ("出手", "动手", "攻击", "偷袭", "一掌", "出招", "揍", "打", "attack")),
+    (Op.STUDY, ("研读", "修习", "参详", "参悟", "练", "读", "学", "study")),
+    (Op.USE, ("服下", "服用", "喂", "敷", "救", "用", "use")),
     (Op.GIVE, ("交给", "递给", "给", "give")),
     (Op.PUT, ("放", "藏", "put", "hide")),
     (Op.TAKE, ("拿", "取", "捡", "偷", "揣", "拾", "抓", "take", "grab")),
-    (Op.INSPECT, ("查看", "检查", "搜", "看看", "观察", "找找", "inspect", "search", "look")),
-    (Op.MOVE, ("去", "走", "前往", "进", "回", "到", "go", "move")),
-    (Op.WAIT, ("等", "休息", "wait")),
+    (Op.INSPECT, ("查看", "检查", "搜", "看看", "环顾", "观察", "找找", "端详", "磕头", "叩首", "跪拜", "inspect", "search", "look")),
+    (Op.MOVE, ("去", "走", "前往", "进", "回", "到", "跳", "爬", "钻", "下", "go", "move")),
+    (Op.WAIT, ("等", "休息", "歇", "wait")),
 ]
+# 等待时长（分钟）；“等到天黑”交给会话层按时钟换算
+_DURATIONS: tuple[tuple[str, int], ...] = (
+    ("一个时辰", 120), ("半个时辰", 60), ("一炷香", 30), ("一盏茶", 15), ("一会", 10), ("片刻", 5),
+)
+_UNTIL_NIGHT = ("天黑", "入夜", "晚上", "夜里", "月亮")
 _CAREFUL = ("悄悄", "小心", "轻轻", "偷偷", "藏")
 _ROUGH = ("用力", "粗暴", "猛", "狠狠")
 _ASKS = {
     Op.TAKE: "你想拿什么？", Op.PUT: "你想把什么放到哪里？", Op.GIVE: "你想把什么交给谁？",
     Op.UNLOCK: "你想用什么打开哪扇门？", Op.LOCK: "你想用什么锁上哪扇门？", Op.MOVE: "你想去哪里？",
     Op.TELL: "你想告诉谁什么？", Op.ASK: "你想问谁什么？", Op.INSPECT: "你想查看什么？",
+    Op.ATTACK: "你想对谁出手？", Op.STUDY: "你想研读什么？", Op.USE: "你想把什么用在谁身上？",
 }
 
 
@@ -61,38 +73,50 @@ def _aliases(name: str, kind: Kind) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _mentions(text: str, store: BeliefStore) -> list[tuple[int, str, Kind]]:
-    """按出现位置排序的实体提及；同一位置取最长名字。“我”指玩家自己。"""
+def _mentions(text: str, store: BeliefStore, extra: Mapping[str, tuple[str, ...]] | None = None
+              ) -> list[tuple[int, str, Kind]]:
+    """按出现位置排序的实体提及；同一位置取最长名字。“我/自己”指玩家自己。别称只对玩家认识的实体生效。"""
     found: dict[int, tuple[int, str, Kind]] = {}
     for eid, sk in store.entities.items():
-        for alias in _aliases(sk.name, sk.kind):
+        for alias in (*_aliases(sk.name, sk.kind), *((extra or {}).get(eid, ()))):
             start = text.find(alias)
             while start != -1:
                 prev = found.get(start)
                 if prev is None or len(alias) > prev[0]:
                     found[start] = (len(alias), eid, sk.kind)
                 start = text.find(alias, start + 1)
-    if "我" in text:
-        found.setdefault(text.find("我"), (1, store.owner, Kind.PERSON))
+    for word in ("自己", "我"):
+        if word in text:
+            found.setdefault(text.find(word), (len(word), store.owner, Kind.PERSON))
     return [(pos, eid, kind) for pos, (_, eid, kind) in sorted(found.items())]
 
 
-def rule_parse(text: str, store: BeliefStore) -> Parsed:
+def rule_parse(text: str, store: BeliefStore, aliases: Mapping[str, tuple[str, ...]] | None = None) -> Parsed:
     """按优先级尝试每个命中关键词的操作，返回第一个角色齐全的解析（“揣进兜里”的“进”不该赢过“揣”）。"""
     t = text.strip().lower()
     ops = [o for o, words in _OPS if any(w in t for w in words)]
     if not ops:
-        return Parsed(None, clarification="没听懂。试试：拿钥匙 / 去仓库入口 / 查看桌面 / 问守卫钥匙在哪 / 等待")
-    attempts = [_parse_as(op, text, t, store) for op in ops]
+        return Parsed(None, clarification="没听懂。试试：去后院 / 查看玉璧 / 问马五爷… / 出手 / 研读… / 等到天黑")
+    attempts = [_parse_as(op, text, t, store, aliases) for op in ops]
     return next((p for p in attempts if p.candidate is not None), attempts[0])
 
 
-def _parse_as(op: Op, text: str, t: str, store: BeliefStore) -> Parsed:
+def _wait_length(t: str) -> tuple[int, str | None]:
+    if any(w in t for w in _UNTIL_NIGHT):
+        return 1, "night"
+    digits = "".join(ch for ch in t if ch.isdigit())
+    if digits and "分" in t:
+        return max(1, int(digits)), None
+    return next((m for word, m in _DURATIONS if word in t), 1), None
+
+
+def _parse_as(op: Op, text: str, t: str, store: BeliefStore,
+              aliases: Mapping[str, tuple[str, ...]] | None = None) -> Parsed:
     manner = Manner.CAREFUL if any(w in t for w in _CAREFUL) else (
         Manner.ROUGH if any(w in t for w in _ROUGH) else Manner.NORMAL)
     me = store.owner
     here = store.location_of(me)
-    ms = _mentions(t, store)
+    ms = _mentions(t, store, aliases)
 
     def first(*kinds: Kind, after: int = -1, exclude: tuple[str, ...] = ()) -> tuple[int, str] | None:
         for pos, eid, kind in ms:
@@ -121,6 +145,13 @@ def _parse_as(op: Op, text: str, t: str, store: BeliefStore) -> Parsed:
         target = pick(Kind.PLACE, Kind.SURFACE, Kind.PERSON, exclude=(me,)) or here
     elif op == Op.MOVE:
         target = pick(Kind.PLACE, Kind.DOOR)
+    elif op == Op.ATTACK:
+        target = pick(Kind.PERSON, exclude=(me,))
+    elif op == Op.STUDY:
+        target = pick(Kind.ITEM) or (held[0] if len(held) == 1 else None)
+    elif op == Op.USE:
+        obj = pick(Kind.ITEM) or (held[0] if len(held) == 1 else None)
+        target = pick(Kind.PERSON, exclude=(me,)) or me
     elif op in (Op.TELL, Op.ASK):
         listener = first(Kind.PERSON, exclude=(me,))
         if listener is not None:
@@ -137,6 +168,9 @@ def _parse_as(op: Op, text: str, t: str, store: BeliefStore) -> Parsed:
     if _invalid(cand, store):
         return Parsed(None, clarification=_ASKS.get(op, "请说得具体一些。"))
     utterance = text.strip() if op in (Op.TELL, Op.ASK) else None
+    if op == Op.WAIT:
+        repeat, until = _wait_length(t)
+        return Parsed(cand, source="rules", repeat=repeat, until=until)
     return Parsed(cand, utterance, source="rules")
 
 
@@ -199,12 +233,14 @@ def _table(store: BeliefStore) -> str:
 
 
 class IntentParser:
-    def __init__(self, llm: LLMClient | None = None, prefer_llm: bool = False) -> None:
+    def __init__(self, llm: LLMClient | None = None, prefer_llm: bool = False,
+                 aliases: Mapping[str, tuple[str, ...]] | None = None) -> None:
         self.llm = llm
         self.prefer_llm = prefer_llm
+        self.aliases = dict(aliases or {})
 
     def parse(self, text: str, store: BeliefStore) -> Parsed:
-        ruled = rule_parse(text, store)
+        ruled = rule_parse(text, store, self.aliases)
         if self.llm is None or (ruled.candidate is not None and not self.prefer_llm):
             return ruled
         try:

@@ -14,7 +14,7 @@ from tianlong.cognition.beliefs import BeliefStore
 from tianlong.core import OBSERVABLE_ATTRS, Kind, Proposition, WorldState
 
 # 进入特征的属性：1 = 真，-1 = 假，0 = 未知/不适用
-VIEW_ATTRS = ("small", "locked", "hidden")
+VIEW_ATTRS = ("small", "locked", "hidden", "weapon", "wounded", "poisoned", "subdued")
 # 事件节点与实体之间的视图关系（不是世界关系，只存在于认知投影中）
 EVENT_RELS = ("OCCURRED_AT", "BY", "ON", "WITH")
 EVENT_KIND = "event"
@@ -66,7 +66,7 @@ def world_view(s: WorldState, self_id: str | None = None) -> GraphView:
         ViewNode(
             e.id,
             e.kind.value,
-            tuple((a, _tri(bool(e.get(a, False))) if _applies(e.kind, a) else 0.0) for a in VIEW_ATTRS),
+            tuple((a, _tri(_true_attr(s, e.id, a)) if _applies(e.kind, a) else 0.0) for a in VIEW_ATTRS),
             e.id == self_id,
         )
         for e in sorted(s.entities.values(), key=lambda e: e.id)
@@ -75,8 +75,20 @@ def world_view(s: WorldState, self_id: str | None = None) -> GraphView:
     return GraphView(None, s.clock, nodes, edges)
 
 
+_APPLIES = {
+    (Kind.ITEM, "small"), (Kind.ITEM, "hidden"), (Kind.ITEM, "weapon"), (Kind.DOOR, "locked"), (Kind.DOOR, "hidden"),
+    (Kind.PERSON, "wounded"), (Kind.PERSON, "poisoned"), (Kind.PERSON, "subdued"),
+}
+
+
 def _applies(kind: Kind, attr: str) -> bool:
-    return (kind, attr) in {(Kind.ITEM, "small"), (Kind.ITEM, "hidden"), (Kind.DOOR, "locked")}
+    return (kind, attr) in _APPLIES
+
+
+def _true_attr(s: WorldState, eid: str, attr: str) -> bool:
+    if attr == "subdued":
+        return int(s.attr(eid, "subdued_until", 0) or 0) > s.clock
+    return bool(s.attr(eid, attr, False))
 
 
 # ============================================================
