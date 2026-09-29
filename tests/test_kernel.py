@@ -230,7 +230,7 @@ def test_random_rollouts_never_break_invariants(kernel):
     from tianlong.scenarios.procedural import random_scenario
 
     for seed in range(60):
-        sc = random_scenario(seed)
+        sc = random_scenario(seed, jianghu=float(seed % 2))    # 一半江湖化：动手、毒、解药、秘籍、单向通道也要经得起乱来
         rng = random.Random(seed)
         s = sc.state
         stores = {a: BeliefStore(a).revise_all(sc.priors[a])[0] for a in sc.profiles}

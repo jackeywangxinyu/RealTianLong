@@ -4,7 +4,8 @@
          learning/rl 的 observation / rewards
 [OUTPUT]: 对外提供 TianlongEnv（RLlib 多智能体环境）、MAX_PERSONS
 [POS]: learning/rl 的训练环境：每个角色一个智能体，同一 tick 同时出招、由同一个内核统一结算——与线上完全相同的转移机制。
-       观测只来自各自的认知图；奖励来自真实目标进展。expert_actions() 给出脚本策略的示范，供模仿学习与评测
+       观测只来自各自的认知图；奖励来自真实目标进展。expert_actions() 给出脚本策略的示范，供模仿学习与评测；
+       last_events 暴露上一步的真实事件，只供评测统计行为，不进观测
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -43,6 +44,7 @@ class TianlongEnv(MultiAgentEnv):
         self._episodes = 0
         self._cands: dict[str, tuple[Candidate, ...]] = {}
         self._preds: dict[str, tuple[Prediction, ...]] = {}
+        self.last_events: tuple = ()
 
     # ------------------------------------------------------------
     #  gym 接口
@@ -72,6 +74,7 @@ class TianlongEnv(MultiAgentEnv):
         for o in result.observations:
             self.stores[o.observer], _ = self.stores[o.observer].revise(o.percept)
         self.state = result.state
+        self.last_events = result.events          # 评测用：统计行为（例如有没有学会动手抢）
         self.t += 1
         rewards = {a: step_reward(before, self.state, a, self.scenario.profiles[a].goals, result.events)
                    for a in self.agents}

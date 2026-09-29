@@ -1,9 +1,9 @@
 """
-[INPUT]: 依赖 core 的实体/关系/命题/感知类型，core/profiles 的 Goal / Profile，kernel/perception 的 make_percept / scene_percept，
+[INPUT]: 依赖 core 的实体/关系/命题/感知类型与 derive_seed，core/profiles 的 Goal / Profile，kernel/perception 的 make_percept / scene_percept，
          scenarios/base 的 Scenario
-[OUTPUT]: 对外提供 random_scenario()（按种子生成随机小世界，含角色目标与初始认知）
+[OUTPUT]: 对外提供 random_scenario()（按种子生成随机小世界，含角色目标与初始认知；可选叠加江湖层）
 [POS]: scenarios 的程序化内容；GNN 动态模型的数据与 RL 训练环境都从这里取样——训练分布覆盖布局、锁、藏匿、目标的组合，
-       避免模型只记住“仓库钥匙”一个场景
+       避免模型只记住“仓库钥匙”一个场景；江湖层让动态模型也见过伤、毒、制、解、研读与单向通道
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -12,7 +12,18 @@ from __future__ import annotations
 import random
 from dataclasses import replace
 
-from tianlong.core import Entity, Fact, Kind, Modality, Proposition, Rel, Relation, WorldState, at
+from tianlong.core import (
+    Entity,
+    Fact,
+    Kind,
+    Modality,
+    Proposition,
+    Rel,
+    Relation,
+    WorldState,
+    at,
+    derive_seed,
+)
 from tianlong.core.profiles import Goal, GoalKind, Profile
 from tianlong.kernel.perception import make_percept, scene_percept
 from tianlong.scenarios.base import Scenario
@@ -22,8 +33,13 @@ _ITEM_NAMES = ["铜钥匙", "账簿", "玉佩", "钱袋", "信函", "药瓶", "�
 _PERSON_NAMES = ["阿福", "老周", "小翠", "王掌柜", "李镖头", "孙娘子"]
 
 
-def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_persons: int = 3) -> Scenario:
+def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_persons: int = 3,
+                    jianghu: float = 0.0) -> Scenario:
+    """jianghu 是“江湖化”的概率：身手、兵刃（可能带毒）、解药、秘籍、单向通道与寻仇/护人目标。
+    江湖层用独立的随机流叠加在同一张底图上，jianghu=0 时与旧版逐字节相同——已有的种子、测试与存档不受影响。"""
     rng = random.Random(seed)
+    jr = random.Random(derive_seed("jianghu", seed))
+    wuxia = jr.random() < jianghu
     n_places = rng.randint(3, max_places)
     n_items = rng.randint(2, max_items)
     n_persons = rng.randint(2, max_persons)
@@ -40,10 +56,12 @@ def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_pers
             edges.append((places[a], places[b]))
     doors = []
     locked_door = rng.randrange(len(edges)) if rng.random() < 0.7 else None
+    oneway_door = jr.randrange(len(edges)) if wuxia and jr.random() < 0.3 else None
     for i, (a, b) in enumerate(edges):
         d = f"d{i}"
         doors.append(d)
-        ents.append(Entity.make(d, Kind.DOOR, f"{_name(ents, a)}与{_name(ents, b)}之间的门", locked=(i == locked_door)))
+        ents.append(Entity.make(d, Kind.DOOR, f"{_name(ents, a)}与{_name(ents, b)}之间的门", locked=(i == locked_door),
+                                oneway=b if i == oneway_door else None))
         rels += [Relation(d, Rel.CONNECTS, a), Relation(d, Rel.CONNECTS, b)]
 
     # ---- 台面 ----
@@ -59,7 +77,8 @@ def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_pers
     persons = [f"h{i}" for i in range(n_persons)]
     for i, h in enumerate(persons):
         ents.append(Entity.make(h, Kind.PERSON, _PERSON_NAMES[i],
-                                agility=round(rng.uniform(0.3, 0.8), 2), alertness=round(rng.uniform(0.3, 1.0), 2)))
+                                agility=round(rng.uniform(0.3, 0.8), 2), alertness=round(rng.uniform(0.3, 1.0), 2),
+                                martial=round(jr.uniform(0.1, 0.8), 2) if wuxia else None))
         rels.append(Relation(h, Rel.AT, rng.choice(places)))
 
     # ---- 物品：第一件是匹配锁门的钥匙；其余随机放置，部分藏匿 ----
@@ -77,7 +96,35 @@ def random_scenario(seed: int, max_places: int = 5, max_items: int = 4, max_pers
             rels.append(Relation(rng.choice(persons), Rel.OWNS, it))
 
     state = WorldState.build(seed, at(1, 8, 0), ents, rels)
-    return Scenario(f"proc-{seed}", state, _profiles(rng, state, persons, items), _priors(state, persons))
+    profiles = _profiles(rng, state, persons, items)
+    if wuxia:
+        extra_ents, extra_rels, profiles = _jianghu(jr, places + surfaces, persons, profiles)
+        state = WorldState.build(seed, at(1, 8, 0), ents + extra_ents, rels + extra_rels)
+    return Scenario(f"proc-{seed}", state, profiles, _priors(state, persons))
+
+
+def _jianghu(jr: random.Random, spots: list[str], persons: list[str], profiles: dict[str, Profile]):
+    """江湖层：一件兵刃（半数淬毒）、一瓶解药、半数世界再加一卷秘籍；一人寻仇，三人局里另一人护着被寻仇者。"""
+    venom = jr.random() < 0.5
+    ents = [Entity.make("w0", Kind.ITEM, "毒针" if venom else jr.choice(["短剑", "钢刀"]), weapon=True,
+                        edge=round(jr.uniform(0.2, 0.5), 2), venom=True if venom else None,
+                        small=True if venom or jr.random() < 0.5 else None),
+            Entity.make("c0", Kind.ITEM, "解药", small=True, cures="poisoned")]
+    armed = jr.random() < 0.5                  # 半数世界里兵刃一开始就在某人手上：否则动手多是徒手，毒几乎不出现
+    rels = [Relation("w0", Rel.AT, jr.choice(persons) if armed else jr.choice(spots)),
+            Relation("c0", Rel.AT, jr.choice(spots + persons))]
+    if jr.random() < 0.5:
+        spot = jr.choice(spots)
+        ents.append(Entity.make("b0", Kind.ITEM, "秘籍", small=True, teaches=jr.choice(["evasion", "absorb"]),
+                                difficulty=jr.randint(2, 3), hidden=True if jr.random() < 0.3 else None))
+        rels.append(Relation("b0", Rel.AT, spot))
+    if jr.random() < 0.5:
+        foe, victim, *rest = jr.sample(persons, len(persons))
+        extra = {foe: Goal(GoalKind.HOSTILE, person=victim, until=jr.choice(["wounded", "subdued"]))}
+        if rest:
+            extra[rest[0]] = Goal(GoalKind.DEFEND, person=victim)
+        profiles = {h: replace(p, goals=p.goals + ((extra[h],) if h in extra else ())) for h, p in profiles.items()}
+    return ents, rels, profiles
 
 
 def _name(ents: list[Entity], eid: str) -> str:

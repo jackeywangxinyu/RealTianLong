@@ -16,6 +16,7 @@ src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言
 scripts/ - 本地基础设施与演示脚本（无 Docker 环境下的 Neo4j、录制一局“玩家所见 vs 世界真相”）
 docs/ - 脚本生成并入库的演示记录（1 子目录: demo）
+notebooks/ - Colab GPU 放大训练笔记本（只调用同一套训练 CLI）
 </directory>
 
 <config>

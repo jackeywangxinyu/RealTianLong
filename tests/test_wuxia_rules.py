@@ -1,6 +1,7 @@
 """
 [INPUT]: 依赖 tianlong.kernel 的 Kernel / rules.combat，tianlong.core 的类型，conftest 的 make_intent
-[OUTPUT]: 武侠机制测试：暗门（夜现）与单向断崖、动手的伤→制与限时自解、闪避与吸功、毒与解药、研读累积与私密、搜走被制者之物、私密属性永不外泄
+[OUTPUT]: 武侠机制测试：暗门（夜现）与单向断崖、动手的伤→制与限时自解、闪避与吸功、毒与解药、研读累积与私密、搜走被制者之物、
+          程序化世界的江湖层不改底图、私密属性永不外泄
 [POS]: tests 的内核扩展层；验证新机制都走同一条“规则插件 + 感知 + 不变量”的路，而非特判
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -174,6 +175,20 @@ def test_study_accumulates_privately(kernel):
         s = r.state
     assert reasons == ["progress", "progress", "mastered"] and s.attr("b", "evasion") is True
     assert Fact(Proposition.attr("b", "evasion", True)) in self_percept(r, "b").facts
+
+
+def test_jianghu_layer_keeps_base_world_intact():
+    """江湖层用独立随机流叠加：底图（布局、锁、原有物品与目标）不变，只多出身手、兵刃、解药等。"""
+    from tianlong.scenarios.procedural import random_scenario
+
+    for seed in range(40):
+        base, plain, wuxia = random_scenario(seed), random_scenario(seed, jianghu=0.0), random_scenario(seed, jianghu=1.0)
+        assert base.state.fingerprint() == plain.state.fingerprint(), "jianghu=0 与旧版逐字节相同"
+        assert set(base.state.relations) <= set(wuxia.state.relations)
+        assert {"w0", "c0"} <= set(wuxia.state.entities) and "w0" not in base.state.entities
+        assert all(wuxia.state.attr(h, "martial") is not None for h in wuxia.profiles)
+        for h, p in base.profiles.items():
+            assert wuxia.profiles[h].goals[:len(p.goals)] == p.goals, "原有目标保留，江湖目标只追加"
 
 
 def test_private_attrs_never_reach_any_percept(kernel):

@@ -9,10 +9,10 @@
 
 成员清单
 observation.py: ObsSpec 与定长观测契约（节点/边/焦点/目标/候选/候选预测/掩码），RL 环境与游戏内 LearnedPolicy 共用
-env.py: TianlongEnv（MultiAgentEnv），同一 tick 同时出招、统一结算；expert_actions() 给出脚本示范；obs_spec 避开 gymnasium 的 spec 属性
+env.py: TianlongEnv（MultiAgentEnv），同一 tick 同时出招、统一结算；expert_actions() 给出脚本示范；last_events 只供评测数行为；obs_spec 避开 gymnasium 的 spec 属性；训练世界不江湖化（奖励只懂物品目标）
 rewards.py: potential() 目标进度势函数，step_reward() = 势差 − 步长成本 − 失败成本 − 冤枉人惩罚
 module.py: GraphPolicyNet（纯 torch：定长观测还原为稀疏批图 → RelationalEncoder → 逐候选打分 + 价值头）与 CandidateScoringModule（TorchRLModule + ValueFunctionAPI 外壳）
-train.py: 模仿学习初始化 → PPO（所有角色共享参数、各自观测）→ 留出种子上对照 随机/脚本/模仿/PPO + 去掉世界模型特征的消融；--entropy 与 --bc-smoothing 控制“模仿后策略过尖、PPO 无从探索”的问题；CLI python -m tianlong.learning.rl.train
+train.py: 模仿学习初始化 → PPO（所有角色共享参数、各自观测）→ 留出种子上对照 随机/脚本/模仿/PPO + 去掉世界模型特征的消融；--entropy 与 --bc-smoothing 控制“模仿后策略过尖、PPO 无从探索”的问题；评测数冤枉人与动手（奖励不禁动手，“制住再搜”是否被学会要如实报告）；--env-runners/--gpus 供 Colab 放大；CLI python -m tianlong.learning.rl.train
 policy.py: LearnedPolicy 以 Policy 协议接入 LangGraph 决策图，替换 ScriptedPolicy 而不改图
 __init__.py: 包入口（ray[rllib] 为可选依赖）
 

@@ -16,7 +16,7 @@ from tianlong.kernel import space
 
 STEP_COST = 0.01
 FAIL_COST = 0.02
-FALSE_ACCUSATION = 0.2
+FALSE_ACCUSATION = 0.5    # 第二轮 0.2 太轻：探索一放开，搜身的期望收益就盖过了冤枉人的代价
 
 
 def potential(s: WorldState, agent: str, g: Goal) -> float:

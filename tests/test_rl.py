@@ -62,7 +62,9 @@ def test_behavior_cloning_learns_expert():
     acc = float(logs[-1].split("acc=")[1])
     assert acc > 0.8, logs
     m = evaluate(env, net_policy(net), 3)
-    assert set(m) == {"mean_return", "goal_rate", "false_accusations_per_ep"}
+    assert set(m) == {"mean_return", "return_ci95", "goal_rate", "goal_rate_ci95", "false_accusations_per_ep",
+                      "attacks_per_ep"}
+    assert m["return_ci95"][0] <= m["mean_return"] <= m["return_ci95"][1]
 
 
 def test_learned_policy_plugs_into_npc_pipeline():

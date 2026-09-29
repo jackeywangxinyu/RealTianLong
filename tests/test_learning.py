@@ -87,7 +87,8 @@ def test_agent_label_keeps_unknown_unknown(warehouse):
 
 def test_tiny_training_beats_no_change_baseline():
     from tianlong.learning.train import TrainConfig, train_dynamics
-    _, m = train_dynamics(TrainConfig(view="env", worlds=50, epochs=6, seed=1), log=lambda *_: None)
+    # 冒烟只验证流水线可学（底图分布）；江湖化分布的效果由全量训练报告给出（README“训练与结果”）
+    _, m = train_dynamics(TrainConfig(view="env", worlds=50, epochs=6, seed=1, jianghu=0.0), log=lambda *_: None)
     assert m["changed_recall"] > 0.3, m          # 基线为 0
     assert m["unchanged_kept"] > 0.97, m          # 基线为 1，不能为了抓变化而乱改事实
 
