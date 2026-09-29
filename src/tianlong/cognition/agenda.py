@@ -1,60 +1,176 @@
 """
-[INPUT]: 依赖 core 的 Fact / Modality / Op / Outcome / Percept
-[OUTPUT]: 对外提供 Obligation（欠着别人的：被问到的问题）、Said（对谁说过什么）、fold_agenda()、MAX_OBLIGATIONS / MAX_SAID
-[POS]: cognition 的持久任务状态：短期经历缓冲（episodes，容量 12）会被环顾、响动挤掉，“有人问过我”“我已经告诉过他”不能跟着消失。
-       这里把它们从感知折叠成独立的、有界的记录：被人问到 → 记一笔待答；自己把答案说给了他 → 这一笔勾销，并记下“说过”。
+[INPUT]: 依赖 core 的 Fact / Kind / Modality / Op / Outcome / Percept / Rel / Social
+[OUTPUT]: 对外提供 Obligation（欠着别人的：被问到的问题 answer、被当面搭话 reply）、Said（对谁说过什么，含只有言语行为的闲话）、
+          SocialCue（别人对我、或当着我的面做出的言语行为与姿态）、fold_agenda()、fold_social()、
+          MAX_OBLIGATIONS / MAX_SAID / MAX_CUES / REPLY_TTL / ATTITUDE_RANGE / SOCIAL_ATTITUDE
+[POS]: cognition 的持久任务状态与社交状态：短期经历缓冲（episodes，容量 12）会被环顾、响动挤掉，“有人问过我”“我已经告诉过他”不能跟着消失。
+       这里把它们从感知折叠成独立的、有界的记录：被人问到 → 记一笔待答；被人当面搭话（不带命题的言语）→ 记一笔待回话；
+       自己把答案说给了他 → 这一笔勾销，并记下“说过”；回了话（或以拳脚作答）→ 待回话勾销；说“不知道/不肯说”→ 待答也勾销。
        “说过”只对说的那一刻的认知有效：自己对那个槽位的认知后来变了（钥匙追回来了、又被偷了），或对方就同一件事又问了一遍，
-       这一笔“说过”随即作废——变了的消息是新消息，再问一遍就是还想听
+       这一笔“说过”随即作废——变了的消息是新消息，再问一遍就是还想听；待回话过了 REPLY_TTL 还没回，时机已过即作废。
+       社交状态（fold_social）：别人对我或当众的言语行为记为有界的 SocialCue；对每个人的态度 ∈ ATTITUDE_RANGE 由看见/听见的
+       言语行为与动手、救治、赠物确定性地增减——态度只存在于这个角色自己的心里；company 记着眼前每个人“自何时起一直在我身边”
+       （只来自环顾），先礼后兵与守卫“一次闯入只动一次手”都以它为准。
        与信念一样只来自感知，不读真相；容量有界且溢出时丢最旧的一条（写明，不静默增长）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
-from tianlong.core import Fact, Modality, Op, Outcome, Percept
+from tianlong.core import Fact, Kind, Modality, Op, Outcome, Percept, Rel, Social
 
 MAX_OBLIGATIONS = 16
 MAX_SAID = 64
+MAX_CUES = 8
+REPLY_TTL = 3                 # 当面搭话多少个 tick 内不回就算错过了时机
+ATTITUDE_RANGE = (-3, 3)
+# 冲着我来的言语行为对态度的影响：辱骂最重；道谢、求情、赔罪、服软、安慰、见礼使其回暖
+SOCIAL_ATTITUDE: Mapping[Social, int] = {
+    Social.INSULT: -2, Social.TAUNT: -1, Social.THREATEN: -1, Social.CHALLENGE: -1, Social.COMMAND: -1,
+    Social.THANK: 1, Social.PRAISE: 1, Social.APOLOGIZE: 1, Social.PLEAD: 1, Social.SUBMIT: 1, Social.COMFORT: 1,
+    Social.GREET: 1,
+}
+ATTACKED_ME, ATTACKED_ALLY, HELPED_ME = -2, -1, 2
+_SPEECH = frozenset({Op.TELL.value, Op.ASK.value})
+_SOCIAL_KINDS = frozenset({Op.TELL.value, Op.ASK.value, Op.WAIT.value})   # 言语与姿态
+_CLOSES_QUESTION = frozenset({Social.EXPLAIN, Social.REFUSE})              # “不知道”“不肯说”也是给了回音
 
 
 @dataclass(frozen=True, slots=True)
 class Obligation:
-    kind: str           # "answer"：有人问了我一个问题
-    counterpart: str    # 问话的人
-    topic: Fact         # 问的命题（宾语为 None 的提问）
+    kind: str                       # "answer"：有人问了我一个问题；"reply"：有人当面对我说了句不带命题的话
+    counterpart: str                # 问话/搭话的人
+    topic: Fact | None              # answer：问的命题（宾语为 None 的提问）；reply：None
     since: int
+    social: Social | None = None    # reply：对方那句话的言语行为（回话按它、按性情与态度选）
 
 
 @dataclass(frozen=True, slots=True)
 class Said:
     listener: str
-    fact: Fact
+    fact: Fact | None               # None：只有言语行为的闲话（回话、叫阵、搭话）
     tick: int
+    social: Social | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SocialCue:
+    """别人对我、或当着我的面做出的言语行为与姿态：修辞，不是事实；回话、先礼后兵、搭话据此判断对方的态度。"""
+
+    frm: str
+    op: Op                          # TELL / ASK / WAIT（姿态）
+    social: Social | None
+    tick: int
+    utterance: str | None = None
+    to: str | None = None           # 冲着谁：我、别人，或 None（当众的姿态）
 
 
 def _answers(told: Fact, asked: Fact) -> bool:
     return told.prop.subject == asked.prop.subject and told.prop.predicate == asked.prop.predicate
 
 
+# ============================================================
+#  承诺状态：待答、待回话、说过
+# ============================================================
+
+
 def fold_agenda(owner: str, obligations: tuple[Obligation, ...], said: tuple[Said, ...], p: Percept,
                 changed: Collection[tuple[str, str]] = ()) -> tuple[tuple[Obligation, ...], tuple[Said, ...]]:
     """changed：本次修正里自己的认知真正变了值的槽位 (主语, 谓词)——关于它们的“说过”作废。"""
     if changed:
-        said = tuple(s for s in said if s.fact.prop.slot not in changed)
+        said = tuple(s for s in said if s.fact is None or s.fact.prop.slot not in changed)
+    obligations = tuple(o for o in obligations if o.kind != "reply" or p.tick - o.since <= REPLY_TTL)
     ev = p.event
-    if ev is None or ev.topic is None:
+    if ev is None:
         return obligations, said
-    if p.modality == Modality.SPEECH and ev.kind == Op.ASK.value and ev.target == owner and ev.actor:
-        ob = Obligation("answer", ev.actor, ev.topic, p.tick)
-        if not any(o.counterpart == ob.counterpart and o.topic == ob.topic for o in obligations):
-            obligations = (*obligations, ob)[-MAX_OBLIGATIONS:]
-        said = tuple(s for s in said if not (s.listener == ev.actor and _answers(s.fact, ev.topic)))   # 又问了一遍
-    elif p.modality == Modality.SELF and ev.kind == Op.TELL.value and ev.outcome == Outcome.SUCCESS and ev.target:
-        said = (*(s for s in said if not (s.listener == ev.target and s.fact == ev.topic)),
-                Said(ev.target, ev.topic, p.tick))[-MAX_SAID:]
-        obligations = tuple(o for o in obligations
-                            if not (o.counterpart == ev.target and _answers(ev.topic, o.topic)))
+    if p.modality == Modality.SPEECH and ev.kind in _SPEECH and ev.target == owner and ev.actor:
+        if ev.topic is None:
+            # 当面搭话：同一个人只记最新的一句
+            rest = tuple(o for o in obligations if not (o.kind == "reply" and o.counterpart == ev.actor))
+            obligations = (*rest, Obligation("reply", ev.actor, None, p.tick, ev.social))[-MAX_OBLIGATIONS:]
+        elif ev.kind == Op.ASK.value:
+            ob = Obligation("answer", ev.actor, ev.topic, p.tick)
+            if not any(o.counterpart == ob.counterpart and o.topic == ob.topic for o in obligations):
+                obligations = (*obligations, ob)[-MAX_OBLIGATIONS:]
+            said = tuple(s for s in said
+                         if not (s.listener == ev.actor and s.fact is not None and _answers(s.fact, ev.topic)))
+    elif p.modality == Modality.SELF and ev.kind in _SPEECH and ev.outcome == Outcome.SUCCESS and ev.target:
+        if ev.topic is None:
+            said = (*(s for s in said if not (s.listener == ev.target and s.fact is None and s.social == ev.social)),
+                    Said(ev.target, None, p.tick, ev.social))[-MAX_SAID:]
+            closes = ("reply", "answer") if ev.social in _CLOSES_QUESTION else ("reply",)
+            obligations = tuple(o for o in obligations if not (o.counterpart == ev.target and o.kind in closes))
+        elif ev.kind == Op.TELL.value:
+            said = (*(s for s in said if not (s.listener == ev.target and s.fact == ev.topic)),
+                    Said(ev.target, ev.topic, p.tick))[-MAX_SAID:]
+            obligations = tuple(o for o in obligations
+                                if not (o.counterpart == ev.target and o.topic is not None
+                                        and _answers(ev.topic, o.topic)))
+    elif p.modality == Modality.SELF and ev.kind == Op.ATTACK.value and ev.target:
+        # 以拳脚作答：这一句不必再回
+        obligations = tuple(o for o in obligations if not (o.kind == "reply" and o.counterpart == ev.target))
     return obligations, said
+
+
+# ============================================================
+#  社交状态：线索、态度、眼前的人
+# ============================================================
+
+
+def _clamp(v: int) -> int:
+    lo, hi = ATTITUDE_RANGE
+    return max(lo, min(hi, v))
+
+
+def attitude_delta(owner: str, allies: Collection[str], p: Percept) -> tuple[str, int] | None:
+    """这条感知让我对谁的态度变了多少：只看冲着我（或我的自己人）来的、看得出是谁做的事。"""
+    ev = p.event
+    if ev is None or not ev.actor or ev.actor == owner or p.modality not in (Modality.SPEECH, Modality.SIGHT):
+        return None
+    if ev.kind in _SOCIAL_KINDS and ev.target == owner and ev.social is not None:
+        d = SOCIAL_ATTITUDE.get(ev.social, 0)
+    elif ev.kind == Op.ATTACK.value and ev.target == owner:
+        d = ATTACKED_ME
+    elif ev.kind == Op.ATTACK.value and ev.target in allies:
+        d = ATTACKED_ALLY
+    elif ev.kind in (Op.USE.value, Op.GIVE.value) and ev.target == owner and ev.outcome == Outcome.SUCCESS:
+        d = HELPED_ME
+    else:
+        return None
+    return (ev.actor, d) if d else None
+
+
+def _company(owner: str, company: Mapping[str, int], p: Percept) -> Mapping[str, int] | None:
+    """环顾时在我身边的人：一直在的保留“自何时起”，新来的记下此刻，走了的划掉。不是一次真正的环顾就不动。"""
+    if p.modality != Modality.SCENE or not p.scopes:
+        return None
+    here = next((f.prop.value for f in p.facts
+                 if f.holds and f.prop.subject == owner and f.prop.predicate == Rel.AT.value), None)
+    if here is None:
+        return None
+    persons = {sk.id for sk in p.sketches if sk.kind == Kind.PERSON}
+    present = sorted({f.prop.subject for f in p.facts if f.holds and f.prop.predicate == Rel.AT.value
+                      and f.prop.value == here and f.prop.subject in persons and f.prop.subject != owner})
+    return {x: min(company.get(x, p.tick), p.tick) for x in present}
+
+
+def fold_social(owner: str, allies: Collection[str], cues: tuple[SocialCue, ...], attitudes: Mapping[str, int],
+                company: Mapping[str, int], p: Percept
+                ) -> tuple[tuple[SocialCue, ...], Mapping[str, int], Mapping[str, int]]:
+    """线索：冲着我、或当众（姿态；别人之间听得见的说话）的言语行为，有言语行为或原话才记。
+    态度：按 attitude_delta 增减并截在 ATTITUDE_RANGE 内，归零即删（缺席 = 0）。"""
+    ev = p.event
+    if ev is not None and ev.actor and ev.actor != owner and ev.kind in _SOCIAL_KINDS \
+            and p.modality in (Modality.SPEECH, Modality.SIGHT) and (ev.social is not None or ev.utterance) \
+            and (ev.target in (owner, None) or p.modality == Modality.SPEECH):
+        cues = (*cues, SocialCue(ev.actor, Op(ev.kind), ev.social, p.tick, ev.utterance, ev.target))[-MAX_CUES:]
+    delta = attitude_delta(owner, allies, p)
+    if delta is not None:
+        who, d = delta
+        v = _clamp(attitudes.get(who, 0) + d)
+        attitudes = {**{k: x for k, x in attitudes.items() if k != who}, **({who: v} if v else {})}
+    moved = _company(owner, company, p)
+    return cues, attitudes, (company if moved is None else moved)

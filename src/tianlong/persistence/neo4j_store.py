@@ -6,7 +6,8 @@
        (:World) 版本锚点；(:Entity:{Person|Place|Item|Surface|Door}) 以 AT/OWNS/MATCHES/CONNECTS 相连；
        (:Event)-[:BY|TARGET|OBJ|OCCURRED_AT]->(:Entity)；(:Entity)-[:OBSERVED]->(:Observation)-[:OF]->(:Event)；
        命题与相信分离：(:Entity)-[:BELIEVES {holds, confidence, ...}]->(:Proposition)-[:ABOUT]->(:Entity)；
-       (:Entity)-[:HAS_MIND]->(:Mind)-[:KNOWS]->(:Entity)；(:Memory {indexed}) 即 outbox；
+       (:Entity)-[:HAS_MIND]->(:Mind)-[:KNOWS]->(:Entity)，Mind 节点另以 JSON 属性存勘察记录、承诺状态与社交状态
+       （cues/attitudes/company/allies，旧存档缺省为空）；(:Memory {indexed}) 即 outbox；
        (:Request {data, narration}) 是玩家请求的进度与叙述；World 节点另存存档版本（versions）与会话运行态（session）。
        commit 先对 World 节点加写锁再比对版本——read-committed 隔离下由锁保证串行，而不是指望 ACID 自动解决并发；
        持锁后再做请求绑定检查（进度必须接在已落库的那一份之后），请求进度与会话运行态与世界变化同一事务写入，
@@ -199,6 +200,10 @@ class Neo4jWorldStore:
                 json.loads(mind.get("surveyed") or "{}"), json.loads(mind.get("searched") or "{}"),
                 tuple(codec.obligation_from(o) for o in json.loads(mind.get("obligations") or "[]")),
                 tuple(codec.said_from(x) for x in json.loads(mind.get("said") or "[]")),
+                cues=tuple(codec.cue_from(c) for c in json.loads(mind.get("cues") or "[]")),
+                attitudes=codec.attitudes_from(json.loads(mind.get("attitudes") or "{}")),
+                company=json.loads(mind.get("company") or "{}"),
+                allies=tuple(json.loads(mind.get("allies") or "[]")),
             )
 
         return self._read(tx)
@@ -380,7 +385,8 @@ class Neo4jWorldStore:
         agent_uid, mind_uid = _uid(ref, store.owner), _uid(ref, "mind", store.owner)
         t.run("MATCH (a:Entity {uid:$a}) MERGE (m:Mind {uid:$m}) "
               "SET m.w = $w, m.b = $b, m.owner = $o, m.trust = $trust, m.episodes = $eps, m.last_tick = $lt, "
-              "m.surveyed = $sv, m.searched = $sr, m.obligations = $ob, m.said = $sd "
+              "m.surveyed = $sv, m.searched = $sr, m.obligations = $ob, m.said = $sd, "
+              "m.cues = $cu, m.attitudes = $at, m.company = $cp, m.allies = $al "
               "MERGE (a)-[:HAS_MIND]->(m) "
               "WITH a, m OPTIONAL MATCH (m)-[k:KNOWS]->() DELETE k "
               "WITH a OPTIONAL MATCH (a)-[bel:BELIEVES]->() DELETE bel",
@@ -389,6 +395,9 @@ class Neo4jWorldStore:
               sv=json.dumps(dict(store.surveyed), sort_keys=True), sr=json.dumps(dict(store.searched), sort_keys=True),
               ob=json.dumps([codec.obligation_to(o) for o in store.obligations], ensure_ascii=False),
               sd=json.dumps([codec.said_to(x) for x in store.said], ensure_ascii=False),
+              cu=json.dumps([codec.cue_to(c) for c in store.cues], ensure_ascii=False),
+              at=json.dumps(codec.attitudes_to(store.attitudes)), cp=json.dumps(dict(store.company), sort_keys=True),
+              al=json.dumps(list(store.allies)),
               eps=json.dumps([codec.episode_to(e) for e in store.episodes], ensure_ascii=False)).consume()
         known = [{"uid": _uid(ref, sk.id), "sketch": json.dumps(codec.sketch_to(sk), ensure_ascii=False)}
                  for sk in store.entities.values()]

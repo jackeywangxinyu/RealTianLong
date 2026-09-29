@@ -1,9 +1,11 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate / navigation，core 的 Fact / Kind / Manner / Modality / Op / Proposition / Rel，
          core/profiles 的 Profile，agents/predictors 的 Prediction，memory/view 的 MemoryView
-[OUTPUT]: 对外提供 Situation / Choice（含结构化标签 tag、言语行为 social、候选之外的闲话 free 与 chosen()）/ Policy 协议、PolicyKit（规则策略共享的“在候选集中挑选”、沿自己的地图带路
-          （认为锁着的门先试着开、打不开就不去撞）、凭个人勘察记录探索、信念查询积木）、WAIT_REASONS、RECENT、STALE
-[POS]: agents 的决策契约与策略工具箱：策略只能在候选集中选（Choice.index），一切判断来自信念与近期经历。
+[OUTPUT]: 对外提供 Situation（可带主角 player）/ Choice（含结构化标签 tag、言语行为 social、候选之外的闲话 free 与 chosen()）/ Policy 协议、
+          PolicyKit（规则策略共享的“在候选集中挑选”、沿自己的地图带路（认为锁着的门先试着开、打不开就不去撞）、凭个人勘察记录探索、
+          开口积木 _say()（候选之外的闲话，index 指向 WAIT）与 _last_spoke()（最近一次对谁开口）、信念查询积木）、
+          WAIT_REASONS、SPEAK、RECENT、STALE
+[POS]: agents 的决策契约与策略工具箱：策略只能在候选集中选（Choice.index），唯一的例外是不带命题的闲话（Choice.free）；一切判断来自信念与近期经历。
        探索只凭自己的地图与勘察记录（BeliefStore.surveyed/searched），从不读真相里的最短路或藏匿处。
        ScriptedPolicy 与 MartialTactics 都建立在这些积木之上，保证脚本行为与 RL 面对的是同一套候选与同一份认知
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -11,7 +13,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -27,6 +29,7 @@ STALE = 20          # 多久没看过的地方值得再去看一眼（分钟）
 LOCK_DOUBT = 0.3    # 对“门锁着”的把握低于此（记忆已旧）就再去推一推
 # 示范者等待的结构化原因：模仿学习据此区分合理等待与卡住
 WAIT_REASONS = ("idle", "goal_inactive", "goal_done", "stuck_unknown", "no_candidate", "expert_no_action")
+SPEAK = "speak"     # 开口（回话、叫阵、搭话）的标签：index 指向 WAIT，只认下标的学习层把它当作等待
 
 
 @dataclass(frozen=True)
@@ -39,13 +42,15 @@ class Situation:
     predictions: tuple[Prediction, ...]
     memories: tuple[str, ...] = ()
     memory: MemoryView | None = None     # 长期记忆的结构化摘要：谁的话被证实/证伪过、哪些实体常被提起
+    player: str | None = None            # 主角是谁（在场的人都看得见的公开身份，不是秘密）：搭话与见义出声以他为准；
+                                         # None 时按眼前的人取舍，且不给任何人“回话不设限”的例外
 
 
 @dataclass(frozen=True, slots=True)
 class Choice:
     index: int        # 候选集下标：策略永远只能在候选集中选
     rationale: str
-    tag: str = ""     # 结构化标签：等待时为 WAIT_REASONS 之一，探索时为 "explore"
+    tag: str = ""     # 结构化标签：等待时为 WAIT_REASONS 之一，探索时为 "explore"，开口时为 SPEAK
     social: Social | None = None        # 给所选候选附上言语行为（“答话”“叫阵”）：修辞，不改变行动本身
     free: Candidate | None = None       # 候选集之外唯一允许的行动：不带命题的 TELL/ASK（闲话、回话、叫阵）——
                                         # 只有原话与言语行为、不传递任何事实，故不必占用策略的动作编号（候选规则版本不变）；
@@ -80,6 +85,31 @@ class PolicyKit:
                     and (manner is None or c.manner == manner) and (topic is None or c.topic == topic):
                 return Choice(i, why)
         return None
+
+    # ------------------------------------------------------------
+    #  开口：候选之外的闲话（只有言语行为，不带命题）
+    # ------------------------------------------------------------
+
+    @staticmethod
+    def _wait_index(sit: Situation) -> int:
+        return next((i for i, c in enumerate(sit.candidates) if c.op == Op.WAIT), 0)
+
+    def _say(self, sit: Situation, target: str, social: Social, why: str) -> Choice:
+        """对 target 说一句只有言语行为的话（回话、叫阵、搭话）：措辞留给主持人之声，事实一概不传。"""
+        return Choice(self._wait_index(sit), why, SPEAK, free=Candidate(Op.TELL, target, social=social))
+
+    @staticmethod
+    def _last_spoke(sit: Situation, listener: str | None = None,
+                    socials: Collection[Social] | None = None) -> int | None:
+        """最近一次对 listener（None = 对任何人）开口的时刻，socials 限定言语行为：
+        持久的 said 记录（说过的话与闲话）加近期经历里自己的问话（问话不进 said）。"""
+        ticks = [s.tick for s in sit.beliefs.said
+                 if (listener is None or s.listener == listener) and (socials is None or s.social in socials)]
+        ticks += [ep.tick for ep in sit.beliefs.episodes
+                  if ep.modality == Modality.SELF and ep.event.kind in (Op.TELL.value, Op.ASK.value)
+                  and (listener is None or ep.event.target == listener)
+                  and (socials is None or ep.event.social in socials)]
+        return max(ticks) if ticks else None
 
     def _go_towards(self, sit: Situation, place: str | None, why: str, manner: Manner | None = None) -> Choice | None:
         """沿自己以为的地图走一步：目的地与路线（门）都来自认知。

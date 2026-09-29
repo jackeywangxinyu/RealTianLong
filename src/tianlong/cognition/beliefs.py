@@ -1,11 +1,14 @@
 """
-[INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel / FrozenMap，cognition/agenda 的 fold_agenda
+[INPUT]: 依赖 core 的 Proposition / Fact / Percept / Modality / EntitySketch / PerceivedEvent / Rel / FrozenMap，
+         cognition/agenda 的 fold_agenda / fold_social / SocialCue
 [OUTPUT]: 对外提供 Belief / Episode / BeliefChange / BeliefStore（不可变的个人认知图，映射字段都是 FrozenMap）及其 revise() 修正规则、
           effective_confidence()
 [POS]: cognition 的核心数据结构；每个角色一份，只由感知折叠而成——它可以过时、可以错、可以自相矛盾，这正是游戏需要保留的认知差异。
        认知只能经 revise() 形成新的一份：拿到 store.beliefs 的调用方改不动它。
        surveyed / searched 记着“我上次看清、上次仔细翻查某个容纳者是什么时候”：探索与“还没找过哪里”只凭这份个人记录，
-       不读地图真相；obligations / said（cognition/agenda）是跨越经历缓冲的持久任务状态
+       不读地图真相；obligations / said（cognition/agenda）是跨越经历缓冲的持久任务状态；
+       cues / attitudes / company（cognition/agenda.fold_social）是社交状态：别人对我的言语行为、我对每个人的态度 [-3, 3]、
+       眼前的人自何时起在我身边——同样只来自感知；allies 与 trust 一样是建档时写进心里的“自己人”（态度据此把“打我的同伴”算进去）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -14,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from tianlong.cognition.agenda import Obligation, Said, fold_agenda
+from tianlong.cognition.agenda import Obligation, Said, SocialCue, fold_agenda, fold_social
 from tianlong.core import EntitySketch, FrozenMap, Modality, PerceivedEvent, Percept, Proposition, Rel
 
 # ============================================================
@@ -92,15 +95,21 @@ class BeliefStore:
     last_tick: int = 0
     surveyed: Mapping[str, int] = field(default_factory=dict)   # 容纳者 → 最近一次看清其直接内容的时刻（环顾或查看）
     searched: Mapping[str, int] = field(default_factory=dict)   # 容纳者 → 最近一次亲手仔细翻查（含藏匿物）的时刻
-    obligations: tuple[Obligation, ...] = ()   # 欠着别人的（被问到的问题），答了才勾销——不随经历缓冲滚掉
-    said: tuple[Said, ...] = ()                # 对谁说过什么：说过不重复，跨越经历缓冲
+    obligations: tuple[Obligation, ...] = ()   # 欠着别人的（被问到的问题、被当面搭话），答了/回了才勾销——不随经历缓冲滚掉
+    said: tuple[Said, ...] = ()                # 对谁说过什么（含只有言语行为的闲话）：说过不重复，跨越经历缓冲
+    cues: tuple[SocialCue, ...] = ()           # 别人对我或当众的言语行为（有界，最新在后）
+    attitudes: Mapping[str, int] = field(default_factory=dict)   # 我对某人的态度 [-3, 3]，缺席 = 0；只在我心里
+    company: Mapping[str, int] = field(default_factory=dict)     # 眼前的人 → 自何时起一直在我身边（只来自环顾）
+    allies: tuple[str, ...] = ()               # 自己人（建档时写进心里，同 trust）：有人打他们，我对那人的态度下降
 
     def __post_init__(self) -> None:
         # frozen 只冻住字段指向，冻不住映射内容：映射一律包成只读快照（已是 FrozenMap 的直接沿用，零拷贝）
-        for name in ("entities", "beliefs", "trust", "surveyed", "searched"):
+        for name in ("entities", "beliefs", "trust", "surveyed", "searched", "attitudes", "company"):
             value = getattr(self, name)
             if not isinstance(value, FrozenMap):
                 object.__setattr__(self, name, FrozenMap(value))
+        if not isinstance(self.allies, tuple) or list(self.allies) != sorted(set(self.allies)):
+            object.__setattr__(self, "allies", tuple(sorted(set(self.allies))))
 
     # ------------------------------------------------------------
     #  查询：一律排序返回，保证特征构造与候选生成的确定性
@@ -140,6 +149,14 @@ class BeliefStore:
 
     def sorted_beliefs(self) -> tuple[Belief, ...]:
         return tuple(sorted(self.beliefs.values(), key=lambda b: b.prop.sort_key()))
+
+    def attitude(self, person: str) -> int:
+        """我对此人的态度：-3（深恶）~ 3（亲厚），没打过交道是 0。"""
+        return self.attitudes.get(person, 0)
+
+    def cues_from(self, person: str, since: int = 0) -> tuple[SocialCue, ...]:
+        """此人 since 以来冲着我、或当众做出的言语行为（旧的在前）。"""
+        return tuple(c for c in self.cues if c.frm == person and c.tick >= since and c.to in (self.owner, None))
 
     # ------------------------------------------------------------
     #  修正：把一条感知折叠进认知
@@ -204,8 +221,10 @@ class BeliefStore:
         changed = {(c.before or c.after).prop.slot for c in changes  # type: ignore[union-attr]
                    if not (c.before and c.after and c.before.prop == c.after.prop and c.before.holds == c.after.holds)}
         obligations, said = fold_agenda(self.owner, self.obligations, self.said, percept, changed)
+        cues, attitudes, company = fold_social(self.owner, self.allies, self.cues, self.attitudes, self.company,
+                                               percept)
         store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now, surveyed, searched,
-                            obligations, said)
+                            obligations, said, cues, attitudes, company, self.allies)
         return store, tuple(changes)
 
     def revise_all(self, percepts: Iterable[Percept]) -> tuple[BeliefStore, tuple[BeliefChange, ...]]:

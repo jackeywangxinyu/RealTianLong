@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 kernel 的 Kernel，persistence 的 WorldStore / CommitBatch / WorldRef / TurnEnvelope，cognition 的 BeliefStore / BeliefChange，
          memory/records 的 records_for，scenarios 的 Scenario，core 的 Intent / Event / Observation
-[OUTPUT]: 对外提供 WorldAuthority（每个世界实例唯一的权威写入器，含 found() 建世界并记下存档版本）、Settlement（一次结算的结果）、
+[OUTPUT]: 对外提供 WorldAuthority（每个世界实例唯一的权威写入器，含 found() 建世界——信任与自己人随设定写进各人心里——并记下存档版本）、Settlement（一次结算的结果）、
           Annotate（提交前由调用方附上请求进度与会话运行态的钩子）
 [POS]: runtime 的写入闸口：意图 → 内核裁定 → 认知折叠 → 经历提炼 → 附注（请求进度 + 会话运行态）→ 一次原子提交。
        角色决策可以并行，事实提交只在这里串行发生；重复提交同一意图返回既有结果，绝不二次扣钱或移动物品
@@ -52,10 +52,11 @@ class WorldAuthority:
     @classmethod
     def found(cls, store: WorldStore, scenario: Scenario, branch_id: str = "main",
               kernel: Kernel | None = None, versions: Mapping[str, str] | None = None) -> WorldAuthority:
-        """建立世界：初始认知由场景给出的“过去的感知”折叠而成；versions 记下建档时的存档/规则/属性/目标版本。"""
+        """建立世界：初始认知由场景给出的“过去的感知”折叠而成（信任与自己人随设定写进心里）；
+        versions 记下建档时的存档/规则/属性/目标版本。"""
         ref = WorldRef(scenario.world_id, branch_id)
         beliefs = {
-            a: BeliefStore(a, trust=dict(p.trust)).revise_all(scenario.priors.get(a, ()))[0]
+            a: BeliefStore(a, trust=dict(p.trust), allies=p.allies).revise_all(scenario.priors.get(a, ()))[0]
             for a, p in scenario.profiles.items()
         }
         store.create(ref, scenario.state, beliefs, versions)
