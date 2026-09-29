@@ -1,11 +1,13 @@
 """
 [INPUT]: 依赖 torch，torch_geometric 的 DataLoader，learning 的 datagen / samples / model / schema / task
-[OUTPUT]: 对外提供 TrainConfig、split_by_world()、fit_baselines()、coverage()、loss_fn()、evaluate()、train_dynamics()、
-          save_checkpoint()、main()（python -m tianlong.learning.train）
+[OUTPUT]: 对外提供 TrainConfig、split_by_world()、split3()、fit_baselines()、coverage()、loss_fn()、fit_temperature()、evaluate()、
+          train_dynamics()、save_checkpoint()、main()（python -m tianlong.learning.train）
 [POS]: learning 的训练与验收：按世界切分（检验对没见过的布局的泛化），指标按 schema.TARGETS 声明的覆盖范围逐项报告——
        位置召回只叫“位置召回”（holder_*），不冒充“全部事实”；动态布尔属性逐属性、数值属性（进度、内力、点穴余时）给 MAE；
        成败按操作分项给 Brier，对照的常数基线取自**训练集**（测试集最优常数只作诊断，标明 test_const）；
        角色视角另报发现新实体、GONE 与有效新观察数；coverage 报告每类机制在数据里出现了多少次。
+       世界三分：训练 / 校准（成败头的温度只在这里拟合）/ 测试（只做最终报告，报原始与校准后两种 Brier）；
+       报告与检查点都带 manifest（提交、版本、配置、种子、设备）。
        device=auto 时有 GPU 即用 GPU，同一 CLI 可直接在 Colab 上放大跑
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -26,6 +28,7 @@ from torch_geometric.loader import DataLoader
 
 from tianlong.learning.datagen import RolloutConfig, collect
 from tianlong.learning.model import DynamicsModel, DynamicsOutput, loss_terms
+from tianlong.learning.provenance import run_manifest
 from tianlong.learning.samples import GONE, Sample, to_data
 from tianlong.learning.schema import DYN_BOOL, DYN_NUM, FEATURES_VERSION, OBS_GAIN_CAP, OPS, SCHEMA
 from tianlong.learning.task import TaskConfig
@@ -41,7 +44,8 @@ class TrainConfig:
     lr: float = 2e-3
     hidden: int = 64
     seed: int = 0
-    val_frac: float = 0.2
+    val_frac: float = 0.2      # 留出测试世界比例：只用于最终报告
+    calib_frac: float = 0.1    # 从训练世界里再留出的校准世界比例：温度缩放只在这里拟合
     jianghu: float = 0.5       # 江湖化世界比例（见 learning/task）
     scroll_rate: float = 0.5   # 江湖世界里有秘籍的概率
     scroll_held: float = 0.0   # 秘籍开局就在某人手上的概率（修习机制的数据覆盖）
@@ -66,6 +70,18 @@ def split_by_world(samples: list[Sample], world_of: list[int], val_frac: float, 
     train = [s for s, w in zip(samples, world_of, strict=True) if w not in held]
     test = [s for s, w in zip(samples, world_of, strict=True) if w in held]
     return train, test
+
+
+def split3(samples: list[Sample], world_of: list[int], test_frac: float, calib_frac: float, seed: int):
+    """按世界三分：训练 / 校准（只拟合温度）/ 测试（只做最终报告）。"""
+    worlds = sorted(set(world_of))
+    random.Random(seed).shuffle(worlds)
+    n_test = max(1, int(len(worlds) * test_frac))
+    n_calib = max(1, int(len(worlds) * calib_frac)) if calib_frac > 0 else 0
+    test_w, calib_w = set(worlds[:n_test]), set(worlds[n_test:n_test + n_calib])
+    pick = [(s, "test" if w in test_w else "calib" if w in calib_w else "train")
+            for s, w in zip(samples, world_of, strict=True)]
+    return tuple([s for s, part in pick if part == name] for name in ("train", "calib", "test"))
 
 
 # ============================================================
@@ -114,8 +130,25 @@ def loss_fn(out: DynamicsOutput, data) -> tuple[torch.Tensor, dict[str, float]]:
 
 
 @torch.no_grad()
+def fit_temperature(model: DynamicsModel, loader: DataLoader, device: torch.device | None = None) -> float:
+    """在校准世界上为成败头拟合温度（对数网格上最小化交叉熵，确定性）；测试世界不参与。"""
+    model.eval()
+    logits, ys = [], []
+    for data in loader:
+        data = data.to(device) if device is not None else data
+        logits.append(model(data).success.cpu())
+        ys.append(data.success.cpu())
+    if not logits:
+        return 1.0
+    z, y = torch.cat(logits), torch.cat(ys)
+    grid = torch.exp(torch.linspace(-2.0, 2.0, 81))
+    losses = torch.stack([torch.nn.functional.binary_cross_entropy_with_logits(z / t, y) for t in grid])
+    return round(float(grid[int(losses.argmin())]), 4)
+
+
+@torch.no_grad()
 def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | None = None,
-             baselines: dict | None = None) -> dict:
+             baselines: dict | None = None, temperature: float = 1.0) -> dict:
     model.eval()
     base = baselines or {}
     const = base.get("success_rate_by_op", {})
@@ -127,7 +160,7 @@ def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | No
         data = data.to(device) if device is not None else data
         out = model(data)
         y = data.success
-        p = torch.sigmoid(out.success)
+        p = torch.sigmoid(out.success / temperature)
         ok = (out.success > 0) == (y > 0.5)
         c["succ_n"] += int(y.numel())
         c["succ_ok"] += int(ok.sum())
@@ -245,9 +278,9 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
     device = _device(cfg.device)
     rollouts = collect(RolloutConfig(worlds=cfg.worlds, steps=cfg.steps, seed=cfg.seed, task=cfg.task()))
     samples = rollouts.env if cfg.view == "env" else rollouts.agent
-    train, test = split_by_world(samples, rollouts.world_of, cfg.val_frac, cfg.seed)
+    train, calib, test = split3(samples, rollouts.world_of, cfg.val_frac, cfg.calib_frac, cfg.seed)
     t_data = time.time() - t0
-    log(f"[data] {cfg.view}: train={len(train)} test={len(test)} device={device} ({t_data:.1f}s)")
+    log(f"[data] {cfg.view}: train={len(train)} calib={len(calib)} test={len(test)} device={device} ({t_data:.1f}s)")
     baselines = fit_baselines(train)
     tr = DataLoader([to_data(s) for s in train], batch_size=cfg.batch, shuffle=True)
     te = DataLoader([to_data(s) for s in test], batch_size=256)
@@ -271,17 +304,28 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
             log(f"[epoch {epoch + 1}] loss={total / max(len(tr), 1):.4f} succ={m['success_acc']} "
                 f"holder_recall={m['holder_changed_recall']} kept={m['holder_unchanged_kept']} "
                 f"attr={m['attr_changed_acc']}")
+    temperature = fit_temperature(model, DataLoader([to_data(s) for s in calib], batch_size=256), device)
     metrics = evaluate(model, te, device, baselines)
+    calibrated = evaluate(model, te, device, baselines, temperature)
+    metrics["success_temperature_fit_on_calib"] = temperature
+    metrics["success_brier_calibrated"] = calibrated["success_brier"]
+    metrics["success_by_op_calibrated"] = calibrated["success_by_op"]
     metrics["baselines_fit_on_train"] = baselines
     metrics["coverage_train"] = coverage(train)
     metrics["coverage_test"] = coverage(test)
     metrics["timing_seconds"] = {"data": round(t_data, 1), "total": round(time.time() - t0, 1), "device": str(device)}
+    metrics["split"] = {"train": len(train), "calib": len(calib), "test": len(test), "unit": "world"}
+    metrics["manifest"] = run_manifest(f"dynamics_{cfg.view}", asdict(cfg), cfg.task(),
+                                       seeds={"data": cfg.seed, "split": cfg.seed, "calib_split": cfg.seed + 1},
+                                       extra={"device": str(device), "model_scope": "isolated_action"})
     return model.cpu(), metrics
 
 
 def save_checkpoint(model: DynamicsModel, cfg: TrainConfig, metrics: dict, path: Path) -> None:
     torch.save({"state_dict": model.state_dict(), "config": asdict(cfg), "metrics": metrics, "schema": SCHEMA,
-                "features_version": FEATURES_VERSION, "view": cfg.view, "task": cfg.task().to_dict()}, path)
+                "features_version": FEATURES_VERSION, "view": cfg.view, "task": cfg.task().to_dict(),
+                "success_temperature": metrics.get("success_temperature_fit_on_calib", 1.0),
+                "manifest": metrics.get("manifest")}, path)
 
 
 def main(argv: list[str] | None = None) -> int:

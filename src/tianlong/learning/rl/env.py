@@ -42,6 +42,7 @@ class TianlongEnv(MultiAgentEnv):
         self.horizon = task.horizon
         self.seed_base = int(cfg.get("seed", 0))
         self.predictor: OutcomePredictor = cfg.get("predictor") or _load_predictor(cfg.get("predictor_path"))
+        self.zero_predictions = bool(cfg.get("zero_predictions", False))   # 训练期消融：策略从头到尾看不到世界模型预测
         self.possible_agents = [f"h{i}" for i in range(task.max_persons)]
         self.agents: list[str] = []
         obs_space = observation_space(self.obs_spec)
@@ -116,6 +117,8 @@ class TianlongEnv(MultiAgentEnv):
         cands = candidates(store, interests, self.obs_spec.max_cands)
         preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests))
         ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec)
+        if self.zero_predictions:
+            ob.obs["cand_pred"][:] = 0.0
         # 动作编号对应裁剪后保留的候选：引用放不下的候选不会以悬空指针出现在策略面前
         self._cands[agent], self._preds[agent], self.crops[agent] = ob.candidates, ob.predictions, ob.report
         self.coverage["crop_events"] += int(ob.report.cropped)

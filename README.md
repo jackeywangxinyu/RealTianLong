@@ -93,16 +93,40 @@ python -m tianlong --store neo4j --save 我的存档
 ## 训练与结果
 
 ```bash
-python -m tianlong.learning.train --view env   --worlds 1500 --epochs 25   # 环境动态（全知），一半世界江湖化
-python -m tianlong.learning.train --view agent --worlds 1500 --epochs 25   # 角色视角（只看认知）
-python -m tianlong.learning.rl.train --demo-episodes 200 --bc-epochs 3 --bc-smoothing 0.1 --entropy 0.03 \
-    --ppo-iterations 40 --train-batch 3000 --eval-episodes 100 --env-runners 1   # 模仿学习 + PPO + 评测
+# 动态模型：环境视角（全知，含内力/锋利/淬毒/进度等机制变量）与角色视角（只看认知），按世界三分 训练/校准/测试
+python -m tianlong.learning.train --view env   --worlds 1500 --epochs 25 --jianghu 0.5 --scroll-held 0.3
+python -m tianlong.learning.train --view agent --worlds 1500 --epochs 25 --jianghu 0.5 --scroll-held 0.3
+# 角色策略：模仿学习 → PPO → 留出世界评测（同一份 TaskConfig 贯通示范、PPO 的每个 env runner 与评测）
+python -m tianlong.learning.rl.train --jianghu 0.5 --demo-episodes 200 --bc-epochs 3 --bc-smoothing 0.1 --entropy 0.03 \
+    --ppo-iterations 40 --train-batch 3000 --eval-episodes 100 --env-runners 1 --seed 0
+# 结果表：从机器可读报告生成（每张表写明 run_id、提交号、任务指纹与种子）
+python -m tianlong.learning.results artifacts/*.json --out docs/results/RESULTS.md
 ```
 
-更大规模在 Colab GPU 上跑同一套命令：[`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb)。
-检查点记录特征词表指纹：新增行动或属性后，旧模型在加载时被明确拒绝（提示重训），不会在张量形状上报错。
+更大规模与多训练种子在 Colab GPU 上跑同一套命令：[`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb)。
 
-### 动态模型（第三轮：1500 个程序化世界，一半江湖化，按世界切分）
+口径（见 `learning/rl/evaluation.py`、`learning/train.py`）：
+
+- **可溯源**：每份报告与检查点带 manifest（提交号与工作区是否干净、特征/属性/目标/奖励版本、任务指纹、完整配置、训练与评测种子、依赖版本、设备）。README 里的数字只从 `docs/results/` 下的报告生成。
+- **动态模型**：指标按声明的预测目标逐项——位置召回叫 `holder_*`（不冒充“全部事实”）、布尔属性逐项、数值属性（进度、内力、点穴余时）给 MAE 对照“不变”、发现新实体与有效新观察数；成败的 Brier 对照**训练集**常数，温度只在独立的校准世界上拟合，测试世界只报告；`coverage` 报告每类机制在数据里出现了几次。
+- **策略**：行为计数只读事件（改奖励权重不改计数）——搜身分“落空”与“无证据”、动手分得手/落空/被拒与“目标所驱/还手护人/无端”、误指控、无效循环；目标分**开局即满足**、**激活后新达成**、**持续目标守住**，并报达成用时与可达性。必报**永远等待**基线：一部分“达成”只是保持初态。
+- **统计**：同一局里的角色互相影响，区间一律以**世界**为单位重采样；策略之间只在同一批世界上**配对**比较；世界少于 20 个不下结论；“没发现差异”不等于“等效”，等效要求整个区间落在事先声明的容许差内。训练期消融（`--ablate-predictions`，策略从头到尾看不到预测）与测试期消融（训练时看得见、评测时置零）分开报告、分开解释。
+
+### 当前结果（Schema v2 / reward-v2 / task-v1）
+
+待 Colab 运行后由 `python -m tianlong.learning.results` 生成并提交到 `docs/results/`。在此之前，下面的历史数字**不代表当前代码**。
+
+### 历史实验（第三轮，commit 6f53936 及之前；特征 v1、奖励 v1、PPO 环境未江湖化）
+
+以下数字只读自当时的自报日志，未复测，保留作历史标签，**不与当前默认配置比较**。已知的口径问题：
+
+- `changed_recall` 实为**位置**变化召回，不是全部世界事实的召回。
+- 动手的误差不能全归因于随机：当时的环境编码遗漏了内力与兵刃锋利（已由 Schema v2 修正），同一输入可以对应必败与必胜。
+- 研读与常数持平不代表修习没有可学的动态：进度与学成的技能当时不是预测目标。
+- 常数基线取自测试集本身，只能算事后诊断。
+- 策略表的“目标达成率”没有区分开局即满足、后来达成与持续守住，也没有永远等待基线；动态模型表与策略表的场景版本、惩罚与模仿权重各不相同，不是同一个实验。
+
+#### 动态模型（第三轮：1500 个程序化世界，一半江湖化，按世界切分）
 
 在**未见过的世界**上，对照“什么都不变”基线：
 
@@ -165,5 +189,7 @@ pytest -m slow                          # PPO 冒烟
 | 同意 ≠ 发生 | 智能体只产出意图，`WorldAuthority` 唯一提交 | `test_rl.py`、`test_agents.py` |
 | 相同存档 + 行动 → 相同结果 | blake2b 派生 ID 与种子，纯函数内核 | `test_acceptance_warehouse.py`、`test_store_contract.py`（跨后端指纹一致） |
 | 重试不二次结算 | 意图 ID 由 (世界, 分支, 角色, 版本) 派生 | `test_acceptance_warehouse.py`、`test_agents.py` |
+| 表示不丢机制、角色不见真相 | Schema v2 类型化特征（已知/未知/不适用三态）、环境与角色两入口 | `test_schema_v2.py`、`test_observation.py` |
+| 指标不从奖励推算、样本不当独立 | 事件口径计数、以世界为单位的自助法与配对比较、永远等待基线 | `test_evaluation.py`、`test_rl.py` |
 
 项目地图见 [`CLAUDE.md`](CLAUDE.md)，每个模块目录下都有自己的 `CLAUDE.md`。

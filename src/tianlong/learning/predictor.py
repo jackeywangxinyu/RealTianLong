@@ -28,8 +28,9 @@ GAIN_SCALE = 5.0    # 期望有效新观察数 → [0, 1] 的尺度：五条以�
 
 
 class GNNPredictor:
-    def __init__(self, model: DynamicsModel) -> None:
+    def __init__(self, model: DynamicsModel, temperature: float = 1.0) -> None:
         self.model = model.eval()
+        self.temperature = temperature      # 校准世界上拟合的成败头温度
 
     @classmethod
     def load(cls, path: str | Path) -> GNNPredictor:
@@ -37,7 +38,7 @@ class GNNPredictor:
         check_schema(ckpt, path, view="agent")
         model = DynamicsModel(ckpt["config"]["hidden"])
         model.load_state_dict(ckpt["state_dict"])
-        return cls(model)
+        return cls(model, float(ckpt.get("success_temperature", 1.0)))
 
     @torch.no_grad()
     def predict(
@@ -47,6 +48,6 @@ class GNNPredictor:
             return []
         samples = [agent_query(store, now, store.owner, c) for c in cands]
         out = self.model(Batch.from_data_list([to_data(s) for s in samples]))
-        success = torch.sigmoid(out.success)
+        success = torch.sigmoid(out.success / self.temperature)
         gain = (out.obs_gain / GAIN_SCALE).clamp(0, 1)
         return [Prediction(float(success[i]), float(gain[i]), "gnn") for i in range(len(cands))]

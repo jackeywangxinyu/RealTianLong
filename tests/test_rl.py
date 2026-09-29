@@ -256,8 +256,8 @@ def test_b04_holdout_metrics_on_other_worlds():
     demos = collect_demos(env, 30, seed=3)
     held = collect_demos(env, 8, seed=97)
     assert {d.world for d in demos} and not {id(d) for d in held} & {id(d) for d in demos}
+    torch.manual_seed(0)                       # 先定种子再建网络：初始化不能取决于先跑了哪些测试
     net = GraphPolicyNet(32)
-    torch.manual_seed(0)
     reps = behavior_clone(net, demos, 6, seed=0, wait_share=0.5, log=lambda *_: None)
     assert reps[-1]["declared_wait_share"] == 0.5 and math.isfinite(reps[-1]["wait_loss_share"])
     m = holdout_metrics(net, held)
@@ -265,7 +265,7 @@ def test_b04_holdout_metrics_on_other_worlds():
     assert m["act_recall"] > 0.0, "留出世界上确实学到了非等待动作（永远等待的基线召回为 0）"
     base = evaluate(env, wait_policy, 3)
     learned = evaluate(env, net_policy(net), 3)
-    assert set(base) == set(learned) and "search_misses_per_ep" in learned
+    assert set(base) == set(learned) and "search_miss_rate" in learned
 
 
 def test_learned_policy_plugs_into_npc_pipeline():

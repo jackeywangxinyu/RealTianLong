@@ -19,8 +19,16 @@ from pathlib import Path
 
 import torch
 
+from tianlong.learning.provenance import run_manifest
 from tianlong.learning.rl.env import TianlongEnv
-from tianlong.learning.rl.evaluation import evaluate, net_policy, random_policy, scripted_policy, wait_policy
+from tianlong.learning.rl.evaluation import (
+    compare,
+    evaluate,
+    net_policy,
+    random_policy,
+    scripted_policy,
+    wait_policy,
+)
 from tianlong.learning.rl.imitation import behavior_clone, collect_demos, holdout_metrics
 from tianlong.learning.rl.module import CandidateScoringModule, GraphPolicyNet
 from tianlong.learning.rl.rewards import REWARD_VERSION
@@ -54,6 +62,10 @@ class RLConfig:
     scroll_held: float = 0.0
     goals: str = ",".join(ALL_GOALS)
     horizon: int = 30
+    # ---- 评测与消融 ----
+    eval_seed: int = 900_000       # 留出世界的种子起点（与示范、PPO 采样的种子段不相交）
+    ablate_predictions: bool = False   # 训练期消融：PPO 与模仿学习全程看不到世界模型预测（与测试期置零分开解释）
+    margin: float = 0.05           # 等效判定的容许差（目标达成率）；区间整个落在 ±margin 内才说“等效”
 
     def task(self) -> TaskConfig:
         return TaskConfig(self.jianghu, self.max_places, self.max_items, self.max_persons, self.scroll_rate,
@@ -61,7 +73,7 @@ class RLConfig:
 
     def env_config(self) -> dict:
         return {"task": self.task().to_dict(), "seed": self.seed, "predictor_path": self.predictor_path or None,
-                "reward": {"gamma": self.gamma}}
+                "reward": {"gamma": self.gamma}, "zero_predictions": self.ablate_predictions}
 
 
 # ============================================================
@@ -110,10 +122,15 @@ def train_ppo(cfg: RLConfig, init: GraphPolicyNet | None, log=print) -> GraphPol
     return net
 
 
+def _public(r: dict) -> dict:
+    return {k: v for k, v in r.items() if not k.startswith("_")}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tianlong.learning.rl.train", description="模仿学习 + PPO 训练角色策略")
     for f, default in asdict(RLConfig()).items():
-        ap.add_argument(f"--{f.replace('_', '-')}", type=type(default), default=default)
+        kind = (lambda v: str(v).lower() in ("1", "true", "yes")) if isinstance(default, bool) else type(default)
+        ap.add_argument(f"--{f.replace('_', '-')}", type=kind, default=default)
     ap.add_argument("--out", default="artifacts")
     args = vars(ap.parse_args(argv))
     out_dir = Path(args.pop("out"))
@@ -121,40 +138,65 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(cfg.seed)
     t0 = time.time()
     env = TianlongEnv(cfg.env_config())
+    n = cfg.eval_episodes
 
-    report: dict[str, dict] = {"random": evaluate(env, random_policy(cfg.seed), cfg.eval_episodes),
-                               "wait_only": evaluate(env, wait_policy, cfg.eval_episodes),
-                               "scripted": evaluate(env, scripted_policy, cfg.eval_episodes)}
-    for k in ("random", "wait_only", "scripted"):
-        print(f"[eval] {k}", report[k])
+    def ev(policy) -> dict:
+        return evaluate(env, policy, n, seed_base=cfg.eval_seed, keep_logs=True)
+
+    runs: dict[str, dict] = {"random": ev(random_policy(cfg.seed)), "wait_only": ev(wait_policy),
+                             "scripted": ev(scripted_policy)}
+    for k in runs:
+        print(f"[eval] {k}", _brief(runs[k]))
 
     demos = collect_demos(env, cfg.demo_episodes, cfg.seed)
     held = collect_demos(env, max(10, cfg.demo_episodes // 5), cfg.seed + 7_919)      # 留出世界：另一段种子
     print(f"[bc] demos={len(demos)} holdout={len(held)}")
     bc = GraphPolicyNet(cfg.hidden)
-    report["bc_epochs"] = behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing,
-                                         wait_share=cfg.bc_wait_share)       # type: ignore[assignment]
-    report["bc_holdout"] = holdout_metrics(bc, held)
-    report["bc"] = evaluate(env, net_policy(bc), cfg.eval_episodes)
-    print("[eval] bc", report["bc"], "\n[bc] holdout", report["bc_holdout"])
+    bc_epochs = behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing,
+                               wait_share=cfg.bc_wait_share)
+    runs["bc"] = ev(net_policy(bc))
+    print("[eval] bc", _brief(runs["bc"]))
 
     ppo = train_ppo(cfg, bc)
-    report["ppo"] = evaluate(env, net_policy(ppo), cfg.eval_episodes)
-    report["ppo_without_world_model_features"] = evaluate(env, net_policy(ppo, zero_predictions=True),
-                                                          cfg.eval_episodes)
-    print("[eval] ppo", report["ppo"], "\n[eval] ppo(无世界模型特征)", report["ppo_without_world_model_features"])
-    report["config"] = asdict(cfg)
-    report["task"] = cfg.task().to_dict()
-    report["coverage"] = dict(env.coverage)
-    report["seconds"] = round(time.time() - t0, 1)
+    runs["ppo"] = ev(net_policy(ppo))
+    runs["ppo_test_time_no_predictions"] = ev(net_policy(ppo, zero_predictions=True))   # 测试期消融：训练时看得见
+    print("[eval] ppo", _brief(runs["ppo"]), "\n[eval] ppo(测试期置零预测)", _brief(runs["ppo_test_time_no_predictions"]))
 
+    logs = {k: v["_logs"] for k, v in runs.items()}
+    comparisons = {
+        f"ppo_vs_{b}:{m}": compare(logs["ppo"], logs[b], m, cfg.margin if m == "goal_rate" else None)
+        for b in ("wait_only", "scripted", "bc", "ppo_test_time_no_predictions") for m in ("mean_return", "goal_rate")
+    }
+    comparisons["scripted_vs_wait_only:goal_rate"] = compare(logs["scripted"], logs["wait_only"], "goal_rate",
+                                                             cfg.margin)
+    report = {
+        "manifest": run_manifest("policy", asdict(cfg), cfg.task(), seeds={
+            "train": cfg.seed, "demo_episodes": [cfg.seed * 100_000, cfg.seed * 100_000 + cfg.demo_episodes],
+            "holdout_demo_seed": cfg.seed + 7_919, "eval": [cfg.eval_seed, cfg.eval_seed + n]},
+            extra={"ablation": "training_time_no_predictions" if cfg.ablate_predictions else None,
+                   "device": {"learner_gpus": cfg.gpus, "env_runners": cfg.env_runners}}),
+        "policies": {k: _public(v) for k, v in runs.items()},
+        "paired_comparisons": comparisons,
+        "bc_epochs": bc_epochs,
+        "bc_holdout": holdout_metrics(bc, held),
+        "coverage": dict(env.coverage),
+        "seconds": round(time.time() - t0, 1),
+    }
     out_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"policy_ppo{'_noPred' if cfg.ablate_predictions else ''}_s{cfg.seed}"
     torch.save({"state_dict": ppo.state_dict(), "config": asdict(cfg), "schema": SCHEMA,
                 "features_version": FEATURES_VERSION, "reward_version": REWARD_VERSION, "view": "policy",
-                "obs_spec": asdict(env.obs_spec), "task": cfg.task().to_dict()}, out_dir / "policy_ppo.pt")
-    (out_dir / "policy_report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
-    print(json.dumps(report, indent=2, ensure_ascii=False))
+                "obs_spec": asdict(env.obs_spec), "task": cfg.task().to_dict(), "manifest": report["manifest"]},
+               out_dir / f"{tag}.pt")
+    (out_dir / f"{tag}.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    print(json.dumps({k: report[k] for k in ("manifest", "paired_comparisons")}, indent=2, ensure_ascii=False))
     return 0
+
+
+def _brief(r: dict) -> str:
+    return (f"return={r['mean_return']} goal={r['goal_rate']['value']} new={r['new_goal_achievement']['value']} "
+            f"kept={r['maintenance_success']['value']} search_miss={r['per_episode']['search_miss']} "
+            f"unprovoked={r['per_episode']['attack_unprovoked']}")
 
 
 if __name__ == "__main__":  # pragma: no cover
