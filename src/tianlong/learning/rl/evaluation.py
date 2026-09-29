@@ -2,8 +2,10 @@
 [INPUT]: 依赖 numpy / torch，learning/rl 的 env / imitation 的 stack / observation 的 ABLATIONS / stats（统计推断），
          kernel/space 的 WorldReader / place_of，core 的 Event / Op / Kind / Rel / Outcome / Proposition / GoalMode / reason_key，
          cognition 的 BeliefStore
-[OUTPUT]: 对外提供 PolicyFn、net_policy()（可测试期消融）、random_policy()、scripted_policy()、wait_policy()、
-          event_counts()（一个 tick 的行为计数）、repeat_kind()（无效循环与随机重掷之分）、run_episode()、evaluate()；转出 stats 的 EpisodeLog / METRICS / MIN_WORLDS /
+[OUTPUT]: 对外提供 PolicyFn、NetPolicy / net_policy()（可测试期消融）、RandomPolicy / random_policy()（逐局派生随机流）、
+          scripted_policy()、wait_policy()（策略都可 pickle）、
+          event_counts()（一个 tick 的行为计数）、repeat_kind()（无效循环与随机重掷之分）、run_episode()、
+          evaluate()（workers > 1 时逐局分给子进程，与顺序评测逐项相同）；转出 stats 的 EpisodeLog / METRICS / MIN_WORLDS /
           cluster_ci / ratio / mean_return / summarize / compare
 [POS]: learning/rl 的评测：跑局并按事件口径数行为（推断在 stats）。行为计数只读事件、真相与行动者事前的认知，与奖励权重无关：
        搜身分“落空”（对方身上没有自己关心的东西）与“无证据”（搜之前自己并不认为东西在他身上、也没见他拿过）；
@@ -18,17 +20,18 @@ from __future__ import annotations
 import random
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 
 from tianlong.cognition import BeliefStore
-from tianlong.core import Event, Kind, Op, Outcome, Proposition, Rel, WorldState, reason_key
+from tianlong.core import Event, Kind, Op, Outcome, Proposition, Rel, WorldState, derive_seed, reason_key
 from tianlong.core.goals import GoalMode
 from tianlong.core.profiles import GoalKind, Profile
 from tianlong.kernel import space
 from tianlong.kernel.space import WorldReader
-from tianlong.learning.rl.env import TianlongEnv
+from tianlong.learning.rl.env import TianlongEnv, map_episodes
 from tianlong.learning.rl.imitation import Obs, stack
 from tianlong.learning.rl.observation import ABLATIONS
 from tianlong.learning.rl.stats import (  # noqa: F401  （评测的调用方从这里一并取统计口径）
@@ -53,24 +56,43 @@ STOCHASTIC_REASONS = frozenset({"parried", "evaded"})   # 同样的出手下一 
 # ============================================================
 
 
-def net_policy(net, ablate: Iterable[str] = ()) -> PolicyFn:
-    """ablate：测试期消融（observation.ABLATIONS 的名字）——训练时看得见、评测时整列置零。"""
-    keys = [k for name in ablate for k in ABLATIONS[name]]
+# 策略都是可 pickle 的对象或模块级函数：并行评测时整份交给子进程
+
+
+@dataclass
+class NetPolicy:
+    """网络策略；ablate 为测试期消融（observation.ABLATIONS 的名字）——训练时看得见、评测时整列置零。"""
+    net: object
+    ablate: tuple[str, ...] = ()
 
     @torch.no_grad()
-    def act(env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
+    def __call__(self, env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
         batch = stack([obs[a] for a in env.agents])
-        for k in keys:
+        for k in (k for name in self.ablate for k in ABLATIONS[name]):
             batch[k] = torch.zeros_like(batch[k])
-        logits, _ = net(batch)
+        logits, _ = self.net(batch)
         return {a: int(i) for a, i in zip(env.agents, logits.argmax(-1), strict=True)}
 
-    return act
+
+def net_policy(net, ablate: Iterable[str] = ()) -> PolicyFn:
+    return NetPolicy(net, tuple(ablate))
+
+
+@dataclass
+class RandomPolicy:
+    """在合法候选里均匀随机。随机流按（种子，这一局的世界种子）派生：每局可单独复现，并行与顺序评测逐项相同。"""
+    seed: int = 0
+    _world: int | None = field(default=None, repr=False)
+    _rng: random.Random = field(default_factory=random.Random, repr=False)
+
+    def __call__(self, env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
+        if env.world_seed != self._world:
+            self._world, self._rng = env.world_seed, random.Random(derive_seed("random_policy", self.seed, env.world_seed))
+        return {a: int(self._rng.choice(list(np.flatnonzero(obs[a]["action_mask"])))) for a in env.agents}
 
 
 def random_policy(seed: int = 0) -> PolicyFn:
-    rng = random.Random(seed)
-    return lambda env, obs: {a: rng.choice(list(np.flatnonzero(obs[a]["action_mask"]))) for a in env.agents}
+    return RandomPolicy(seed)
 
 
 def scripted_policy(env: TianlongEnv, obs: dict[str, Obs]) -> dict[str, int]:
@@ -219,9 +241,14 @@ def run_episode(env: TianlongEnv, policy: PolicyFn, seed: int) -> EpisodeLog:
     return log
 
 
+def _eval_episode(env: TianlongEnv, policy: PolicyFn, seed: int) -> EpisodeLog:
+    return run_episode(env, policy, seed)
+
+
 def evaluate(env: TianlongEnv, policy: PolicyFn, episodes: int, seed_base: int = 900_000, draws: int = 2000,
-             keep_logs: bool = False) -> dict:
-    logs = [run_episode(env, policy, seed_base + ep) for ep in range(episodes)]
+             keep_logs: bool = False, workers: int = 1) -> dict:
+    """workers > 1：各局分给子进程（每局只依赖自己的种子，结果与顺序评测逐项相同）；0 = 本机全部核。"""
+    logs = map_episodes(env, _eval_episode, policy, [seed_base + ep for ep in range(episodes)], workers)
     out = summarize(logs, draws)
     if keep_logs:
         out["_logs"] = logs

@@ -6,7 +6,7 @@
 [POS]: learning/rl 的训练流水线：模仿学习初始化（脚本策略示范，见 imitation）→ PPO（同一策略网络被所有角色共享参数，
        但各自观测各自的认知）→ 留出种子上对照 随机 / 永远等待 / 脚本 / 模仿 / PPO，并做“去掉世界模型预测特征”的消融（见 evaluation）。
        TaskConfig 一份解析、处处同用：示范、PPO 的每个 env runner、评测与检查点读的是同一个任务分布；
-       env_runners/gpus 让同一 CLI 在 Colab 上并行采样、GPU 学习；策略检查点带规格指纹、视角 policy、训练时的 ObsSpec、TaskConfig、
+       env_runners/gpus/workers 让同一 CLI 在 Colab 上并行采样、GPU 学习、按局并行评测与示范（workers 不改结果、不进 run_id）；策略检查点带规格指纹、视角 policy、训练时的 ObsSpec、TaskConfig、
        训练期消融与预测器文件哈希（部署包据此配对）。训练期消融（预测/记忆列整列置零）是另一次运行，报告带逐世界记录，
        由 results --pair 在同一批留出世界上与主实验配对比较。断点续训：模仿学习权重与 PPO 最近权重（原子写入）带着配置，
        --resume 时配置不符即拒绝；续训与不中断是同一次实验，--resume 不进 run_id
@@ -24,7 +24,7 @@ from pathlib import Path
 import torch
 
 from tianlong.learning.bundle import file_sha256
-from tianlong.learning.provenance import run_manifest
+from tianlong.learning.provenance import EXACT_RESOURCE_KEYS, run_manifest
 from tianlong.learning.rl.env import TianlongEnv
 from tianlong.learning.rl.evaluation import (
     compare,
@@ -58,6 +58,7 @@ class RLConfig:
     bc_wait_share: float = 0.5     # 模仿学习里“等待”样本占的总权重（[0, 1]；见 imitation.bc_weights）
     env_runners: int = 0           # 并行采样进程数；0 = 在驱动进程里采样（小机器），Colab 上可设 2~8
     gpus: float = 0.0              # 学习器 GPU 数（Colab 设 1）
+    workers: int = 1               # 评测与示范的并行进程数（0 = 本机全部核）：只改执行方式，结果逐项相同
     # ---- 任务分布（TaskConfig 展平，CLI 可直接传）----
     jianghu: float = 0.5
     max_places: int = 5
@@ -106,7 +107,7 @@ def _net_from(state: dict, hidden: int) -> GraphPolicyNet:
 
 
 # 续训时允许不同的字段：加长 PPO 轮数、换评测规模、换并行度与设备（都不改变已训练部分的含义）
-_RESUMABLE_DIFF = frozenset({"ppo_iterations", "eval_episodes", "env_runners", "gpus"})
+_RESUMABLE_DIFF = frozenset({"ppo_iterations", "eval_episodes", "env_runners", "gpus"}) | EXACT_RESOURCE_KEYS
 
 
 def _resume_state(path: Path, cfg: RLConfig) -> dict:
@@ -200,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def ev(policy) -> dict:
         t = time.time()
-        r = evaluate(env, policy, n, seed_base=cfg.eval_seed, keep_logs=True)
+        r = evaluate(env, policy, n, seed_base=cfg.eval_seed, keep_logs=True, workers=cfg.workers)
         timing["eval"] = round(timing.get("eval", 0.0) + time.time() - t, 1)
         return r
 
@@ -211,8 +212,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if cfg.eval_seed + n > DEMO_SEED_FLOOR:
         raise ValueError(f"评测种子 [{cfg.eval_seed}, {cfg.eval_seed + n}) 会与示范种子（≥{DEMO_SEED_FLOOR}）重叠")
-    demos = collect_demos(env, cfg.demo_episodes, cfg.seed, "demo")
-    held = collect_demos(env, max(10, cfg.demo_episodes // 5), cfg.seed, "bc_holdout")   # 留出世界：另一条种子流
+    demos = collect_demos(env, cfg.demo_episodes, cfg.seed, "demo", cfg.workers)
+    held = collect_demos(env, max(10, cfg.demo_episodes // 5), cfg.seed, "bc_holdout", cfg.workers)   # 另一条种子流
     print(f"[bc] demos={len(demos)} holdout={len(held)}")
     bc = GraphPolicyNet(cfg.hidden)
     bc_file = out_dir / f"{tag}.bc.pt"

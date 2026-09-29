@@ -2,9 +2,10 @@
 [INPUT]: 依赖 ray.rllib 的 MultiAgentEnv，gymnasium，kernel 的 Kernel，cognition 的 BeliefStore / candidates，
          agents 的 HeuristicPredictor / ScriptedPolicy / Situation / OutcomePredictor，learning/task 的 TaskConfig，
          memory 的 records_for / MemoryView（长期记忆摘要与线上同一定义），
-         learning/rl 的 observation / rewards
+         learning/rl 的 observation / rewards，learning/parallel 的 ordered_map / resolve_workers
 [OUTPUT]: 对外提供 TianlongEnv（RLlib 多智能体环境：crops 暴露裁剪报告，tracker 暴露目标状态，episode_rewards 暴露分项奖励累计，
-          coverage 暴露实际抽到的场景与目标分布）
+          coverage 暴露实际抽到的场景与目标分布，config 供子进程重建，world_seed 为当前一局的世界种子）、
+          map_episodes()（逐局函数分给多进程、按顺序拼回、coverage 并回：并行与顺序逐项相同）
 [POS]: learning/rl 的训练环境：每个角色一个智能体，同一 tick 同时出招、由同一个内核统一结算——与线上完全相同的转移机制。
        世界从 TaskConfig 取样（江湖化比例、规模、启用目标族一路贯通到 reset），启用目标族之外的目标在 reset 时明确报错；
        观测只来自各自的认知图；config["ablate"] 为训练期消融（整列置零，定义见 observation.ABLATIONS）；
@@ -26,6 +27,7 @@ from tianlong.cognition import BeliefStore, Candidate, candidates
 from tianlong.cognition.candidates import budget
 from tianlong.core import Op, derive_seed, make_id
 from tianlong.kernel import Kernel
+from tianlong.learning.parallel import ordered_map, resolve_workers
 from tianlong.learning.rl.observation import CropReport, ObsSpec, ablate, build_observation, observation_space
 from tianlong.learning.rl.rewards import GoalTracker, RewardWeights, step_reward
 from tianlong.learning.task import TaskConfig
@@ -37,6 +39,7 @@ class TianlongEnv(MultiAgentEnv):
     def __init__(self, config: dict | None = None) -> None:
         super().__init__()
         cfg = dict(config or {})
+        self.config = cfg                          # 原样保留：并行评测/示范的子进程据此重建同一个环境
         task = TaskConfig.from_dict(cfg.get("task"))
         if "horizon" in cfg:                       # 兼容旧调用：horizon 直接给出
             task = TaskConfig.from_dict({**task.to_dict(), "horizon": int(cfg["horizon"])})
@@ -56,6 +59,7 @@ class TianlongEnv(MultiAgentEnv):
         self.kernel = Kernel()
         self._expert = ScriptedPolicy()
         self._episodes = 0
+        self.world_seed: int | None = None        # 当前这一局的世界种子：逐局可复现的随机基线据此取种子
         self._cands: dict[str, tuple[Candidate, ...]] = {}
         self._preds: dict[str, tuple[Prediction, ...]] = {}
         self.crops: dict[str, CropReport] = {}    # 每个角色最近一次观测的裁剪报告：超预算必须看得见
@@ -70,6 +74,7 @@ class TianlongEnv(MultiAgentEnv):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         world_seed = seed if seed is not None else derive_seed("env", self.seed_base, self._episodes) % 1_000_000_007
         self._episodes += 1
+        self.world_seed = world_seed
         sc = self.task.scenario(world_seed)
         self.scenario = sc
         self.state = sc.state
@@ -125,7 +130,9 @@ class TianlongEnv(MultiAgentEnv):
         interests = list(profile.interests())
         offered = candidates(store, interests)
         cands = budget(offered, self.obs_spec.max_cands, interests)     # 先拿全集再截：截掉多少进裁剪报告
-        preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests, profile=profile))
+        # 训练期消融了预测：策略从头到尾看不到它、脚本示范也不读它——不必算（置零的观测与算了再清零逐项相同）
+        preds = () if "predictions" in self.ablate else \
+            tuple(self.predictor.predict(store, self.state.clock, cands, interests, profile=profile))
         ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec, self.memories[agent],
                                offered=len(offered))
         ablate(ob.obs, self.ablate)
@@ -146,6 +153,37 @@ class TianlongEnv(MultiAgentEnv):
 
     def achieved(self, agent: str) -> bool:
         return self.tracker.achieved(agent)
+
+
+# ============================================================
+#  多进程逐局执行：并行与顺序逐项相同（每局只依赖自己的种子）
+# ============================================================
+
+_WORKER: dict = {}
+
+
+def _init_worker(config: dict, fn, extra) -> None:
+    _WORKER.update(env=TianlongEnv(config), fn=fn, extra=extra)
+
+
+def _run_one(arg):
+    env = _WORKER["env"]
+    before = Counter(env.coverage)
+    out = _WORKER["fn"](env, _WORKER["extra"], arg)
+    return out, {k: v - before[k] for k, v in env.coverage.items()}     # 保留值为 0 的键：与顺序执行的报告逐字相同
+
+
+def map_episodes(env: TianlongEnv, fn, extra, args, workers: int = 1) -> list:
+    """对每个 arg 求 fn(env, extra, arg)，按 args 顺序返回。workers > 1 时分给 spawn 子进程，
+    每个子进程按 env.config 重建同一个环境；子进程里累计的 coverage 并回 env.coverage。
+    fn 必须是模块级函数，extra（如策略）必须可 pickle。"""
+    args = list(args)
+    if resolve_workers(workers) <= 1:
+        return [fn(env, extra, a) for a in args]
+    results = ordered_map(_run_one, args, workers, _init_worker, (env.config, fn, extra))
+    for _, cov in results:
+        env.coverage.update(cov)
+    return [r for r, _ in results]
 
 
 def _load_predictor(path: str | None) -> OutcomePredictor:

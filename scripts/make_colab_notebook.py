@@ -26,8 +26,10 @@ _INTRO = """
 笔记本只是外壳：**检出固定提交 → 安装（版本锁定）→ 全量测试（失败即停）→ 剖析 → 调用仓库里同一套训练 CLI → 结果写进 Google Drive**。
 训练逻辑只在 `src/tianlong/learning` 里一处。
 
-1. 菜单 **代码执行程序 → 更改运行时类型 → GPU**（T4 即可；GPU 只加速学习器与网络前向，世界生成、内核结算、图构造都在 CPU 上）。
-2. 核对第一个代码格里的 `COMMIT`（固定提交号）与 `SCALE`（`smoke` 约二十分钟冒烟 / `full` 正式运行，约 6–8 小时）。
+1. 菜单 **代码执行程序 → 更改运行时类型 → GPU**，优先选 **A100**。决定速度的主要是 **CPU 核数**：世界模拟、认知折叠、GNN 预测、
+   评测与示范都在 CPU 上按世界/按局并行，GPU 只加速学习器与 GNN 训练。A100 运行时（约 12 核）全流程约 1.5–2 小时，
+   T4 标准运行时（2 核）约 8–10 小时。下面剖析格会打印本机核数与各阶段耗时。
+2. 核对第一个代码格里的 `COMMIT`（固定提交号）与 `SCALE`（`smoke` 约十五分钟冒烟 / `full` 正式运行）。
 3. **代码执行程序 → 全部运行**。任何一步失败都会抛异常，后续单元格不再执行。
 4. 产物（日志、报告 JSON、检查点、依赖锁定、剖析、结果表、部署包）都写在 Drive 的 `MyDrive/RealTianLong/runs/<运行名>/`。
    断线后重新“全部运行”：已完成的阶段跳过，GNN 按轮、PPO 按最近一次保存的权重接着训练。
@@ -91,6 +93,31 @@ def sh(cmd, log, cwd=None, env=None, check=True):
     if check and p.returncode != 0:
         raise RuntimeError(f"命令失败（退出码 {p.returncode}，{time.time() - t0:.0f}s，日志 logs/{log}.log）：{line}")
     return p.returncode
+
+
+def sh_all(jobs):
+    \"\"\"并行跑多条互不依赖的命令（各写各的日志）；全部结束后，任何一条非零都抛异常。\"\"\"
+    procs = []
+    for cmd, log in jobs:
+        args = [str(a) for a in cmd]
+        line = redact("$ " + " ".join(args))
+        print(line, flush=True)
+        f = open(RUN / "logs" / f"{log}.log", "a")
+        f.write(line + "\\n")
+        f.flush()
+        procs.append((subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT), f, log))
+    failed = []
+    for p, f, log in procs:
+        p.wait()
+        f.close()
+        path = RUN / "logs" / f"{log}.log"
+        if SECRETS:
+            path.write_text(redact(path.read_text()))
+        if p.returncode != 0:
+            failed.append(f"{log}（退出码 {p.returncode}）")
+            print(f"---- logs/{log}.log 末尾 ----\\n" + "\\n".join(path.read_text().splitlines()[-30:]))
+    if failed:
+        raise RuntimeError("并行命令失败：" + "；".join(failed))
 
 
 def out(cmd, cwd=None):
@@ -167,7 +194,9 @@ import torch, torch_geometric, ray
 print("torch", torch.__version__, "| cuda", torch.cuda.is_available(), "| pyg", torch_geometric.__version__,
       "| ray", ray.__version__)
 (RUN / "requirements.lock").write_text(out(f"{sys.executable} -m pip freeze"))
-(RUN / "env.json").write_text(json.dumps({"commit": COMMIT, "scale": SCALE, "python": sys.version, "cpus": os.cpu_count(),
+CPUS = os.cpu_count() or 2
+print("CPU 核数", CPUS, "| GPU", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+(RUN / "env.json").write_text(json.dumps({"commit": COMMIT, "scale": SCALE, "python": sys.version, "cpus": CPUS,
     "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None}, indent=1))
 sh([sys.executable, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider"], log="pytest")
 """
@@ -185,6 +214,7 @@ _GNN_MD = """
 ## 阶段 B：GNN 动态模型（环境视角 / 角色视角）
 按世界三分 训练 / 校准 / 测试：每轮在校准世界上算损失、取最低的一轮，温度也只在校准世界拟合；测试世界只做最终报告。
 `--scroll-held` 与 `--hide-goal-items` 提高修习与“查看才有发现”在数据里的覆盖（报告的 coverage 里可见）。
+内存 ≥ 24 GB 时两个视角同时训练（GPU 共用，数据生成各占一半 CPU 核并按世界并行），否则逐个训练；输出在 `logs/gnn_env.log`、`logs/gnn_agent.log`。
 断线后重跑本格：已完成的视角跳过，未完成的从 `dynamics_<视角>.resume.pt` 按轮接着训练。
 """
 
@@ -192,13 +222,17 @@ _GNN = """
 GNN = RUN / "gnn"
 GNN.mkdir(exist_ok=True)
 B = dict(smoke=dict(worlds=60, epochs=3, hidden=32), full=dict(worlds=3000, epochs=40, hidden=128))[SCALE]
-for view in ("env", "agent"):
-    if (GNN / f"dynamics_{view}.json").exists():
-        print(view, "已完成，跳过")
-        continue
-    sh([sys.executable, "-m", "tianlong.learning.train", "--view", view, "--worlds", B["worlds"], "--epochs", B["epochs"],
-        "--hidden", B["hidden"], "--jianghu", "0.5", "--scroll-held", "0.3", "--hide-goal-items", "0.3", "--seed", "0",
-        "--resume", "true", "--out", GNN], log=f"gnn_{view}")
+todo = [v for v in ("env", "agent") if not (GNN / f"dynamics_{v}.json").exists()]
+print("已完成，跳过：", [v for v in ("env", "agent") if v not in todo])
+RAM_GB = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+together = len(todo) > 1 and RAM_GB >= 24          # 正式规模每个视角的数据约 3 GB：内存够才两个视角同时训练
+jobs = [([sys.executable, "-m", "tianlong.learning.train", "--view", v, "--worlds", B["worlds"], "--epochs", B["epochs"],
+          "--hidden", B["hidden"], "--jianghu", "0.5", "--scroll-held", "0.3", "--hide-goal-items", "0.3", "--seed", "0",
+          "--workers", max(1, CPUS // (len(todo) if together else 1)), "--resume", "true", "--out", GNN], f"gnn_{v}")
+        for v in todo]
+print(f"内存 {RAM_GB:.0f} GB：", "两个视角同时训练" if together else "逐个视角训练")
+for group in ([jobs] if together else [[j] for j in jobs]):
+    sh_all(group)
 for view in ("env", "agent"):
     m = json.loads((GNN / f"dynamics_{view}.json").read_text())
     print(view, {k: m.get(k) for k in ("holder_changed_recall", "holder_unchanged_kept", "success_brier",
@@ -214,6 +248,7 @@ _RL_MD = """
 
 所有运行评测同一批留出世界，报告带逐世界记录：消融与主实验在结果表里按世界配对比较（`results --pair`）。
 
+每个运行独占全部 CPU 核：PPO 用 核数−1 个采样进程，评测与示范按局分给全部核（与顺序执行逐项相同）；训练期消融了预测的运行不算预测，快得多。
 每个运行写 `policy_ppo*_s{种子}.json/.pt`；已完成的跳过，PPO 断线后从最近一次保存的权重接着训练。
 """
 
@@ -231,7 +266,7 @@ RUNS = [dict(tag=f"main_s{s}", seed=s, extra=[]) for s in (0, 1, 2)] + [
 ]
 if SCALE == "smoke":
     RUNS = [r for r in RUNS if r["tag"] in ("main_s0", "noPred_s0")]
-RUNNERS = max(1, (os.cpu_count() or 2) - 1)
+RUNNERS = max(1, CPUS - 1)
 for r in RUNS:
     out_dir = RL / r["tag"]
     if list(out_dir.glob("policy_ppo*.json")):
@@ -241,7 +276,8 @@ for r in RUNS:
     sh([sys.executable, "-m", "tianlong.learning.rl.train", "--seed", r["seed"], "--jianghu", "0.5",
         "--demo-episodes", C["demo"], "--bc-epochs", C["bc"], "--bc-smoothing", "0.1", "--entropy", "0.03",
         "--ppo-iterations", C["it"], "--train-batch", C["batch"], "--eval-episodes", C["ev"], "--hidden", C["hidden"],
-        "--env-runners", RUNNERS, "--gpus", "1" if torch.cuda.is_available() else "0", "--predictor-path", PRED,
+        "--env-runners", RUNNERS, "--workers", CPUS, "--gpus", "1" if torch.cuda.is_available() else "0",
+        "--predictor-path", PRED,
         "--resume", "true", "--out", out_dir, *r["extra"]], log=f"rl_{r['tag']}")
 """
 

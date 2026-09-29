@@ -11,7 +11,7 @@
        模型选择：每轮在校准世界上算一次损失，最终用校准损失最低的一轮（测试世界从不参与选择）。
        断点续训：每轮结束把 模型/优化器/调度器/随机数状态/当前最优 原子写入断点文件；--resume true 时从那里接着训练，
        配置不一致即拒绝（不会拿别的配置的断点冒充续训）。数据按种子确定性重生成，不缓存。
-       device=auto 时有 GPU 即用 GPU，同一 CLI 可直接在 Colab 上放大跑
+       workers 按世界并行生成数据（与顺序收集逐项相同，不进 run_id）；device=auto 时有 GPU 即用 GPU，同一 CLI 可直接在 Colab 上放大跑
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -31,7 +31,7 @@ from torch_geometric.loader import DataLoader
 
 from tianlong.learning.datagen import RolloutConfig, collect
 from tianlong.learning.model import DynamicsModel, DynamicsOutput, loss_terms
-from tianlong.learning.provenance import run_manifest
+from tianlong.learning.provenance import EXACT_RESOURCE_KEYS, run_manifest
 from tianlong.learning.samples import GONE, NEW, Sample, to_data
 from tianlong.learning.schema import DYN_BOOL, DYN_NUM, FEATURES_VERSION, OBS_GAIN_CAP, OPS, SCHEMA
 from tianlong.learning.task import TaskConfig, arg_type
@@ -58,6 +58,7 @@ class TrainConfig:
     max_items: int = 4
     max_persons: int = 3
     device: str = "auto"       # auto：有 GPU 用 GPU（Colab），否则 CPU
+    workers: int = 1           # 数据生成的并行进程数（0 = 本机全部核）：只改执行方式，样本逐项相同
 
     def task(self) -> TaskConfig:
         return TaskConfig(jianghu=self.jianghu, max_places=self.max_places, max_items=self.max_items,
@@ -310,8 +311,9 @@ def _save_state(path: Path, state: dict) -> None:
 
 def _load_state(path: Path, cfg: TrainConfig) -> dict:
     st = torch.load(path, map_location="cpu", weights_only=True)
-    if st.get("config") != asdict(cfg):
-        diff = sorted(k for k, v in asdict(cfg).items() if (st.get("config") or {}).get(k) != v)
+    diff = sorted(k for k, v in asdict(cfg).items()
+                  if k not in EXACT_RESOURCE_KEYS and (st.get("config") or {}).get(k) != v)
+    if diff:
         raise ValueError(f"断点 {path} 的训练配置与本次不同 {diff}：换配置请换输出目录或删掉断点")
     return st
 
@@ -322,7 +324,7 @@ def train_dynamics(cfg: TrainConfig, log=print, state_path: Path | None = None,
     torch.manual_seed(cfg.seed)
     t0 = time.time()
     device = _device(cfg.device)
-    rollouts = collect(RolloutConfig(worlds=cfg.worlds, steps=cfg.steps, seed=cfg.seed, task=cfg.task()))
+    rollouts = collect(RolloutConfig(worlds=cfg.worlds, steps=cfg.steps, seed=cfg.seed, task=cfg.task()), cfg.workers)
     samples = rollouts.env if cfg.view == "env" else rollouts.agent
     train, calib, test = split3(samples, rollouts.world_of, cfg.val_frac, cfg.calib_frac, cfg.seed)
     t_data = time.time() - t0

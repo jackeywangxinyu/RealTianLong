@@ -2,8 +2,10 @@
 [INPUT]: 依赖 numpy / torch / torch_geometric 的 Data，learning/featurize 的 GraphTensors / featurize / encode_action / bool_tri / num_known，
          learning/schema 的 DYN_BOOL / DYN_NUM / ATTR_BLOCK / OBS_GAIN_CAP，cognition 的 world_view / belief_view / BeliefStore / Candidate，
          core 的 WorldState / Rel / Proposition
-[OUTPUT]: 对外提供 Sample、env_sample()（环境动态样本）、agent_sample()（角色视角样本）、agent_query()（推理输入）、
-          DynData、to_data()、UNKNOWN / GONE / NEW（容纳者的三个“空”类）
+[OUTPUT]: 对外提供 Sample、env_sample()（环境动态样本）、agent_sample()（角色视角样本）、
+          agent_queries() / agent_query()（推理输入：同一决策的候选共用一张认知图）、
+          DynData、to_data()、shared_graph_batch()（一张图 × 多个候选的批，与通用拼接张量逐项相同）、
+          UNKNOWN / GONE / NEW（容纳者的三个“空”类）
 [POS]: learning 的监督信号定义（StateDelta）。两类样本刻意分开构造：
        环境样本 = 真实状态（含全部机制变量）+ 行动 → 真实的下一状态；
        角色样本 = 个人认知 + 自己的行动 → 结算后“我会相信什么”。
@@ -15,6 +17,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -135,14 +138,19 @@ def _next_holder(g: GraphTensors, before: BeliefStore, after: BeliefStore, eid: 
     return UNKNOWN
 
 
-def agent_query(store: BeliefStore, now: int, actor: str, cand: Candidate) -> Sample:
-    """推理用样本：只有输入（认知 + 候选行动），标签位填“保持现状”，不参与训练。"""
+def agent_queries(store: BeliefStore, now: int, actor: str, cands: Sequence[Candidate]) -> list[Sample]:
+    """推理用样本：只有输入（认知 + 候选行动），标签位填“保持现状”，不参与训练。
+    同一次决策的所有候选看的是同一张认知图：图与动态属性只构造一次，各候选只换行动编码。"""
     g = featurize(belief_view(store, now))
     located = _located(g)
     cur = np.array([_believed_holder(g, store, g.node_ids[i]) for i in located], dtype=np.int64)
     b, b_mask, v, known, v_mask = _dyn(g)
-    return Sample(g, encode_action(g, actor, cand), 0.0, located, cur, cur, b, b, b_mask, v, known, v, known, v_mask,
-                  0.0, 0.0, "agent")
+    return [Sample(g, encode_action(g, actor, c), 0.0, located, cur, cur, b, b, b_mask, v, known, v, known, v_mask,
+                   0.0, 0.0, "agent") for c in cands]
+
+
+def agent_query(store: BeliefStore, now: int, actor: str, cand: Candidate) -> Sample:
+    return agent_queries(store, now, actor, (cand,))[0]
 
 
 def agent_sample(
@@ -182,23 +190,30 @@ def _ptr(values: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
     return v.clamp(min=0), v < 0
 
 
-def to_data(s: Sample) -> DynData:
-    g, a = s.graph, s.action
-    now_idx, _ = _ptr(s.holder_now)
-    next_idx, _ = _ptr(s.holder_next)
+def _action_fields(a: ActionCode) -> dict[str, torch.Tensor]:
+    """一个候选行动的编码：指针类字段钳到 0 并配“有无”掩码（负数不能参与批内偏移）。"""
     tgt, no_tgt = _ptr(np.array([a.target]))
     obj, no_obj = _ptr(np.array([a.obj]))
     act, no_act = _ptr(np.array([a.actor]))
     subj, no_subj = _ptr(np.array([a.topic_subj]))
     val, no_val = _ptr(np.array([a.topic_val]))
-    return DynData(
-        x=torch.as_tensor(g.x), edge_index=torch.as_tensor(g.edge_index), edge_attr=torch.as_tensor(g.edge_attr),
-        is_holder=torch.tensor([k in HOLDER_KINDS for k in g.kinds], dtype=torch.bool),
+    return dict(
         act_op=torch.tensor([a.op]), act_manner=torch.tensor([a.manner]),
         act_target=tgt, act_has_target=~no_tgt, act_obj=obj, act_has_obj=~no_obj, act_actor=act, act_has_actor=~no_act,
         act_topic_pred=torch.tensor([a.topic_pred + 1]),          # 0 = 无命题
         act_topic_subj=subj, act_has_topic_subj=~no_subj, act_topic_val=val, act_has_topic_val=~no_val,
         act_topic_flags=torch.tensor([[a.topic_holds, a.topic_query]], dtype=torch.float32),
+    )
+
+
+def to_data(s: Sample) -> DynData:
+    g = s.graph
+    now_idx, _ = _ptr(s.holder_now)
+    next_idx, _ = _ptr(s.holder_next)
+    return DynData(
+        x=torch.as_tensor(g.x), edge_index=torch.as_tensor(g.edge_index), edge_attr=torch.as_tensor(g.edge_attr),
+        is_holder=torch.tensor([k in HOLDER_KINDS for k in g.kinds], dtype=torch.bool),
+        **_action_fields(s.action),
         success=torch.tensor([s.success], dtype=torch.float32),
         located=torch.as_tensor(s.located, dtype=torch.long),
         holder_now_idx=now_idx, holder_now_kind=torch.as_tensor(np.minimum(s.holder_now, 0), dtype=torch.long),
@@ -214,3 +229,29 @@ def to_data(s: Sample) -> DynData:
         is_agent=torch.tensor([s.view == "agent"]),
         num_nodes=g.num_nodes,
     )
+
+
+def shared_graph_batch(samples: Sequence[Sample]) -> DynData:
+    """一张认知图 × 多个候选行动的批（推理热路径）：与 Batch.from_data_list([to_data(s) ...]) 张量逐项相同，
+    但图只转换一次、按块复制，不走逐样本的通用拼接。samples 必须共享同一张图（agent_queries 的产物）。"""
+    base = to_data(samples[0])
+    b, n = len(samples), base.num_nodes
+    acts = [_action_fields(s.action) for s in samples]
+    shift = torch.arange(b) * n
+    out: dict[str, torch.Tensor] = {}
+    for key, v in base:
+        if not isinstance(v, torch.Tensor):
+            continue
+        if key in acts[0]:
+            t = torch.cat([f[key] for f in acts])
+            out[key] = t + shift if key in _INC_KEYS else t
+        elif key == "edge_index":
+            out[key] = v.repeat(1, b) + shift.repeat_interleave(v.size(1))
+        elif key in _INC_KEYS:
+            out[key] = v.repeat(b) + shift.repeat_interleave(v.size(0))
+        else:
+            out[key] = v.repeat(b, *([1] * (v.dim() - 1)))
+    data = DynData(**out, num_nodes=b * n)
+    data.batch = torch.arange(b).repeat_interleave(n)
+    data.ptr = torch.cat([shift, torch.tensor([b * n])])
+    return data

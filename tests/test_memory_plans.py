@@ -212,8 +212,8 @@ def test_g01_gnn_info_gain_comes_from_the_observation_head_not_displacement():
     from tianlong.learning.predictor import GAIN_SCALE, GNNPredictor
 
     class Probe(DynamicsModel):
-        def forward(self, data):
-            out = super().forward(data)
+        def forward(self, data, encoded=None):
+            out = super().forward(data, encoded)
             out.holder = torch.zeros_like(out.holder)
             out.holder[:, -1] = 10.0                    # 模型“认为”所有东西都变得不知去向
             out.obs_gain = torch.full_like(out.obs_gain, 0.5)

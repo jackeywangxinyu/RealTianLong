@@ -1,6 +1,6 @@
 """
-[INPUT]: 依赖 torch，learning/rl 的 env / module，core 的 derive_seed
-[OUTPUT]: 对外提供 Demo（一条示范：观测、动作、示范者标签、世界）、collect_demos()、demo_seed() / DEMO_SEED_FLOOR、bc_weights()、
+[INPUT]: 依赖 torch，learning/rl 的 env（TianlongEnv / map_episodes）/ module，core 的 derive_seed
+[OUTPUT]: 对外提供 Demo（一条示范：观测、动作、示范者标签、世界）、collect_demos()（workers 并行，按局序拼回）、demo_seed() / DEMO_SEED_FLOOR、bc_weights()、
           weighted_batch_loss()、
           behavior_clone()（返回逐轮报告）、
           holdout_metrics()（留出世界上的分动作指标）
@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from tianlong.core import derive_seed
-from tianlong.learning.rl.env import TianlongEnv
+from tianlong.learning.rl.env import TianlongEnv, map_episodes
 from tianlong.learning.rl.module import GraphPolicyNet
 
 Obs = dict[str, np.ndarray]
@@ -52,18 +52,23 @@ def demo_seed(stream: str, seed: int, ep: int) -> int:
     return DEMO_SEED_FLOOR + derive_seed(stream, seed, ep) % 900_000_000
 
 
-def collect_demos(env: TianlongEnv, episodes: int, seed: int, stream: str = "demo") -> list[Demo]:
-    """stream 区分示范（"demo"）与留出示范（"bc_holdout"）：两段种子由各自的随机流派生，互不重叠，也不碰评测种子。"""
+def _demo_episode(env: TianlongEnv, key: tuple[int, str], ep: int) -> list[Demo]:
+    seed, stream = key
+    obs, _ = env.reset(seed=demo_seed(stream, seed, ep))
     demos = []
-    for ep in range(episodes):
-        obs, _ = env.reset(seed=demo_seed(stream, seed, ep))
-        for _ in range(env.horizon):
-            choices = env.expert_choices()
-            demos += [Demo(obs[a], choices[a].index, choices[a].tag, ep) for a in env.agents]
-            obs, _, _, trunc, _ = env.step({a: c.index for a, c in choices.items()})
-            if trunc["__all__"]:
-                break
+    for _ in range(env.horizon):
+        choices = env.expert_choices()
+        demos += [Demo(obs[a], choices[a].index, choices[a].tag, ep) for a in env.agents]
+        obs, _, _, trunc, _ = env.step({a: c.index for a, c in choices.items()})
+        if trunc["__all__"]:
+            break
     return demos
+
+
+def collect_demos(env: TianlongEnv, episodes: int, seed: int, stream: str = "demo", workers: int = 1) -> list[Demo]:
+    """stream 区分示范（"demo"）与留出示范（"bc_holdout"）：两段种子由各自的随机流派生，互不重叠，也不碰评测种子。
+    workers > 1 时各局分给子进程，按局序拼回（与顺序收集逐项相同）。"""
+    return [d for eps in map_episodes(env, _demo_episode, (seed, stream), range(episodes), workers) for d in eps]
 
 
 # ============================================================

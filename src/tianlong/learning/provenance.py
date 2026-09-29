@@ -2,7 +2,8 @@
 [INPUT]: 依赖标准库 subprocess / platform / importlib.metadata / datetime，core 的 digest / ATTRS_VERSION，core/goals 的 GOALS_VERSION，
          kernel 的 KERNEL_VERSION，cognition/candidates 的 CANDIDATES_VERSION，learning/schema 的 FEATURES_VERSION / SCHEMA，
          learning/rl/rewards 的 REWARD_VERSION，learning/rl/observation 的 OBS_VERSION（均不需要 ray），learning/task 的 TaskConfig
-[OUTPUT]: 对外提供 git_state()、compat_signature()（全部语义版本：唯一定义）、versions()（语义版本 + 运行环境）、run_manifest()
+[OUTPUT]: 对外提供 git_state()、compat_signature()（全部语义版本：唯一定义）、versions()（语义版本 + 运行环境）、run_manifest()、
+          EXACT_RESOURCE_KEYS（只改执行方式不改结果的配置：不进 run_id）
 [POS]: learning 的溯源：每份结果（动态模型报告、策略报告、检查点）都带一份 manifest——哪个提交（含工作区是否有未提交改动）、
        全部语义版本（特征规格、属性、目标、奖励、候选规则、规则内核、观测布局——与部署包比对的是同一份 compat_signature）、
        任务指纹、完整配置、训练与评测种子、依赖版本、运行设备。
@@ -68,12 +69,17 @@ def versions() -> dict:
     return {**compat_signature(), "python": platform.python_version(), "deps": deps}
 
 
+# 只改执行方式、不改结果的配置（并行与顺序逐项相同有测试保证）：记进 manifest，但不进 run_id、不挡续训
+EXACT_RESOURCE_KEYS = frozenset({"workers"})
+
+
 def run_manifest(kind: str, config: dict, task: TaskConfig | None = None, seeds: dict | None = None,
                  extra: dict | None = None) -> dict:
     git = git_state()
     seeds = dict(seeds or {})
+    identity = {k: v for k, v in config.items() if k not in EXACT_RESOURCE_KEYS}
     return {
-        "run_id": digest(kind, git["git_sha"], git["git_dirty"], git["git_diff_sha256"], sorted(config.items()),
+        "run_id": digest(kind, git["git_sha"], git["git_dirty"], git["git_diff_sha256"], sorted(identity.items()),
                          sorted(seeds.items()))[:12],
         "kind": kind,
         **git,

@@ -19,6 +19,7 @@ import statistics
 from collections import defaultdict
 from pathlib import Path
 
+from tianlong.learning.provenance import EXACT_RESOURCE_KEYS
 from tianlong.learning.rl.stats import EpisodeLog, compare
 
 POLICY_ROWS = ("random", "wait_only", "scripted", "bc", "ppo", "ppo_test_time_no_predictions")
@@ -43,7 +44,7 @@ def _val(cell) -> float | None:
     return cell.get("value") if isinstance(cell, dict) else cell
 
 
-_RESOURCE_KEYS = frozenset({"seed", "env_runners", "gpus", "device"})   # 不改变实验含义的配置
+_RESOURCE_KEYS = frozenset({"seed", "env_runners", "gpus", "device"}) | EXACT_RESOURCE_KEYS   # 不改变实验含义的配置
 
 
 def _group_key(r: dict) -> tuple:

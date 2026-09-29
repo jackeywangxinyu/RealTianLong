@@ -115,6 +115,18 @@ def test_c04_sh_raises_on_nonzero_exit_and_logs(tmp_path):
         ns["out"]("git definitely-not-a-command")
 
 
+def test_c04_parallel_commands_all_finish_then_any_failure_stops(tmp_path):
+    ns = _run_cells({"DRIVE_ROOT": str(tmp_path), "RUN_NAME": "r"}, "==== 工具函数", commit=gen.PLACEHOLDER)
+    ok = [sys.executable, "-c", "print('done-a')"]
+    bad = [sys.executable, "-c", "print('done-b'); raise SystemExit(4)"]
+    with contextlib.redirect_stdout(io.StringIO()), pytest.raises(RuntimeError, match="b（退出码 4）"):
+        ns["sh_all"]([(ok, "a"), (bad, "b")])
+    logs = tmp_path / "r" / "logs"
+    assert "done-a" in (logs / "a.log").read_text() and "done-b" in (logs / "b.log").read_text(), "两条都跑完、各写各的日志"
+    with contextlib.redirect_stdout(io.StringIO()):
+        ns["sh_all"]([(ok, "c")])
+
+
 def test_c04_install_and_test_steps_go_through_the_failing_sh():
     install = _cell("==== 安装")
     assert 'sh([sys.executable, "-m", "pip", "install"' in install
@@ -226,6 +238,7 @@ def _flags(main) -> set[str]:
 
 
 def test_every_cli_flag_the_notebook_passes_exists():
+    """逐个代码格：格里出现的每个 --参数，都必须被这一格调用的某个 CLI 接受（先拼好再传的参数也算）。"""
     pytest.importorskip("torch_geometric")
     pytest.importorskip("ray.rllib")
     from tianlong.learning import bundle, profile, results, train
@@ -233,15 +246,13 @@ def test_every_cli_flag_the_notebook_passes_exists():
     known = {"tianlong.learning.train": _flags(train.main), "tianlong.learning.rl.train": _flags(rl_train.main),
              "tianlong.learning.profile": _flags(profile.main), "tianlong.learning.results": _flags(results.main),
              "tianlong.learning.bundle": _flags(bundle.main)}
+    checked = 0
     for kind, src in gen.cells("0" * 40):
-        if kind != "code":
+        mods = [m for m in known if f'"{m}"' in src]
+        if kind != "code" or not mods:
             continue
-        for mod, flags in known.items():
-            for call in re.findall(rf'"-m", "{re.escape(mod)}"(.*?)log=', src, flags=re.S):
-                used = set(re.findall(r'"(--[a-z][a-z0-9-]*)"', call))
-                assert used <= flags, (mod, used - flags)
-    rl_cell = _cell("tianlong.learning.rl.train")
-    for extra in re.findall(r'"(--[a-z][a-z0-9-]*)"', rl_cell.split("RUNS = ")[1].split("]\nif")[0]):
-        assert extra in known["tianlong.learning.rl.train"], extra
-    for extra in re.findall(r'"(--[a-z][a-z0-9-]*)"', _cell("tianlong.learning.results").split("sh(")[0]):
-        assert extra in known["tianlong.learning.results"], extra          # 先拼好再传的参数（如 --pair）
+        allowed = set().union(*(known[m] for m in mods))
+        used = set(re.findall(r'"(--[a-z][a-z0-9-]*)"', src))
+        assert used <= allowed, (mods, used - allowed)
+        checked += len(used)
+    assert checked > 20

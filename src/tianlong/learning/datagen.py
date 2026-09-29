@@ -1,7 +1,8 @@
 """
 [INPUT]: 依赖 kernel 的 Kernel，cognition 的 BeliefStore / BeliefChange / candidates，agents 的 ScriptedPolicy / HeuristicPredictor / Situation，
-         learning/task 的 TaskConfig，learning/samples 的 env_sample / agent_sample，core 的变化类型
-[OUTPUT]: 对外提供 RolloutConfig、Rollouts、collect()、own_effect_slots()、observation_gain()
+         learning/task 的 TaskConfig，learning/samples 的 env_sample / agent_sample，learning/parallel 的 ordered_map，core 的变化类型
+[OUTPUT]: 对外提供 RolloutConfig、Rollouts、collect()（workers > 1 时按世界分给子进程，与顺序收集逐项相同）、
+          own_effect_slots()、observation_gain()
 [POS]: learning 的数据工厂：在程序化小世界（一半江湖化）里用“脚本策略 + 分层随机探索”行动，由内核实际执行，
        同时记录环境样本与角色样本。每个 tick 只让一个角色行动，使环境标签只反映这一个行动的后果（孤立行动效果模型：
        其他角色同时行动时的主观预测不在此列）。“有效新观察数”= 行动者信念里发生变化的槽位，扣除本行动的直接效果——
@@ -33,6 +34,7 @@ from tianlong.core import (
     make_id,
 )
 from tianlong.kernel import Kernel
+from tianlong.learning.parallel import ordered_map
 from tianlong.learning.samples import Sample, agent_sample, env_sample
 from tianlong.learning.task import TaskConfig
 
@@ -87,39 +89,50 @@ def observation_gain(changes: list[BeliefChange], own: frozenset[tuple[str, str]
     return len(slots - own)
 
 
-def collect(cfg: RolloutConfig) -> Rollouts:
+def _collect_world(job: tuple[RolloutConfig, int]) -> tuple[list[Sample], list[Sample]]:
+    """一个世界的全部样本（环境视角，角色视角）：只依赖 (配置, 世界序号) 派生的种子。"""
+    cfg, w = job
     kernel, policy, predictor = Kernel(), ScriptedPolicy(), HeuristicPredictor()
+    sc = cfg.task.scenario(cfg.seed * 1_000_003 + w)
+    rng = random.Random(derive_seed("rollout", cfg.seed, w))
+    state = sc.state
+    stores = {a: BeliefStore(a, trust=dict(p.trust)).revise_all(sc.priors.get(a, ()))[0]
+              for a, p in sc.profiles.items()}
+    agents = sorted(sc.profiles)
+    env_out: list[Sample] = []
+    agent_out: list[Sample] = []
+    for _ in range(cfg.steps):
+        actor = rng.choice(agents)
+        profile = sc.profiles[actor]
+        interests = list(profile.interests())
+        cands = candidates(stores[actor], interests)
+        if rng.random() < cfg.epsilon:
+            cand = _stratified(rng, cands)
+        else:
+            preds = tuple(predictor.predict(stores[actor], state.clock, cands, interests, profile=profile))
+            cand = cands[policy.choose(Situation(actor, profile, stores[actor], state.clock, cands, preds)).index]
+        intent = cand.to_intent(make_id("int", sc.world_id, actor, state.version), actor, state.version)
+        result = kernel.step(state, [intent])
+        mine = next(e for e in result.events if e.intent.id == intent.id)
+        success = mine.outcome == Outcome.SUCCESS
+        new_stores = dict(stores)
+        changed: list[BeliefChange] = []
+        for o in result.observations:
+            new_stores[o.observer], cs = new_stores[o.observer].revise(o.percept)
+            if o.observer == actor:
+                changed.extend(cs)
+        gain = observation_gain(changed, own_effect_slots(mine.changes, mine))
+        env_out.append(env_sample(state, result.state, actor, cand, success))
+        agent_out.append(agent_sample(stores[actor], new_stores[actor], state.clock, actor, cand, success, gain))
+        state, stores = result.state, new_stores
+    return env_out, agent_out
+
+
+def collect(cfg: RolloutConfig, workers: int = 1) -> Rollouts:
+    """workers > 1 时各世界分给子进程，按世界序号拼回（与顺序收集逐项相同）；0 = 本机全部核。"""
     out = Rollouts()
-    for w in range(cfg.worlds):
-        sc = cfg.task.scenario(cfg.seed * 1_000_003 + w)
-        rng = random.Random(derive_seed("rollout", cfg.seed, w))
-        state = sc.state
-        stores = {a: BeliefStore(a, trust=dict(p.trust)).revise_all(sc.priors.get(a, ()))[0]
-                  for a, p in sc.profiles.items()}
-        agents = sorted(sc.profiles)
-        for _ in range(cfg.steps):
-            actor = rng.choice(agents)
-            profile = sc.profiles[actor]
-            interests = list(profile.interests())
-            cands = candidates(stores[actor], interests)
-            if rng.random() < cfg.epsilon:
-                cand = _stratified(rng, cands)
-            else:
-                preds = tuple(predictor.predict(stores[actor], state.clock, cands, interests, profile=profile))
-                cand = cands[policy.choose(Situation(actor, profile, stores[actor], state.clock, cands, preds)).index]
-            intent = cand.to_intent(make_id("int", sc.world_id, actor, state.version), actor, state.version)
-            result = kernel.step(state, [intent])
-            mine = next(e for e in result.events if e.intent.id == intent.id)
-            success = mine.outcome == Outcome.SUCCESS
-            new_stores = dict(stores)
-            changed: list[BeliefChange] = []
-            for o in result.observations:
-                new_stores[o.observer], cs = new_stores[o.observer].revise(o.percept)
-                if o.observer == actor:
-                    changed.extend(cs)
-            gain = observation_gain(changed, own_effect_slots(mine.changes, mine))
-            out.env.append(env_sample(state, result.state, actor, cand, success))
-            out.agent.append(agent_sample(stores[actor], new_stores[actor], state.clock, actor, cand, success, gain))
-            out.world_of.append(w)
-            state, stores = result.state, new_stores
+    for w, (env_s, agent_s) in enumerate(ordered_map(_collect_world, [(cfg, w) for w in range(cfg.worlds)], workers)):
+        out.env += env_s
+        out.agent += agent_s
+        out.world_of += [w] * len(env_s)
     return out

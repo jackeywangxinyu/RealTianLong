@@ -6,7 +6,8 @@
        RGCN 类卷积会丢掉这些认知语义。动态模型回答“这个行动之后会怎样”，覆盖范围由 schema.TARGETS 声明：
        成败、可定位节点的下一容纳者（含 UNKNOWN / GONE / NEW 三个空类）、动态布尔属性三态、动态数值属性（值 + 是否已知）、
        是否认识新实体、有效新观察数。行动条件化包含言语命题（谓词、主语、宾语、极性、提问）。
-       位置与已知性各带可学习的“惯性”项：大多数事实不变，模型只需学会何时改变
+       位置与已知性各带可学习的“惯性”项：大多数事实不变，模型只需学会何时改变。
+       关系编码在行动条件化之前、与行动无关：forward(encoded=...) 让“一张认知图 × 多个候选”只编码一次
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -105,9 +106,11 @@ class DynamicsModel(nn.Module):
         self.discover_head = _mlp(3 * d, d, 1)
         self.gain_head = _mlp(3 * d, d, 1)
 
-    def forward(self, data) -> DynamicsOutput:
+    def forward(self, data, encoded: Tensor | None = None) -> DynamicsOutput:
+        """encoded：批内各图的关系编码（编码器不看行动）。同一张认知图配多个候选行动时，
+        调用方可以只编码一次再逐图复制传进来——与逐图重复编码是同一个计算。"""
         x, ei, ea, batch = data.x, data.edge_index, data.edge_attr, data.batch
-        h = self.encoder(x, ei, ea)
+        h = self.encoder(x, ei, ea) if encoded is None else encoded
         n, b = h.size(0), int(data.act_op.numel())
         refs = [(data.act_target, data.act_has_target), (data.act_obj, data.act_has_obj),
                 (data.act_actor, data.act_has_actor), (data.act_topic_subj, data.act_has_topic_subj),
