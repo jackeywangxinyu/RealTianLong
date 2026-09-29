@@ -34,6 +34,7 @@ class NpcState(TypedDict, total=False):
     candidates: list[Candidate]
     predictions: list[Prediction]
     choice: int
+    chosen: Candidate          # 交给内核的行动（候选或候选之外的闲话，附言语行为）
     rationale: str
     utterance: str | None
     intent: Intent
@@ -115,23 +116,22 @@ def decide(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
         ctx.port.memory() if ctx.port.memory is not None else None,
     )
     choice = ctx.policy.choose(sit)
-    if not 0 <= choice.index < len(state["candidates"]):
-        raise ValueError(f"策略越界选择了候选 {choice.index}")
-    return {"choice": choice.index, "rationale": choice.rationale}
+    chosen = choice.chosen(state["candidates"])       # 越界或不合规的 free 在这里抛错
+    return {"choice": choice.index, "chosen": chosen, "rationale": choice.rationale}
 
 
 def express(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
     ctx = runtime.context
-    cand = state["candidates"][state["choice"]]
-    if cand.op not in (Op.TELL, Op.ASK):
-        return {"utterance": None}
+    cand = state["chosen"]
+    if cand.op not in (Op.TELL, Op.ASK) or cand.topic is None:
+        return {"utterance": None}       # 闲话没有命题可说：措辞留给主持人之声（叙述时按说话者的认知与腔调写出）
     return {"utterance": ctx.speaker.utter(ctx.port.profile, cand, _names(ctx))}
 
 
 def submit(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
     """意图 ID 由 (世界, 分支, 角色, 版本) 派生：流程重试产出同一 ID，权威写入器据此去重。"""
     port = runtime.context.port
-    cand = state["candidates"][state["choice"]]
+    cand = state["chosen"]
     iid = make_id("int", port.world_id, port.branch_id, port.agent, port.version)
     return {"intent": cand.to_intent(iid, port.agent, port.version, state.get("utterance"))}
 

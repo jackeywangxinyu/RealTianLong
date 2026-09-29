@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate，core 的 Op / Manner / Kind / Rel / Fact / Proposition / signature_error，
          language/command 的 ACTION_WORDS / analyze / clarify / ParsedCommand / Mention，language/llm 的 LLMClient / LLMUnavailable / parse_json
-[OUTPUT]: 对外提供 Parsed（含语态结构与等待时长）、IntentParser（语态闸门 → 规则快路径 → 受约束的 LLM 语义解析）、rule_parse()、normalize()
+[OUTPUT]: 对外提供 MoveKind、Parsed（含语态结构、等待时长、这句话的类别、多步行动与问主持人的原话）、IntentParser（语态闸门 → 规则快路径 → 受约束的 LLM 语义解析）、rule_parse()、normalize()
 [POS]: language 的输入解析；把玩家自由文本变成结构化候选行动。先由 command.analyze() 判定语态：只有单一、肯定、即时的指令
        才走规则快路径；否定、条件、转述、复合、疑问交给 LLM（它也必须声明语态与主体），仍不确定就追问、不推进时间。
        LLM 失败时绝不回退到未经语义确认的候选。可引用的实体只来自玩家自己的认知图；解析结果仍要回到 kernel 结算
@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from enum import StrEnum
 
 from tianlong.cognition import BeliefStore, Candidate
 from tianlong.cognition.navigation import routes_between
@@ -24,6 +25,17 @@ from tianlong.language.llm import LLMClient, LLMUnavailable, parse_json
 log = logging.getLogger(__name__)
 
 
+class MoveKind(StrEnum):
+    """玩家这句话是哪一类：决定会话怎样推进时间。"""
+
+    ACT = "act"            # 内核行动（1~3 步，后续步骤在 followups）
+    SAY = "say"            # 对人说话：TELL/ASK，命题可选，原话在 utterance、言语行为在 candidate.social
+    GESTURE = "gesture"    # 看得见的姿态：带姿态的 WAIT（utterance 是不带主语的动作短语）
+    ASK_GM = "ask_gm"      # 场外问主持人（“我该做什么”“我身上有什么”）：不推进时间，只用玩家自己的认知作答
+    META = "meta"          # 元指令（提示、回顾）：不推进时间
+    UNCLEAR = "unclear"    # 听不懂：追问（主持层尽量少用）
+
+
 @dataclass(frozen=True, slots=True)
 class Parsed:
     candidate: Candidate | None
@@ -33,6 +45,9 @@ class Parsed:
     repeat: int = 1                    # 等待的分钟数（“等一炷香”= 30）
     until: str | None = None           # 等到某个时刻（"night"）：会话层按时钟换算
     command: ParsedCommand | None = None   # 语态结构：否定/条件/转述等非即时语态不会产生候选
+    kind: MoveKind = MoveKind.ACT
+    followups: tuple[Candidate, ...] = ()  # 多步行动的后续步骤（第一步是 candidate），逐 tick 执行、失败即止
+    question: str | None = None        # ASK_GM：玩家问主持人的话；META：元指令名（hint / recap / beliefs）
 
 
 # ============================================================

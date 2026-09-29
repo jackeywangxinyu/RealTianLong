@@ -233,6 +233,7 @@ class Witnessing:
             topic=it.topic if with_topic else None,
             reason=self.event.reason,
             utterance=it.utterance if with_topic else None,
+            social=it.social if with_topic else None,
         )
 
     def public_view(self, public_reasons: frozenset[str] = frozenset(), with_topic: bool = True) -> PerceivedEvent:

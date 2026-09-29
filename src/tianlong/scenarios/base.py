@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 core 的 WorldState / Percept / Profile
-[OUTPUT]: 对外提供 Scenario（初始世界 + 角色设定 + 初始认知 + 文风/外观描写/别称）
+[OUTPUT]: 对外提供 Scenario（初始世界 + 角色设定 + 初始认知 + 文风/外观描写/别称 + 逐级提示 guide + 结局 endings）、Ending
 [POS]: scenarios 的容器类型；初始认知以“过去的感知”给出，于是信念从第一刻起就只有一个来源——感知，没有“直接注入信念”的后门
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -15,6 +15,17 @@ from tianlong.core.profiles import Profile
 
 
 @dataclass(frozen=True, slots=True)
+class Ending:
+    """本幕结局：玩家（据世界真相）身处 place 即落幕。key 是稳定的结局编号，title 是给玩家看的名字，
+    epilogue 是终章的前提与基调（交给叙述者，真相揭晓部分由事件日志生成）。"""
+
+    key: str
+    title: str
+    place: str
+    epilogue: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class Scenario:
     world_id: str
     state: WorldState
@@ -25,6 +36,8 @@ class Scenario:
     aliases: Mapping[str, tuple[str, ...]] = field(default_factory=dict)  # 实体别称，供玩家输入解析
     hints: str = ""                                                     # 给玩家的指令示例
     style: str = ""                                                     # 文风要求：只交给 LLM 叙述者
+    guide: tuple[str, ...] = ()        # 逐级提示（/hint、“我该做什么”）：由浅入深，只点方向不给步骤；玩家目标见其 Profile.goals
+    endings: tuple[Ending, ...] = ()   # 本幕的结局：玩家抵达某地即落幕，终章据事件日志收束并揭晓真相
 
     @property
     def player(self) -> str | None:

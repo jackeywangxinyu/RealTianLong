@@ -122,9 +122,9 @@ def _verb(v: PerceivedEvent, names: Names, viewer: str | None, me: str) -> str:
         Op.UNLOCK: f"用{o}开{t}的锁",
         Op.LOCK: f"用{o}锁上{t}",
         Op.INSPECT: f"仔细查看{t}",
-        Op.TELL: f"对{t}说：“{v.utterance or topic}”" if v.topic else f"对{t}低声说了些什么",
-        Op.ASK: f"问{t}：“{v.utterance or topic}”" if v.topic else f"向{t}低声问了些什么",
-        Op.WAIT: "静静等待",
+        Op.TELL: f"对{t}说：“{v.utterance or topic}”" if v.topic or v.utterance else f"对{t}低声说了些什么",
+        Op.ASK: f"问{t}：“{v.utterance or topic}”" if v.topic or v.utterance else f"向{t}低声问了些什么",
+        Op.WAIT: v.utterance or "静静等待",          # 带姿态的等待：姿态是不带主语的动作短语（“坐下来喝了口茶”）
         Op.ATTACK: f"猛地向{t}出手" if v.kind == Op.ATTACK.value and v.target else "出手",
         Op.STUDY: f"埋头研读{t}",
         Op.USE: f"服下{o}" if v.target == v.actor else f"把{o}用在{t}身上",

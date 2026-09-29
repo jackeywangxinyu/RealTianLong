@@ -44,6 +44,8 @@ from tianlong.core.ids import derive_seed, digest, make_id
 from tianlong.core.propositions import Fact, Proposition
 from tianlong.core.schema import (
     ATTR_PREFIX,
+    FRIENDLY_SOCIAL,
+    HOSTILE_SOCIAL,
     OP_SIGNATURES,
     RELATIONS,
     Kind,
@@ -52,6 +54,7 @@ from tianlong.core.schema import (
     OpSignature,
     Rel,
     RelSpec,
+    Social,
     is_functional,
 )
 from tianlong.core.world import ChangeConflict, WorldState
@@ -67,6 +70,7 @@ __all__ = [
     "FrozenMap",
     "derive_seed", "digest", "make_id",
     "Fact", "Proposition",
-    "ATTR_PREFIX", "OP_SIGNATURES", "RELATIONS", "Kind", "Manner", "Op", "OpSignature", "Rel", "RelSpec", "is_functional",
+    "ATTR_PREFIX", "FRIENDLY_SOCIAL", "HOSTILE_SOCIAL", "OP_SIGNATURES", "RELATIONS", "Kind", "Manner", "Op", "OpSignature",
+    "Rel", "RelSpec", "Social", "is_functional",
     "ChangeConflict", "WorldState",
 ]

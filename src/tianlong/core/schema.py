@@ -1,6 +1,7 @@
 """
 [INPUT]: 依赖标准库 enum / dataclasses
-[OUTPUT]: 对外提供 Kind / Rel / RelSpec / RELATIONS / ATTR_PREFIX / Op / Manner / OpSignature / OP_SIGNATURES / is_functional
+[OUTPUT]: 对外提供 Kind / Rel / RelSpec / RELATIONS / ATTR_PREFIX / Op / Manner / Social（言语行为封闭词表）与 HOSTILE_SOCIAL /
+          FRIENDLY_SOCIAL / OpSignature（命题“接受”与“必须”分开：言语的命题可选）/ OP_SIGNATURES / is_functional
 [POS]: core 的领域词汇表；kernel 据此裁定物理，cognition 据此生成候选与修正信念，learning 据此构造特征维度。
        属性的类型与获知途径在 core/attributes（唯一真相源）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -96,11 +97,40 @@ class Manner(StrEnum):
     ROUGH = "rough"      # 更响、更快
 
 
+class Social(StrEnum):
+    """言语与姿态的社交含义（言语行为）：修辞层，不是事实——它只影响听者/看者心里的态度与回应，
+    从不改变谁在哪、谁拿着什么。封闭词表：解释器、NPC 策略、叙述者共用同一套说法。"""
+    GREET = "greet"            # 招呼、见礼
+    THANK = "thank"
+    APOLOGIZE = "apologize"    # 赔罪、认错
+    PLEAD = "plead"            # 求情、求救
+    PRAISE = "praise"          # 称赞、恭维
+    THREATEN = "threaten"      # 威胁、亮兵刃
+    TAUNT = "taunt"            # 挑衅、讥讽
+    INSULT = "insult"          # 辱骂
+    REFUSE = "refuse"          # 拒绝、回绝
+    AGREE = "agree"            # 答应、附和
+    JOKE = "joke"              # 说笑、打趣
+    COMFORT = "comfort"        # 安慰、劝解
+    EXPLAIN = "explain"        # 解释、讲道理、讲掌故
+    CHALLENGE = "challenge"    # 叫阵、邀斗
+    COMMAND = "command"        # 命令、呵斥
+    FAREWELL = "farewell"      # 告辞
+    REMARK = "remark"          # 随口一说、自言自语
+    SUBMIT = "submit"          # 服软、磕头、示弱
+
+
+HOSTILE_SOCIAL = frozenset({Social.THREATEN, Social.TAUNT, Social.INSULT, Social.CHALLENGE, Social.COMMAND})
+FRIENDLY_SOCIAL = frozenset({Social.GREET, Social.THANK, Social.APOLOGIZE, Social.PLEAD, Social.PRAISE,
+                             Social.COMFORT, Social.SUBMIT, Social.AGREE, Social.JOKE})
+
+
 @dataclass(frozen=True, slots=True)
 class OpSignature:
     target: frozenset[Kind] | None = None  # None 表示不接受目标
     obj: frozenset[Kind] | None = None
-    topic: bool = False                    # 是否需要语义内容（命题）
+    topic: bool = False                    # 是否接受语义内容（命题）
+    needs_topic: bool = False              # 是否必须带命题（言语的命题可选：没有命题就是只有原话与言语行为的闲话）
 
 
 def _k(*kinds: Kind) -> frozenset[Kind]:
@@ -115,7 +145,7 @@ OP_SIGNATURES: dict[Op, OpSignature] = {
     Op.UNLOCK: OpSignature(target=_k(Kind.DOOR), obj=_k(Kind.ITEM)),
     Op.LOCK: OpSignature(target=_k(Kind.DOOR), obj=_k(Kind.ITEM)),
     Op.INSPECT: OpSignature(target=_k(Kind.PLACE, Kind.SURFACE, Kind.PERSON)),
-    Op.TELL: OpSignature(target=_k(Kind.PERSON), topic=True),
+    Op.TELL: OpSignature(target=_k(Kind.PERSON), topic=True),   # 有命题：传递“说法”；没有：只有原话与言语行为
     Op.ASK: OpSignature(target=_k(Kind.PERSON), topic=True),
     Op.WAIT: OpSignature(),
     Op.ATTACK: OpSignature(target=_k(Kind.PERSON)),

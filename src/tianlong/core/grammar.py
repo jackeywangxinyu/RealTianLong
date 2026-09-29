@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 core/schema 的 Op / Kind / OP_SIGNATURES，core/propositions 的 Fact
-[OUTPUT]: 对外提供 signature_error()：检查一个行动的“语法/类型”是否合法
+[OUTPUT]: 对外提供 signature_error()：检查一个行动的“语法/类型”是否合法（命题分“接受”与“必须”：言语不带命题也合法）
 [POS]: core 的行动语法；kernel 用真实实体种类调用它拒绝畸形意图，cognition 用角色已知的实体种类调用它生成候选——同一把尺子，两种视角
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -37,7 +37,7 @@ def signature_error(
             return f"{role} 指向未知实体 {value}"
         if kind not in allowed:
             return f"{op} 的 {role} 不能是 {kind}"
-    if sig.topic and topic is None:
+    if sig.needs_topic and topic is None:
         return f"{op} 缺少语义内容"
     if not sig.topic and topic is not None:
         return f"{op} 不接受语义内容"

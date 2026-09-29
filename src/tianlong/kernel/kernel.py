@@ -36,7 +36,7 @@ from tianlong.kernel.rules.base import MANNER_INITIATIVE
 
 # 规则语义版本：准入、先手、结算、感知投影任何一处的语义改变都要手动递增。
 # 它随存档写入；读档时不一致即拒绝（除非调用方显式迁移）——旧存档里的事件是按旧规则裁定的
-KERNEL_VERSION = "kernel-v1"
+KERNEL_VERSION = "kernel-v2"   # v2：言语命题可选、带姿态的等待看得见、言语行为随感知传递
 
 
 @dataclass(frozen=True, slots=True)

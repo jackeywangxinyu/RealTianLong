@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 kernel/rules/base 的 ActionRule，kernel/space 的门与位置查询，kernel/perception 的 Witnessing / Fragment，
          kernel/resolution 的 succeed / fail
-[OUTPUT]: 对外提供 MoveRule、WaitRule
+[OUTPUT]: 对外提供 MoveRule、WaitRule（带姿态的等待让在场的人看见）
 [POS]: kernel/rules 的空间移动。MOVE = 目的地 + 路线（Intent.obj 是门）：内核只检查这条路是否真在身边、真通往那里、
        方向对不对、锁没锁，从不替角色在全知地图上挑一条可走的路——不知道暗门的人就走不了暗门，记错了路就会走不通。
        观察按实际片段：成功才在目的地留下“抵达”；推不开的门只在门这一侧留下动作与响动；没路可走什么也不留下
@@ -87,5 +87,11 @@ class WaitRule(ActionRule):
         return succeed()
 
     def perceive(self, w: Witnessing) -> Iterator[tuple[str, Percept]]:
-        # 等待不产生任何可感知的东西；在场与否由每 tick 的环顾负责
-        return iter(())
+        # 不带姿态的等待不产生任何可感知的东西，在场与否由每 tick 的环顾负责；
+        # 带姿态（坐下喝茶、拔出长剑、磕头）的等待，在场的人亲眼看见——姿态与言语行为只是修辞，不附带任何事实
+        if not w.event.intent.utterance or not w.event.place:
+            return
+        yield w.actor_percept()
+        view = w.public_view()
+        for person in w.witnesses((w.event.place,)):
+            yield person, w.sight(view, (), w.event.place)

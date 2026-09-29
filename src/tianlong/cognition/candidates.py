@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 core 的 Op / Manner / Kind / Rel / Fact / Proposition / Intent / signature_error，cognition/beliefs 的 BeliefStore
-[OUTPUT]: 对外提供 Candidate（结构化候选行动）、candidates()（从个人认知生成候选集）、budget()（行动族轮转配额截断）、FAMILIES、
+[OUTPUT]: 对外提供 Candidate（结构化候选行动，可带言语行为 social——修辞，不进排序）、candidates()（从个人认知生成候选集）、budget()（行动族轮转配额截断）、FAMILIES、
           CANDIDATES_VERSION（候选规则语义版本，部署包据此拒绝规则已变的旧策略）
 [POS]: cognition 的行动空间；候选对象只来自角色的认知图——按角色“以为”的世界剪枝是合理的，按真实世界剪枝则是泄密。
        策略（脚本/RL）与预测器都在这个候选集上工作。超出上限时按行动族轮转配额截断（等待、移动、言语、查看、物件、
@@ -14,7 +14,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from tianlong.cognition.beliefs import BeliefStore
-from tianlong.core import Fact, Intent, Kind, Manner, Op, Proposition, Rel, digest
+from tianlong.core import Fact, Intent, Kind, Manner, Op, Proposition, Rel, Social, digest
 from tianlong.core.grammar import signature_error
 
 # 候选的规范顺序（下标即策略的动作编号）：WAIT 永居首位，其余按操作、再按对象
@@ -43,9 +43,11 @@ class Candidate:
     obj: str | None = None
     manner: Manner = Manner.NORMAL
     topic: Fact | None = None
+    social: Social | None = None       # 言语/姿态的社交含义：修辞，不进候选排序（策略编号不变）
 
     def to_intent(self, intent_id: str, actor: str, based_on: int, utterance: str | None = None) -> Intent:
-        return Intent(intent_id, actor, self.op, self.target, self.obj, self.manner, self.topic, based_on, utterance)
+        return Intent(intent_id, actor, self.op, self.target, self.obj, self.manner, self.topic, based_on, utterance,
+                      self.social)
 
     def sort_key(self) -> tuple:
         topic = self.topic.sort_key() if self.topic else ()
@@ -53,7 +55,7 @@ class Candidate:
 
     @staticmethod
     def of(it: Intent) -> Candidate:
-        return Candidate(it.op, it.target, it.obj, it.manner, it.topic)
+        return Candidate(it.op, it.target, it.obj, it.manner, it.topic, it.social)
 
 
 def candidates(

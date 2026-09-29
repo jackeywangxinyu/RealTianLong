@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate / navigation，core 的 Fact / Kind / Manner / Modality / Op / Proposition / Rel，
          core/profiles 的 Profile，agents/predictors 的 Prediction，memory/view 的 MemoryView
-[OUTPUT]: 对外提供 Situation / Choice（含结构化标签 tag）/ Policy 协议、PolicyKit（规则策略共享的“在候选集中挑选”、沿自己的地图带路
+[OUTPUT]: 对外提供 Situation / Choice（含结构化标签 tag、言语行为 social、候选之外的闲话 free 与 chosen()）/ Policy 协议、PolicyKit（规则策略共享的“在候选集中挑选”、沿自己的地图带路
           （认为锁着的门先试着开、打不开就不去撞）、凭个人勘察记录探索、信念查询积木）、WAIT_REASONS、RECENT、STALE
 [POS]: agents 的决策契约与策略工具箱：策略只能在候选集中选（Choice.index），一切判断来自信念与近期经历。
        探索只凭自己的地图与勘察记录（BeliefStore.surveyed/searched），从不读真相里的最短路或藏匿处。
@@ -11,13 +11,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from tianlong.agents.predictors import Prediction
 from tianlong.cognition import BeliefStore, Candidate, effective_confidence
 from tianlong.cognition.navigation import believed_distance, route_to
-from tianlong.core import Fact, Kind, Manner, Modality, Op, Proposition, Rel
+from tianlong.core import Fact, Kind, Manner, Modality, Op, Proposition, Rel, Social
 from tianlong.core.profiles import Profile
 from tianlong.memory.view import MemoryView
 
@@ -45,6 +46,21 @@ class Choice:
     index: int        # 候选集下标：策略永远只能在候选集中选
     rationale: str
     tag: str = ""     # 结构化标签：等待时为 WAIT_REASONS 之一，探索时为 "explore"
+    social: Social | None = None        # 给所选候选附上言语行为（“答话”“叫阵”）：修辞，不改变行动本身
+    free: Candidate | None = None       # 候选集之外唯一允许的行动：不带命题的 TELL/ASK（闲话、回话、叫阵）——
+                                        # 只有原话与言语行为、不传递任何事实，故不必占用策略的动作编号（候选规则版本不变）；
+                                        # 此时 index 须指向 WAIT 候选：只认 index 的消费者（学习层的数据生成、示范）把它当作等待
+
+    def chosen(self, cands: Sequence[Candidate]) -> Candidate:
+        """最终交给内核的行动：free 优先，否则取候选并附上言语行为。free 只接受不带命题的言语，违者抛 ValueError。"""
+        if self.free is not None:
+            if self.free.op not in (Op.TELL, Op.ASK) or self.free.topic is not None or self.free.target is None:
+                raise ValueError(f"free 只接受不带命题、对某人说的 TELL/ASK：{self.free}")
+            return self.free
+        if not 0 <= self.index < len(cands):
+            raise ValueError(f"策略越界选择了候选 {self.index}")
+        cand = cands[self.index]
+        return replace(cand, social=self.social) if self.social is not None else cand
 
 
 class Policy(Protocol):

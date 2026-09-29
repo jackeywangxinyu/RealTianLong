@@ -52,6 +52,9 @@ class TurnEnvelope:
     done: bool = False                    # 世界侧已完结（计划 tick 走完，或被身边动静打断）
     source: str = "rules"                 # 解析来源（rules / llm），供重放时还原报告
     narration: str | None = None          # 已记录的叙述；None = 世界已结算但文字尚未落库
+    followups: tuple[Intent, ...] = ()    # 多步计划的后续步骤（“拿起长剑向龚光杰刺去”= 拿 → 刺）：第 i+1 个 tick 用第 i 个；
+                                          # 计划走完之后的 tick 玩家原地等待（反应 tick、多 tick 等待）
+    reaction: bool = False                # 计划之后是否追加一个反应 tick：对人说了话、做了姿态、动了手，在场的人当场回应
 
 
 @dataclass(frozen=True, slots=True)

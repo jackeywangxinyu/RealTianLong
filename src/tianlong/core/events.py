@@ -1,8 +1,9 @@
 """
-[INPUT]: 依赖 core/schema 的 Op / Manner / Kind，core/changes 的 Change，core/propositions 的 Fact，core/entities 的 Scalar
+[INPUT]: 依赖 core/schema 的 Op / Manner / Kind / Social，core/changes 的 Change，core/propositions 的 Fact，core/entities 的 Scalar
 [OUTPUT]: 对外提供 Intent / Outcome / Event / PerceivedEvent / Modality / EntitySketch（含亲见/只闻其名）/ Percept / Observation、
           结算原因封闭词表 RULE_REASONS / ADMISSION_REASONS / REASONS 与 reason_key()
 [POS]: core 的因果链数据：意图 → 事件（真相，含变化）→ 观察（服务端溯源记录）→ 感知（角色可见的片面内容）；
+       原话/姿态（utterance）与言语行为（social）只是修辞：随感知传给在场的人，从不产生事实；
        MOVE 的 obj 是所走的路线（门），目的地与路线一起构成行动，内核不替角色挑路；
        原因词表是 kernel（产出）与 learning（编码）之间的契约
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -16,7 +17,7 @@ from enum import StrEnum
 from tianlong.core.changes import Change
 from tianlong.core.entities import Scalar
 from tianlong.core.propositions import Fact
-from tianlong.core.schema import Kind, Manner, Op
+from tianlong.core.schema import Kind, Manner, Op, Social
 
 # ============================================================
 #  意图：角色想做什么（结构化，尚未发生）
@@ -34,7 +35,8 @@ class Intent:
     manner: Manner = Manner.NORMAL
     topic: Fact | None = None       # 语义内容：tell 的命题（可以是谎言）、ask 的问题
     based_on: int = 0
-    utterance: str | None = None    # 言语的表层文字（LLM/模板渲染）；只是修辞，事实内容以 topic 为准
+    utterance: str | None = None    # 言语的表层文字，或 WAIT 时看得见的姿态；只是修辞，事实内容以 topic 为准
+    social: Social | None = None    # 言语/姿态的社交含义（赔罪、威胁……）：修辞层，只影响旁人的态度与回应
 
 
 # ============================================================
@@ -119,7 +121,8 @@ class PerceivedEvent:
     outcome: Outcome | None = None
     topic: Fact | None = None
     reason: str | None = None       # 失败原因（门锁着、没找到……）：看得见失败的人也看得见原因
-    utterance: str | None = None    # 听得见的人才有：说话者的原话
+    utterance: str | None = None    # 听得见的人才有：说话者的原话；看得见的人才有：姿态
+    social: Social | None = None    # 与原话同进退：耳语时旁人既听不到原话，也不知道是赔罪还是威胁
 
 
 @dataclass(frozen=True, slots=True)

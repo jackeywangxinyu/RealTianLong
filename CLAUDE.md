@@ -15,7 +15,7 @@ src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式
 src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言
 scripts/ - 本地基础设施与演示脚本（无 Docker 环境下的 Neo4j、录制一局“玩家所见 vs 世界真相”、Colab 笔记本生成器）
-docs/ - 脚本生成并入库的产出物存档（2 子目录: demo 演示录像, results 训练报告与结果表）
+docs/ - 入库的产出物与设计（3 子目录: demo 演示录像, results 训练报告与结果表, design 手写施工图）
 notebooks/ - Colab GPU 训练笔记本（生成物：只调用同一套训练 CLI，固定提交、失败即停、产物写进 Drive）
 .github/ - CI（1 子目录: workflows——核心零依赖套件 + 学习层与 Neo4j 全量套件）
 </directory>

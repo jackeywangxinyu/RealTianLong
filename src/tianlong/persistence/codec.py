@@ -30,6 +30,7 @@ from tianlong.core import (
     Relation,
     RemoveRelation,
     SetAttr,
+    Social,
 )
 from tianlong.persistence.store import TurnEnvelope
 
@@ -62,14 +63,19 @@ def fact_from(d: J | None) -> Fact | None:
 # ============================================================
 
 
+def _social(v: str | None) -> Social | None:
+    return Social(v) if v else None       # 旧记录没有这个键：None
+
+
 def intent_to(it: Intent) -> J:
     return {"id": it.id, "actor": it.actor, "op": it.op.value, "target": it.target, "obj": it.obj,
-            "manner": it.manner.value, "topic": fact_to(it.topic), "based_on": it.based_on, "utterance": it.utterance}
+            "manner": it.manner.value, "topic": fact_to(it.topic), "based_on": it.based_on, "utterance": it.utterance,
+            "social": it.social.value if it.social else None}
 
 
 def intent_from(d: J) -> Intent:
     return Intent(d["id"], d["actor"], Op(d["op"]), d.get("target"), d.get("obj"), Manner(d["manner"]),
-                  fact_from(d.get("topic")), int(d["based_on"]), d.get("utterance"))
+                  fact_from(d.get("topic")), int(d["based_on"]), d.get("utterance"), _social(d.get("social")))
 
 
 def change_to(c: Change) -> J:
@@ -114,7 +120,7 @@ def pevent_to(v: PerceivedEvent | None) -> J | None:
         return None
     return {"kind": v.kind, "place": v.place, "actor": v.actor, "target": v.target, "obj": v.obj,
             "outcome": v.outcome.value if v.outcome else None, "topic": fact_to(v.topic),
-            "reason": v.reason, "utterance": v.utterance}
+            "reason": v.reason, "utterance": v.utterance, "social": v.social.value if v.social else None}
 
 
 def pevent_from(d: J | None) -> PerceivedEvent | None:
@@ -122,7 +128,7 @@ def pevent_from(d: J | None) -> PerceivedEvent | None:
         return None
     return PerceivedEvent(d["kind"], d["place"], d.get("actor"), d.get("target"), d.get("obj"),
                           Outcome(d["outcome"]) if d.get("outcome") else None, fact_from(d.get("topic")),
-                          d.get("reason"), d.get("utterance"))
+                          d.get("reason"), d.get("utterance"), _social(d.get("social")))
 
 
 def percept_to(p: Percept) -> J:
@@ -191,11 +197,13 @@ def envelope_to(e: TurnEnvelope) -> J:
     return {"request_id": e.request_id, "payload_hash": e.payload_hash, "intent": intent_to(e.intent),
             "planned_ticks": e.planned_ticks, "start_version": e.start_version, "start_clock": e.start_clock,
             "versions": list(e.versions), "ticks": list(e.ticks), "percepts": [percept_to(p) for p in e.percepts],
-            "fresh": list(e.fresh), "done": e.done, "source": e.source}
+            "fresh": list(e.fresh), "done": e.done, "source": e.source,
+            "followups": [intent_to(i) for i in e.followups], "reaction": e.reaction}
 
 
 def envelope_from(d: J, narration: str | None = None) -> TurnEnvelope:
     return TurnEnvelope(d["request_id"], d["payload_hash"], intent_from(d["intent"]), int(d["planned_ticks"]),
                         int(d["start_version"]), int(d["start_clock"]), tuple(int(v) for v in d["versions"]),
                         tuple(int(t) for t in d["ticks"]), tuple(percept_from(p) for p in d["percepts"]),
-                        tuple(d["fresh"]), bool(d["done"]), d.get("source", "rules"), narration)
+                        tuple(d["fresh"]), bool(d["done"]), d.get("source", "rules"), narration,
+                        tuple(intent_from(i) for i in d.get("followups", ())), bool(d.get("reaction", False)))
