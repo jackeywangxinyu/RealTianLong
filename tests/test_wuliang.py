@@ -78,7 +78,7 @@ def test_player_can_follow_the_canon_route_to_the_scrolls():
         s.turn(cmd)
     s.turn("查看玉璧")
     assert not s.beliefs("duanyu").knows("d_cave"), "白日里看不出玉璧的秘密"
-    for _ in range(10):                                  # 被人打断（开溜后寻仇者追来）则再等
+    for _ in range(20):                                  # 被人打断（开溜后寻仇者追来、当面动手）则再等
         if s.authority.head().clock >= at(1, 19, 0):
             break
         s.turn("等到天黑")

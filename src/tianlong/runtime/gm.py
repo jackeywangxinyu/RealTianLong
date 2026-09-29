@@ -1,14 +1,17 @@
 """
 [INPUT]: 依赖 core 的 Event / Fact / Kind / Modality / Op / Outcome / Percept / PerceivedEvent / Proposition / Rel / Social / WorldState /
-         AddRelation / RemoveRelation / SetAttr / clock_label，core/attributes 的 true_value，core/profiles 的 Goal / GoalKind，
+         AddRelation / RemoveRelation / SetAttr / clock_label，core/attributes 的 true_value，core/profiles 的 Goal / GoalKind / Profile，
          cognition 的 BeliefStore / believed_place，kernel/perception 的 sketches_for，language/parser 的 MoveKind / Parsed，
+         language/llm 的 LLMUnavailable，language/render 的 sentence_ends，
          language/scene 的 SceneBrief / VoiceLine，language/templates 的 render_event / render_experience / render_fact，
          persistence 的 TurnEnvelope，scenarios 的 Scenario
-[OUTPUT]: 对外提供 gm_command()（元指令与“GM：”前缀）、salient()（等待该不该被打断）、build_brief()（SceneBrief：要替 NPC 说出口的话）、
-          self_view() / goal_text() / aside_prompt()（场外问答只用玩家自己的认知）、closing_prompt()（终章只取玩家亲历）、
-          leaks()（名字闸门：玩家不认识的实体不许出现在模型写的场外文字里）、reveal()（终章的真相揭晓表）、
-          META_HELP / ASIDE_SYSTEM / CLOSING_SYSTEM
-[POS]: runtime 的主持层纯函数：会话（session）的回合循环调用它们，它们只读传进来的认知、已落库的请求进度与事件日志，从不写任何东西。
+[OUTPUT]: 对外提供 gm_command()（元指令与“GM：”前缀）、companions()（玩家的同伴 = 自己人 + DEFEND 目标）、salient()（等待该不该被打断）、
+          build_brief()（SceneBrief：要替 NPC 说出口的话）、
+          self_view() / goal_text() / aside_prompt()（场外问答只用玩家自己的认知）、gated_stream()（场外回答逐句过名字闸门、边生成边交付）、
+          closing_prompt()（终章只取玩家亲历）、leaked() / leaks()（名字闸门：玩家不认识的实体不许出现在模型写的文字里，玩家亲口说出的名字除外）、
+          reveal()（终章的真相揭晓表）、META_HELP / ASIDE_SYSTEM / ASIDE_TOKENS / CLOSING_SYSTEM
+[POS]: runtime 的主持层纯函数：会话（session）的回合循环调用它们，它们只读传进来的认知、已落库的请求进度与事件日志，从不写任何东西
+       （gated_stream 只经调用方给的回调交付文字）。
        给模型看的（场外问答、终章收束）只取玩家自己的认知与亲历；真相只出现在 reveal() 里——落幕之后、明确标作“真相”，
        按世界状态与玩家认知确定地生成（你以为的 vs 实际的：每个 NPC 的下落与伤/毒/被制，以及你没看见的动手、偷盗与潜逃）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -17,7 +20,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 
 from tianlong.cognition import BeliefStore
 from tianlong.cognition.navigation import believed_place
@@ -39,9 +42,11 @@ from tianlong.core import (
     clock_label,
 )
 from tianlong.core.attributes import true_value
-from tianlong.core.profiles import Goal, GoalKind
+from tianlong.core.profiles import Goal, GoalKind, Profile
 from tianlong.kernel.perception import sketches_for
+from tianlong.language.llm import LLMUnavailable
 from tianlong.language.parser import MoveKind, Parsed
+from tianlong.language.render import sentence_ends
 from tianlong.language.scene import SceneBrief, VoiceLine
 from tianlong.language.templates import render_event, render_experience, render_fact
 from tianlong.persistence import TurnEnvelope
@@ -56,6 +61,7 @@ _GOALS = {GoalKind.PROTECT: "护住{item}", GoalKind.ACQUIRE: "弄到{item}", Go
           GoalKind.DEFEND: "护着{person}"}
 _STATUS = {"wounded": "受了伤", "poisoned": "中了毒", "subdued": "被点了穴道"}
 MAX_UNSEEN = 20      # 真相揭晓里“你没看见的事”至多列这么多条
+ASIDE_TOKENS = 200   # 场外问答只要两三句：给声音模型的输出上限
 
 ASIDE_SYSTEM = (
     "你是一部中文武侠文字游戏的主持人，此刻在场外回答玩家的问题。只能依据给出的玩家自己的认知、目标、提示与最近的正文作答——"
@@ -92,10 +98,16 @@ def gm_command(text: str) -> Parsed | None:
 # ============================================================
 
 
-def salient(percepts: Iterable[Percept], player: str, allies: Iterable[str], here: str | None) -> bool:
+def companions(prof: Profile) -> frozenset[str]:
+    """玩家的同伴：自己人（allies）加上他要护着的人（DEFEND 目标）——与 NPC 的“替谁出头”同一口径。"""
+    return frozenset(prof.allies) | {g.person for g in prof.goals if g.kind == GoalKind.DEFEND and g.person}
+
+
+def salient(percepts: Iterable[Percept], player: str, friends: Iterable[str], here: str | None) -> bool:
     """冲着我来的（对我说话、对我动手、给我东西、搜我的身）、我自己的处境变了、当着我的面公开说话或做出有所指的姿态、
-    有人对我的同伴动手、有人进出我所在的地方。旁人的例行举动（查看、拿放）、远处的响动、耳语都不算。"""
-    allies = frozenset(allies)
+    当着我的面动手（打的是谁都算）、有人对我的同伴（friends，见 companions()）动手、有人进出我所在的地方。
+    旁人的例行举动（查看、拿放）、远处的响动、耳语都不算。"""
+    friends = frozenset(friends)
     for p in percepts:
         ev = p.event
         if ev is None or ev.actor == player or p.modality == Modality.SCENE:
@@ -103,10 +115,11 @@ def salient(percepts: Iterable[Percept], player: str, allies: Iterable[str], her
         if ev.target == player or any(player in (f.prop.subject, f.prop.value) for f in p.facts):
             return True
         if ev.place == here and ((ev.kind in TALK and p.modality == Modality.SPEECH)
+                                 or ev.kind == Op.ATTACK.value
                                  or (ev.kind == Op.WAIT.value and ev.utterance
                                      and ev.social not in (None, Social.REMARK))):
             return True
-        if ev.kind == Op.ATTACK.value and ev.target in allies:
+        if ev.kind == Op.ATTACK.value and ev.target in friends:
             return True
         if ev.kind == Op.MOVE.value and p.modality == Modality.SIGHT and ev.outcome == Outcome.SUCCESS:
             return True
@@ -201,6 +214,60 @@ def aside_prompt(question: str, view: Sequence[str], persona: str, goals: Sequen
     return "\n\n".join(parts)
 
 
+def gated_stream(pieces: Iterator[str], leaked_of: Callable[[str], Sequence[str]], emit: Callable[[str], None],
+                 lead: str = "") -> tuple[str, list[str], bool]:
+    """模型写的场外文字边生成边交付：逐句连同已交付的一起过 leaked_of()（名字闸门），通过即经 emit 交出（第一句前带上 lead）；
+    一句不过即停、不再读流（后面的话多半接着它说）。模型中途失败同样停下，已交付的照旧算数，半句话不交付。
+    返回 (交付的全部文字, 拦下那句点出的名字, 是否中途失败)；调用方据此决定补不补模板。"""
+    parts: list[str] = []
+    found: list[str] = []
+    failed = False
+    sentences = _sentences(pieces)
+    try:
+        for raw in sentences:
+            body = raw.strip()
+            if not body:
+                continue
+            gap = "\n" if parts and "\n" in raw[:len(raw) - len(raw.lstrip())] else ""
+            piece = (gap if parts else lead) + body
+            found = list(leaked_of("".join(parts) + piece))
+            if found:
+                break
+            parts.append(piece)
+            emit(piece)
+    except LLMUnavailable:
+        failed = True
+    finally:
+        sentences.close()
+        close = getattr(pieces, "close", None)
+        if close is not None:
+            close()                                    # 提前收手：让流式连接及时关掉
+    return "".join(parts), found, failed
+
+
+def _sentences(pieces: Iterable[str]) -> Iterator[str]:
+    """把流切成完整的句子（引号、省略号与流的边界同叙述者的分句器）；中途失败时先交出已完整的句子再抛出。"""
+    buf, failed = "", None
+    try:
+        for chunk in pieces:
+            buf += chunk
+            cut = 0
+            for end in sentence_ends(buf, final=False):
+                yield buf[cut:end]
+                cut = end
+            buf = buf[cut:]
+    except LLMUnavailable as e:
+        failed = e
+    cut = 0
+    for end in sentence_ends(buf, final=True):
+        yield buf[cut:end]
+        cut = end
+    if failed is not None:
+        raise failed
+    if buf[cut:].strip():
+        yield buf[cut:]                                # 结尾那句没有句末标点也照样验收
+
+
 def closing_prompt(tone: str, lived: Sequence[str], recent: Sequence[str]) -> str:
     parts = [f"终章基调：{tone}", "玩家亲历的事（按先后，第一人称记录）：\n" + "\n".join(f"- {t}" for t in lived)]
     if recent:
@@ -208,17 +275,23 @@ def closing_prompt(tone: str, lived: Sequence[str], recent: Sequence[str]) -> st
     return "\n\n".join(parts)
 
 
-def leaks(text: str, me: BeliefStore, scenario: Scenario) -> bool:
-    """名字闸门：模型写出了玩家不认识的实体（名或两字以上的别称）即算泄露。先抹掉玩家认识的名字，免得被子串误伤。"""
+def leaked(text: str, me: BeliefStore, scenario: Scenario, said: str = "") -> list[str]:
+    """名字闸门：模型写出的玩家不认识的实体名（名或两字以上的别称）。先抹掉玩家认识的名字，免得被子串误伤；
+    said 是玩家自己的原话，他亲口说出的名字（只是那几个字，不连带同一实体的别的称呼）照样抹掉——复述它不算泄露。"""
     state = scenario.state
 
     def names(eid: str) -> list[str]:
         return [state.entity(eid).name, *(a for a in scenario.aliases.get(eid, ()) if len(a) >= 2)]
 
-    known = sorted({n for eid in me.entities if state.has_entity(eid) for n in names(eid)}, key=len, reverse=True)
-    for n in known:
+    known = {n for eid in me.entities if state.has_entity(eid) for n in names(eid)}
+    known |= {n for eid in state.entities for n in names(eid) if said and n in said}
+    for n in sorted(known, key=len, reverse=True):
         text = text.replace(n, "")
-    return any(n in text for eid in state.entities if eid not in me.entities for n in names(eid))
+    return [n for eid in state.entities if eid not in me.entities for n in names(eid) if n in text]
+
+
+def leaks(text: str, me: BeliefStore, scenario: Scenario, said: str = "") -> bool:
+    return bool(leaked(text, me, scenario, said))
 
 
 # ============================================================

@@ -1,20 +1,24 @@
 """
 [INPUT]: 依赖 tianlong.runtime 的 GameSession / gm / cli，tianlong.agents 的 Choice / Situation，tianlong.language 的 MoveKind / Parsed /
-         Narrator / ScriptedLLM / Rendered，tianlong.persistence 的 InMemoryWorldStore，tianlong.scenarios 的 Scenario / Ending / build_wuliang，
-         tianlong.core / kernel.perception 搭一个小世界
+         Narrator / ScriptedLLM / LLMUnavailable / Rendered / Violation，tianlong.persistence 的 InMemoryWorldStore / RequestConflict，
+         tianlong.scenarios 的 Scenario / Ending / build_wuliang，tianlong.core / kernel.perception 搭一个小世界
 [OUTPUT]: 主持层回合循环验收：说话/姿态加一个反应 tick 且 NPC 的回话落在同一回合的感知与 SceneBrief 里；多步计划逐 tick 执行、
-          失败即止而反应 tick 照旧；场外问答与元指令不推进时间、不落库，模型只看玩家自己的认知（泄露即回退模板）；
-          等待只被要紧的事打断，计划与反应 tick 从不截短；多步计划中途崩溃的重试接在正确的一步上；
+          失败即止而反应 tick 照旧；场外问答与元指令不推进时间、不落库，模型只看玩家自己的认知（泄露即回退模板），
+          场外回答流式逐句过名字闸门、带 request_id 的重试原样返回；模型写的追问过名字闸门（玩家自己说出的名字不算）；
+          等待只被要紧的事打断（当面动手、对同伴动手都算），计划与反应 tick 从不截短；多步计划中途崩溃的重试接在正确的一步上；
+          重复投递抢先写下叙述时以落库的那一段为准；
           后台预算的 NPC 决策与顺序执行逐项相同、版本变了即作废；向量回忆只为声明 reads_memories 的策略而跑；最近正文随提交落库、读档恢复；抵达结局即落幕，
-          终章带明确标注的真相揭晓（含受伤、玩家没看见的动手与潜逃）；叙述经 on_text 流式交付并记下首字耗时；
+          终章以场景给的标题开头、带明确标注的真相揭晓（含受伤、玩家没看见的动手与潜逃）；叙述经 on_text 流式交付并记下首字耗时；
           命令行模板模式脚本化跑通到落幕；解释器按需接入（模块缺失时退回规则解析）
 [POS]: tests 的主持层（设计 §2、§4.4）：证伪“说话之后 NPC 要等下一回合才开口”“失败了还接着砍”“问主持人也会过一分钟”
-       “一点响动就把等待打断”“后台预算改变了结果”“读档后忘了上一段”“终章看不到真相”
+       “一点响动就把等待打断”“眼前打成一团也不停下”“后台预算改变了结果”“读档后忘了上一段”“终章看不到真相”
+       “场外回答要等整段写完才看得到”“重试一次提示就多翻一条”“追问里说漏了嘴”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import replace
 
@@ -41,11 +45,11 @@ from tianlong.core import (  # noqa: E402
 )
 from tianlong.core.profiles import Goal, GoalKind, Profile  # noqa: E402
 from tianlong.kernel.perception import make_percept, scene_percept  # noqa: E402
-from tianlong.language.llm import ScriptedLLM  # noqa: E402
+from tianlong.language.llm import LLMUnavailable, ScriptedLLM  # noqa: E402
 from tianlong.language.narrator import Narrator  # noqa: E402
 from tianlong.language.parser import MoveKind, Parsed  # noqa: E402
-from tianlong.language.render import Rendered, RenderStatus  # noqa: E402
-from tianlong.persistence import InMemoryWorldStore  # noqa: E402
+from tianlong.language.render import Rendered, RenderStatus, Violation  # noqa: E402
+from tianlong.persistence import InMemoryWorldStore, RequestConflict  # noqa: E402
 from tianlong.runtime import cli, gm  # noqa: E402
 from tianlong.runtime.session import ENDED, GameSession  # noqa: E402
 from tianlong.scenarios import Ending, Scenario, build_wuliang  # noqa: E402
@@ -111,7 +115,7 @@ def scenario(endings: tuple[Ending, ...] = (), world_id: str = "gm-test") -> Sce
                     hints="你可以说任何想做的事，例如：环顾四周 / 去后院", guide=GUIDE, endings=endings)
 
 
-OUT = Ending("out", "出山", "road", "劫后余生，江风浩荡")
+OUT = Ending("out", "第一幕终·出山", "road", "劫后余生，江风浩荡")
 
 
 # ============================================================
@@ -299,6 +303,105 @@ def test_ask_gm_answer_that_names_unknown_things_falls_back_to_the_template():
     assert plain.render.status == RenderStatus.TEMPLATE and "身上没带什么要紧的东西" in plain.narration
 
 
+class Streamer:
+    """替身声音模型：按给定的分段流式吐字（None = 中途断线），把吐出的每一段记进 log，记下收到的 max_tokens。"""
+
+    model = "streamer"
+
+    def __init__(self, pieces, log):
+        self.pieces, self.log, self.read, self.max_tokens = pieces, log, 0, None
+
+    def generate(self, *a, **kw):
+        raise AssertionError("场外问答应当走流式")
+
+    def stream(self, prompt, *, system=None, max_tokens=None):
+        assert system == gm.ASIDE_SYSTEM
+        self.max_tokens = max_tokens
+        for piece in self.pieces:
+            if piece is None:
+                raise LLMUnavailable("注入的断线")
+            self.read += 1
+            self.log.append(("model", piece))
+            yield piece
+
+
+def _ask(pieces, text="GM：我该怎么办"):
+    log: list = []
+    llm = Streamer(pieces, log)
+    r = session(llm=llm).turn(text, on_text=lambda t: log.append(("text", t)))
+    return r, llm, log
+
+
+def test_ask_gm_answer_streams_sentence_by_sentence_through_the_name_gate():
+    r, llm, log = _ask(["你眼下在大殿里。", "不妨先", "向龚光杰赔个不是。"])
+    assert r.narration == "（场外）你眼下在大殿里。不妨先向龚光杰赔个不是。" and r.render.status == RenderStatus.LLM
+    assert log.index(("text", "（场外）你眼下在大殿里。")) < log.index(("model", "向龚光杰赔个不是。")), "首句不等整段生成完就交付"
+    assert llm.max_tokens == gm.ASIDE_TOKENS and r.first_text_ms is not None
+    r, llm, log = _ask(["先稳住局面。", "营地里藏着秘籍。", "快去拿。", "别让人瞧见。"])
+    shown = "".join(t for k, t in log if k == "text")
+    assert r.narration == shown == "（场外）先稳住局面。", "点了玩家不认识的名字那句不交付"
+    assert llm.read == 3, "拦下之后不再读流"
+    assert r.render.status == RenderStatus.LLM and Violation("entity", "秘籍") in r.render.violations
+    r, _, _ = _ask(["先稳住局面。", "别", None])
+    assert r.narration == "（场外）先稳住局面。" and r.render.status == RenderStatus.LLM_UNAVAILABLE, "断线：已交付的算数，半句不交"
+    r, _, _ = _ask([None])
+    assert r.narration.startswith("（场外）你在大殿") and r.render.status == RenderStatus.LLM_UNAVAILABLE
+
+    class GenerateOnly:
+        model = "plain"
+        kw: dict = {}
+
+        def generate(self, prompt, **kw):
+            GenerateOnly.kw = kw
+            return "不妨先去后院看看。"
+
+    r = session(llm=GenerateOnly()).turn("GM：我该做什么")
+    assert r.narration == "（场外）不妨先去后院看看。" and GenerateOnly.kw["max_tokens"] == gm.ASIDE_TOKENS
+
+
+def test_aside_retried_with_the_same_request_id_returns_the_same_result():
+    llm = _aside_llm("不妨先去后院看看。")
+    s = session(llm=llm)
+    a, b = s.turn("/hint", request_id="h1"), s.turn("/hint", request_id="h1")
+    assert a.narration == b.narration == f"提示：{GUIDE[0]}" and not a.replayed and b.replayed
+    q = s.turn("GM：我该做什么", request_id="q1")
+    calls = len(llm.prompts)
+    streamed: list[str] = []
+    again = s.turn("GM：我该做什么", request_id="q1", on_text=streamed.append)
+    assert again.narration == q.narration and again.replayed and len(llm.prompts) == calls, "重试不再问一遍模型"
+    assert streamed == [q.narration] and again.first_text_ms is not None
+    with pytest.raises(RequestConflict):
+        s.turn("/recap", request_id="h1")
+    assert s.turn("/hint").narration == f"提示：{GUIDE[1]}", "重试没有多翻一条提示"
+    s.turn("等待")
+    assert s.store.session_state(s.ref)["hint"] == 2 and s.store.request(s.ref, "h1") is None, "不推进的回合照旧不落库"
+
+
+def _interpreting(answers: dict[str, dict]) -> GameSession:
+    """真解释器 + 脚本快模型：按玩家原文回一份 JSON（缺的字段取默认）。"""
+    base = {"kind": "unclear", "mode": "immediate", "actor": "player", "steps": [], "listener": None, "speech": "tell",
+            "line": "", "social": "none", "topic_subject": None, "topic_value": None, "topic_holds": True,
+            "missing": "", "reply": ""}
+    fast = ScriptedLLM(lambda p, s, sc: json.dumps({**base, **answers[p.rsplit("玩家输入：", 1)[1]]}, ensure_ascii=False))
+    return session(fast_llm=fast)
+
+
+def test_model_written_clarifications_pass_the_name_gate_but_the_players_own_words_do_not_count():
+    study = [{"op": "study", "target": None, "obj": None, "manner": "normal"}]
+    s = _interpreting({"我想找个清静地方练功": {"reply": "你是想去营地翻那本秘籍吗？"},
+                       "我翻出怀里那本书来读": {"kind": "act", "steps": study, "missing": "秘籍"},
+                       "我从怀里掏出秘籍": {"kind": "act", "steps": study, "missing": "秘籍"}})
+    head = s.authority.head().version
+    r = s.turn("我想找个清静地方练功")
+    assert not r.advanced and "秘籍" not in r.narration and r.render.status == RenderStatus.GATED_FALLBACK
+    assert Violation("entity", "秘籍") in r.render.violations
+    r = s.turn("我翻出怀里那本书来读")
+    assert not r.advanced and "秘籍" not in r.narration, "模型编的名字不回显"
+    r = s.turn("我从怀里掏出秘籍")
+    assert r.narration == "你身上并没有秘籍。" and r.render.status == RenderStatus.TEMPLATE, "玩家自己说出的名字照样复述"
+    assert s.authority.head().version == head
+
+
 # ============================================================
 #  等待只被要紧的事打断；计划与反应 tick 从不截短
 # ============================================================
@@ -325,6 +428,31 @@ def test_salient_events_interrupt_a_wait(who, policy, stop):
     assert env.done and env.versions == tuple(range(1, stop + 1)), f"{who} 的举动在第 {stop} 个 tick 打断等待"
 
 
+def test_a_fight_in_front_of_me_or_on_my_companion_interrupts_a_wait():
+    """当面动手（打的是谁都算）即打断；同伴 = 自己人 + 玩家要护着的人（DEFEND 目标），与 NPC 替谁出头同一口径。"""
+    s = session({"gong": Script(busy="rack", plan={T0 + 2: (Op.ATTACK, "ling")}), "ling": Script(busy="rack")})
+    s.turn("等一会", request_id="wait")
+    assert s.store.request(s.ref, "wait").versions == (1, 2, 3), "龚光杰当面向钟灵动手，第 3 个 tick 就停"
+    guard = Profile(HERO, "书生", "护着钟灵", is_player=True, allies=("gan",), goals=(Goal(GoalKind.DEFEND, person="ling"),))
+    assert gm.companions(guard) == {"gan", "ling"}
+    assert gm.companions(scenario().profiles[HERO]) == frozenset()
+
+
+def test_wuliang_wait_never_runs_past_a_fight_in_the_hall():
+    """无量山大殿里段誉等着看：钟灵与东宗动起手来的那一刻就把回合交还玩家，不再一口气看到她被制住。"""
+    s = GameSession(build_wuliang())
+    s.intro()
+    fights = 0
+    for i in range(5):
+        s.turn("等一会", request_id=f"w{i}")
+        env = s.store.request(s.ref, f"w{i}")
+        here = {e.intent.based_on for e in s.store.events(s.ref) if e.op == Op.ATTACK and e.place == "hall"
+                and e.intent.based_on + 1 in env.versions}
+        fights += len(here)
+        assert here <= {env.versions[-1] - 1}, f"第 {i} 次等待越过了大殿里的动手：{sorted(here)}"
+    assert fights >= 2, "开场确有人在大殿动手"
+
+
 def test_planned_reaction_tick_is_never_cut_short():
     s = session({"gong": Script(speak={T0}), "ling": Script(reply=True)}, {"姑娘好": SAY})
     s.turn("姑娘好", request_id="say")
@@ -344,8 +472,9 @@ def test_salient_rules_directly():
     assert not gm.salient([seen("tell", target="ling")], HERO, (), here), "耳语：只看见在交谈"
     assert gm.salient([seen("tell", target="ling", modality=Modality.SPEECH, utterance="你好")], HERO, (), here)
     assert gm.salient([seen("tell", target=HERO, modality=Modality.SPEECH)], HERO, (), here)
-    assert gm.salient([seen("attack", target="ling")], HERO, ("ling",), here), "有人对同伴动手"
-    assert not gm.salient([seen("attack", target="ling")], HERO, (), here)
+    assert gm.salient([seen("attack", target="ling")], HERO, (), here), "当着我的面动手，打的是谁都算"
+    assert not gm.salient([seen("attack", target="ling", place="yard")], HERO, (), here), "别处的旁人斗殴不算"
+    assert gm.salient([seen("attack", target="ling", place="yard")], HERO, ("ling",), here), "有人对同伴动手"
     assert gm.salient([seen("wait", utterance="拔出长剑", social=Social.THREATEN)], HERO, (), here)
     assert not gm.salient([seen("wait", utterance="打了个哈欠", social=Social.REMARK)], HERO, (), here)
     assert gm.salient([seen("move", target="yard", outcome=Outcome.SUCCESS)], HERO, (), here)
@@ -393,6 +522,34 @@ def test_crash_mid_plan_retry_continues_at_the_right_step(monkeypatch, parsed, t
     assert again.replayed and again.narration == ref_report.narration and store.head(s.ref).version == ticks
 
 
+class Draft(Narrator):
+    """替身主持人之声：写出固定的一稿；before 在第一次落笔之前跑一次（模拟重复投递恰在提交之后、叙述之前到达）。"""
+
+    def __init__(self, base: Narrator, text: str, before=None):
+        super().__init__(None, base.setting, base.lore, base.style, base.aliases)
+        self.text, self.before = text, before
+
+    def narrate_scene(self, viewer, percepts, names, *, brief, on_text=None, **kw):
+        hook, self.before = self.before, None
+        if hook is not None:
+            hook()
+        if on_text is not None:
+            on_text(self.text)
+        return Rendered(self.text, RenderStatus.TEMPLATE)
+
+
+def test_duplicate_delivery_returns_and_remembers_the_first_recorded_narration():
+    store = InMemoryWorldStore()
+    a, b = session(store=store), session(store=store)
+    other = {}
+    b.narrator = Draft(b.narrator, "乙稿")
+    a.narrator = Draft(a.narrator, "甲稿", before=lambda: other.setdefault("b", b.turn("等待", request_id="r")))
+    mine = a.turn("等待", request_id="r")
+    assert other["b"].narration == store.request(a.ref, "r").narration == "乙稿", "重复投递先写下了它那一稿"
+    assert mine.narration == "乙稿" and a.session_state()["recent"][-1] == "乙稿", "同一请求只有一段正文：先写者为准"
+    assert session(store=store).turn("等待", request_id="r").narration == "乙稿"
+
+
 # ============================================================
 #  后台预算：与顺序执行逐项相同；版本变了即作废；不推进的回合丢弃
 # ============================================================
@@ -419,7 +576,7 @@ def test_pipelined_decisions_are_identical_to_sequential(monkeypatch):
     assert piped[0] == plain[0], "每回合的叙述、类别与 NPC 决策逐项相同"
     assert piped[1] == plain[1] and piped[2] == plain[2] and piped[3] == plain[3]
     idle = sum(1 for _, advanced, _, _ in piped[0] if not advanced)
-    assert idle == 3 and len(piped[4]) == len(plain[4]) + idle, "每个推进的回合都用上了后台预算，不推进的回合作废一份"
+    assert idle == 3 and len(piped[4]) == len(plain[4]), "每个推进的回合都用上了后台预算；元指令与“GM：”一眼认得，不白算一份"
 
 
 def test_stale_lookahead_is_discarded(monkeypatch):
@@ -509,6 +666,13 @@ def test_ending_triggers_and_epilogue_reveals_the_truth():
     assert GameSession(scenario((OUT,)), store=s.store).ending == OUT, "读档后仍是落幕状态"
 
 
+def test_epilogue_heading_is_the_scenario_title_as_given():
+    s = GameSession(build_wuliang())
+    s.ending = s.scenario.endings[0]
+    head = s.epilogue().split("\n", 1)[0]
+    assert head == f"【{s.ending.title}】" and head.count("第一幕终") == 1, head
+
+
 def test_epilogue_closing_passage_uses_only_the_players_experiences():
     seen = []
 
@@ -574,7 +738,7 @@ def test_on_text_streams_during_the_turn_and_first_text_is_timed():
 
 
 def test_cli_runs_a_scripted_session_to_the_ending(monkeypatch, capsys):
-    monkeypatch.setitem(cli.SCENARIOS, "gmtest", lambda seed: scenario((Ending("yard", "后院", "yard", "清静"),)))
+    monkeypatch.setitem(cli.SCENARIOS, "gmtest", lambda seed: scenario((Ending("yard", "第一幕终·后院", "yard", "清静"),)))
     lines = iter(["/hint", "GM：我该做什么", "/beliefs", "/recap", "/debug", "去后院"])
     monkeypatch.setattr("builtins.input", lambda _: next(lines))
     assert cli.main(["--world", "gmtest", "--llm", "none"]) == 0
