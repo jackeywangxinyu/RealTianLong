@@ -313,7 +313,7 @@ def test_crash_after_commit_is_not_settled_twice(monkeypatch, fault):
     reference = GameSession(build_warehouse()).turn("拿走桌上的钥匙")
     store = InMemoryWorldStore()
     s = GameSession(build_warehouse(), store=store)
-    target = (s.indexer, "drain") if fault == "indexer" else (s.narrator, "narrate_rendered")
+    target = (s.indexer, "drain") if fault == "indexer" else (s.narrator, "narrate_scene")
     _fail_once(monkeypatch, *target)
     with pytest.raises(RuntimeError, match="注入的故障"):
         s.turn("拿走桌上的钥匙", request_id="req-crash")

@@ -15,9 +15,7 @@
 
 from __future__ import annotations
 
-import sys
 import time
-import types
 from dataclasses import replace
 
 import pytest
@@ -544,7 +542,8 @@ class StreamingNarrator(Narrator):
     def narrate_scene(self, viewer, percepts, names, *, brief, show_scene=False, fresh=(), command="", lapse="",
                       known=(), on_text=None):
         self.briefs.append(brief)
-        text = self.narrate_rendered(viewer, percepts, names, show_scene, fresh, command, lapse, known).text
+        text = super().narrate_scene(viewer, percepts, names, brief=brief, show_scene=show_scene, fresh=fresh,
+                                     command=command, lapse=lapse, known=known).text   # 模板正文（不经 on_text）
         half = max(1, len(text) // 2)
         for piece in (text[:half], text[half:]):
             on_text(piece)
@@ -588,18 +587,12 @@ def test_cli_runs_a_scripted_session_to_the_ending(monkeypatch, capsys):
         next(lines)                                                   # 落幕即退出：没有多读输入
 
 
-def test_interpreter_is_wired_only_when_the_module_exists(monkeypatch):
+def test_cli_and_session_wire_the_interpreter_with_the_fast_model():
+    from tianlong.language.interpret import Interpreter
     sc = scenario()
-    monkeypatch.setitem(sys.modules, "tianlong.language.interpret", None)
-    assert cli.interpreter_for(None, sc) is None, "模块未并入：退回会话自带的规则解析"
-    fake = types.ModuleType("tianlong.language.interpret")
-
-    class Interpreter:
-        def __init__(self, llm, aliases):
-            self.llm, self.aliases = llm, aliases
-
-    fake.Interpreter = Interpreter
-    monkeypatch.setitem(sys.modules, "tianlong.language.interpret", fake)
-    llm = ScriptedLLM(lambda *a: "{}")
-    got = cli.interpreter_for(llm, sc)
-    assert isinstance(got, Interpreter) and got.llm is llm and got.aliases == sc.aliases
+    fast, voice = ScriptedLLM(lambda *a: "{}"), ScriptedLLM(lambda *a: "")
+    got = cli.interpreter_for(fast, sc)
+    assert isinstance(got, Interpreter) and got.llm is fast
+    s = GameSession(sc, llm=voice, fast_llm=fast)
+    assert isinstance(s.interpreter, Interpreter) and s.interpreter.llm is fast, "解释用快模型，叙述用叙述模型"
+    assert GameSession(sc, llm=voice).interpreter.llm is voice, "没有快模型时解释也用叙述模型"

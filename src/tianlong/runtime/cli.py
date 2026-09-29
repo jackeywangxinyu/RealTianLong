@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，runtime/versions 的 IncompatibleSave，scenarios 的 SCENARIOS 注册表，
-         language/llm 的 llm_from_env / fast_llm_from_env；按需加载 language/interpret（主持层解释器，未并入时退回规则解析）、
+         language/llm 的 llm_from_env / fast_llm_from_env，language/interpret 的 Interpreter（主持层解释器）；按需加载
          persistence/neo4j_store、learning/bundle（部署包）
 [OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()、interpreter_for()
 [POS]: runtime 的终端前端：叙述经 on_text 流式逐句打印；开场只讲玩家所见，附上不剧透的输入示例（Scenario.hints）；
@@ -22,6 +22,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from tianlong.language.interpret import Interpreter
 from tianlong.language.llm import LLMClient, fast_llm_from_env, llm_from_env
 from tianlong.runtime.session import GameSession, TurnReport
 from tianlong.runtime.versions import IncompatibleSave
@@ -57,12 +58,8 @@ def load_dotenv(path: Path = Path(".env")) -> None:
                 os.environ.setdefault(key.strip(), value.strip())
 
 
-def interpreter_for(llm: LLMClient | None, scenario: Scenario):
-    """主持层解释器（快模型；没有模型时它自己退回规则解析）。模块尚未并入时返回 None，会话照旧用规则解析器。"""
-    try:
-        from tianlong.language.interpret import Interpreter
-    except ImportError:
-        return None
+def interpreter_for(llm: LLMClient | None, scenario: Scenario) -> Interpreter:
+    """主持层解释器（快模型；没有模型时它自己退回规则解析）。"""
     return Interpreter(llm, aliases=scenario.aliases)
 
 

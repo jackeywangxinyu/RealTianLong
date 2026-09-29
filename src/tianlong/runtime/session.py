@@ -55,6 +55,7 @@ from tianlong.core import (
     make_id,
     minutes_until_night,
 )
+from tianlong.language.interpret import Interpreter
 from tianlong.language.llm import LLMClient, LLMUnavailable
 from tianlong.language.narrator import Narrator, lore_keys
 from tianlong.language.parser import IntentParser, MoveKind, Parsed
@@ -189,11 +190,13 @@ class GameSession:
         predictor: OutcomePredictor | None = None,
         max_candidates: int = 64,
         allow_migration: bool = False,
-        interpreter=None,
+        interpreter: Interpreter | None = None,
         pipeline: bool = True,
+        fast_llm: LLMClient | None = None,
     ) -> None:
-        """llm 是主持人之声（叙述、场外问答、终章）；interpreter 是主持层解释器（interpret(text, me, recent) → Parsed），
-        None 时用规则解析器；pipeline=False 关掉“解释时后台预算 NPC 决策”（与之逐项相同，只是慢一些）。"""
+        """llm 是主持人之声（叙述、场外问答、终章）；fast_llm 是解释玩家输入的快模型（缺省用 llm）；
+        interpreter 缺省按快模型装配（没有模型时它退回规则解析）；
+        pipeline=False 关掉“解释时后台预算 NPC 决策”（与之逐项相同，只是慢一些）。"""
         if scenario.player is None:
             raise ValueError("场景没有玩家角色")
         self.scenario = scenario
@@ -230,9 +233,9 @@ class GameSession:
         self._hint = 0                      # 已给出的逐级提示条数
         self._restore(session_state)
         self.llm = llm
-        self.interpreter = interpreter
+        self.parser = IntentParser(fast_llm or llm, aliases=scenario.aliases)
+        self.interpreter = interpreter or Interpreter(fast_llm or llm, aliases=scenario.aliases, fallback=self.parser)
         self.pipeline = pipeline
-        self.parser = IntentParser(llm, aliases=scenario.aliases)
         self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style, scenario.aliases)
         self._universe = frozenset(e.name for e in scenario.state.entities.values())  # 闸门拒绝用的名字全集
         self.speaker: Speaker = TemplateSpeaker()     # 决策图里从不调模型：NPC 的台词由主持人之声一并写出
@@ -352,10 +355,8 @@ class GameSession:
                           first_text_ms=sink.first_ms, brief=brief)
 
     def _parse(self, text: str, me: BeliefStore) -> Parsed:
-        """解释玩家输入：有主持层解释器就用它（带上最近几段正文消解“她/那人”），否则用规则解析器。换解释器只改这一处。"""
-        if self.interpreter is not None:
-            return self.interpreter.interpret(text, me, tuple(self._recent))
-        return gm.gm_command(text) or self.parser.parse(text, me)
+        """解释玩家输入：元指令先认（会话自己的命令表），其余交主持层解释器（带上最近几段正文消解“她/那人”）。"""
+        return gm.gm_command(text) or self.interpreter.interpret(text, me, tuple(self._recent))
 
     def _plan(self, parsed: Parsed, me: BeliefStore, now: int) -> tuple[tuple[Candidate, ...], int, bool]:
         """(计划步骤, 计划 tick 数, 是否追加反应 tick)。普通等待照旧按时长；其余按计划的步数，

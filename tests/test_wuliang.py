@@ -45,7 +45,7 @@ def test_opening_conflict_chain_emerges():
     """龚光杰先叫阵、不应才寻衅 → 钟灵放貂 → 同门长辈护短、制住钟灵、搜出解药、救治弟子。"""
     s = GameSession(build_wuliang())
     events = []
-    for _ in range(9):
+    for _ in range(12):      # 招呼、叫阵、讥讽、旁人喝止都要占 tick：链条比从前长，但照样自然走完
         events += [(e.actor, e.op, e.intent.target, e.outcome.value) for e in s.turn("等待").events]
     assert ("gongguangjie", Op.ATTACK, "duanyu", "success") in events
     assert events.index(("gongguangjie", Op.TELL, "duanyu", "success")) < \
