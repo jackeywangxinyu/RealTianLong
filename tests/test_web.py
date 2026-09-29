@@ -1,7 +1,7 @@
 """
 [INPUT]: 依赖 tianlong.runtime.web 的 WebGame / make_server / MAX_INPUT，tianlong.runtime.session 的 GameSession，
          tianlong.scenarios 的 build_wuliang，标准库 http.client / threading
-[OUTPUT]: 网页前端验收：本地起服务（临时端口），页面可取、开场只讲一次且刷新原样再给；回合经 SSE 逐句推 text 事件、
+[OUTPUT]: 网页前端验收：本地起服务（临时端口），页面可取、开场只讲一次且刷新原样再给、开场与每回合都附行动建议；回合经 SSE 逐句推 text 事件、
           以 done 收尾，逐句拼起来就是整段叙述；元指令不推进时间；空输入 400；重开换一局；推送内容里没有 NPC 理由与真相
 [POS]: tests 的网页前端：证伪“网页只能一次性拿到整段文字”“刷新页面开场重讲一遍、世界又从头来”“流里夹带了玩家不该看的东西”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -74,6 +74,7 @@ def test_page_and_opening_told_once(served):
     first = json.loads(raw)
     assert code == 200 and first["opening"] and first["title"] == "天龙八部 · 无量山"
     assert first["clock"] and first["place"] and first["voice"] is False and first["ended"] is False
+    assert 1 <= len(first["suggest"]) <= 3                  # 开场就有可点的行动建议
     again = json.loads(_get(port, "/api/state")[2])
     assert again["opening"] == first["opening"]            # 刷新页面：同一段开场，不是新的一局
     assert _get(port, "/nope")[0] == 404
@@ -93,7 +94,8 @@ def test_turn_streams_sentences_then_done(served):
     assert done[0]["advanced"] is True and game.session.authority.head().clock > before
     # 推给浏览器的只有玩家该看的：没有 NPC 理由、真相，也没有叙述上下文
     assert set(done[0]) == {"clock", "place", "kind", "advanced", "narration", "first_text_ms", "ended", "ending",
-                            "epilogue"}
+                            "epilogue", "suggest"}
+    assert done[0]["suggest"] and all(isinstance(t, str) and t for t in done[0]["suggest"])
 
 
 def test_meta_does_not_advance_and_empty_is_rejected(served):

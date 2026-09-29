@@ -1,11 +1,13 @@
 """
 [INPUT]: 依赖标准库 http.server / json / threading / argparse / contextlib，runtime/session 的 GameSession / TurnReport，
+         runtime/suggest 的 suggestions，
          runtime/cli 的 load_dotenv / interpreter_for，runtime/webpage 的 PAGE，language/llm 的 llm_from_env / fast_llm_from_env，
          cognition/navigation 的 believed_place，scenarios 的 SCENARIOS
 [OUTPUT]: 对外提供 WebGame（一局游戏的线程安全外壳：开场、回合、状态）、make_server()（本地 HTTP 服务）、
           main()（python -m tianlong.runtime.web [--port 8000]）
 [POS]: runtime 的网页前端：只和 GameSession 打交道，与 CLI 平级。回合经 SSE 流式推给浏览器——主持人之声每通过闸门一句，
-       页面就多一句；推送的只有玩家该看的文字（叙述、场外问答、落幕后的真相揭晓），真相与 NPC 理由从不出这个进程。
+       页面就多一句；推送的只有玩家该看的文字（叙述、场外问答、落幕后的真相揭晓）与只凭玩家认知给出的行动建议，
+       真相与 NPC 理由从不出这个进程。
        零依赖（标准库 ThreadingHTTPServer），单机单局：同一时刻只结算一个回合（锁），开场在后台先写好，
        开场与终章各只写一次，刷新页面接着玩同一局
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -26,6 +28,7 @@ from tianlong.cognition.navigation import believed_place
 from tianlong.language.llm import fast_llm_from_env, llm_from_env
 from tianlong.runtime.cli import interpreter_for, load_dotenv
 from tianlong.runtime.session import GameSession, TurnReport
+from tianlong.runtime.suggest import suggestions
 from tianlong.runtime.webpage import PAGE
 from tianlong.scenarios import SCENARIOS
 
@@ -73,6 +76,10 @@ class WebGame:
         sk = me.sketch(here) if here else None
         return sk.name if sk else "某处"
 
+    def _suggest(self) -> list[str]:
+        s = self.session
+        return [] if s.ending is not None else list(suggestions(s.beliefs(s.player)))
+
     def state(self) -> dict[str, Any]:
         """开场（只讲一次，刷新页面时原样再给）、时辰、以为自己在哪、是否已落幕。"""
         with self._lock:
@@ -82,6 +89,7 @@ class WebGame:
                 parts.append(s.intro())
                 self._opening = "\n\n".join(p for p in parts if p)
             return {"title": self.title, "clock": s.clock(), "place": self._place(), "opening": self._opening,
+                    "suggest": self._suggest(),
                     "hints": s.scenario.hints, "voice": s.llm is not None,
                     "ended": s.ending is not None, "ending": s.ending.title if s.ending else None,
                     "epilogue": self._closing()}
@@ -94,7 +102,8 @@ class WebGame:
             ended = report.ending is not None
             return {"clock": s.clock(), "place": self._place(), "kind": report.kind.value, "advanced": report.advanced,
                     "narration": report.narration, "first_text_ms": report.first_text_ms,
-                    "ended": ended, "ending": report.ending.title if ended else None, "epilogue": self._closing()}
+                    "ended": ended, "ending": report.ending.title if ended else None, "epilogue": self._closing(),
+                    "suggest": self._suggest()}
 
 
 # ============================================================

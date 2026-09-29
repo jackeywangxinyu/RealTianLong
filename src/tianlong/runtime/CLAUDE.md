@@ -9,8 +9,9 @@ session.py: GameSession 装配中心与主持层的回合循环（存储里已�
 gm.py: 主持层纯函数（只读传进来的认知、请求进度与事件日志）：gm_command() 元指令与“GM：”前缀，salient() 等待只被要紧的事打断（冲着我来的、我的处境变了、当面公开说话或有所指的姿态、有人对同伴动手、有人进出我所在之处；例行举动、远处响动、耳语不算），build_brief() 从玩家听见的 NPC 言语与看见的 NPC 姿态拼 VoiceLine（说法与可点名的名字取自说话者自己的认知、腔调谈资取自设定、冲着玩家且在他开口之后的话带上他的原话），self_view()/goal_text()/aside_prompt()/closing_prompt() 给声音模型的提示词只含玩家自己的认知与亲历，leaks() 名字闸门，reveal() 终章的真相揭晓（每个 NPC 你以为的 vs 实际的下落与伤/毒/被制，玩家不在场时的动手、偷盗、施用与潜逃者的去向）
 versions.py: 存档版本闸门，current_versions() = 存档格式 + KERNEL_VERSION + 属性规格指纹 ATTRS_VERSION（core/attributes 唯一定义，跨进程稳定）+ GOALS_VERSION；check_save() 不一致即抛 IncompatibleSave，allow_migration=True 才接续且不改写、不补写旧档
 cli.py: 终端前端 main()，叙述经 on_text 逐句流式打印；开场只讲玩家所见并附上不剧透的输入示例（Scenario.hints）；/hint /recap /beliefs 与“GM：”场外提问交给会话（不推进时间），/debug 看真相、NPC 理由与分阶段耗时（含首字耗时），两种视角刻意分开；落幕即打印终章与真相揭晓并退出（读到已落幕的存档同样）；--llm auto 有密钥即启用：叙述用 llm_from_env()、解释用 fast_llm_from_env()，interpreter_for() 以受保护的导入接入主持层解释器（模块未并入时退回规则解析）；--world 选世界（默认天龙八部·无量山）；--store neo4j --save 名称 实现跨进程存档（版本不符一句话说明并退出，--allow-migration 显式接续）；--predictor gnn / --policy learned 经 learning/bundle 加载部署包（--artifacts 指向含 bundle.json 的目录：逐项核对训练时的语义版本与文件哈希，策略配套的预测器随包决定），缺包、被改动或不兼容时一句话提示并退出；load_dotenv() 读取 .env 只补缺不覆盖
-web.py: 网页前端 WebGame（一局游戏的线程安全外壳：同一时刻只结算一个回合；开场在后台先写好、只讲一次，终章只写一次，刷新页面原样再给、接着玩同一局）+ make_server()（标准库 ThreadingHTTPServer，零依赖）+ main()（python -m tianlong.runtime.web，--llm/--world/--seed/--host/--port）；POST /api/turn 以 SSE 逐句推送主持人之声（event: text），done 只带时辰、以为自己在哪、类别、是否推进与终章——NPC 理由、真相、叙述上下文从不出这个进程；输入截到 MAX_INPUT 字，一回合出错只回 error 事件不拖垮服务
-webpage.py: PAGE 整页 HTML（样式与脚本内联、无外部依赖）：宣纸色调、NPC 台词单独着色、文字随 SSE 逐句浮现，侧栏时辰/所在与提示/回顾/所知/明暗/重开，落幕展示终章卡片；深色模式与手机宽度皆可用；页面只呈现服务端给的文字，不做任何判断
+web.py: 网页前端 WebGame（一局游戏的线程安全外壳：同一时刻只结算一个回合；开场在后台先写好、只讲一次，终章只写一次，刷新页面原样再给、接着玩同一局）+ make_server()（标准库 ThreadingHTTPServer，零依赖）+ main()（python -m tianlong.runtime.web，--llm/--world/--seed/--host/--port）；POST /api/turn 以 SSE 逐句推送主持人之声（event: text），done 只带时辰、以为自己在哪、类别、是否推进、终章与行动建议——NPC 理由、真相、叙述上下文从不出这个进程；输入截到 MAX_INPUT 字，一回合出错只回 error 事件不拖垮服务
+suggest.py: suggestions(me) 行动建议：只凭玩家自己的认知与候选集给出至多三句可直接照做的输入（每族一句：有人冲我来——狠话或动手——先赔罪与脱身，其次没看清的、没研读过的、没去过的），措辞落在解释器快路径的句式上，点了不必等模型；从不参考真相，所以不剧透；同一认知同一建议
+webpage.py: PAGE 整页 HTML（样式与脚本内联、无外部依赖）：宣纸色调、NPC 台词单独着色、文字随 SSE 逐句浮现，输入框上方可点的行动建议，侧栏时辰/所在与提示/回顾/所知/明暗/重开，落幕展示终章卡片；深色模式与手机宽度皆可用；页面只呈现服务端给的文字，不做任何判断
 __init__.py: 包入口
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

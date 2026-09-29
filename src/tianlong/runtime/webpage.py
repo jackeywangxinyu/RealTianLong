@@ -2,7 +2,8 @@
 [INPUT]: 无（纯静态内容）
 [OUTPUT]: 对外提供 PAGE（网页前端的整页 HTML：样式与脚本内联，无外部依赖）
 [POS]: runtime/web 的页面：宣纸色调的聊天式界面。叙述按 SSE 逐句浮现，NPC 台词（“……”）单独着色，
-       侧栏显示时辰与所在，提示/回顾/所知一键发出元指令，落幕后展示终章与真相揭晓；深色模式与手机宽度皆可用。
+       输入框上方是可点的行动建议（服务端只凭玩家认知给出），侧栏显示时辰与所在，提示/回顾/所知一键发出元指令，
+       落幕后展示终章与真相揭晓；深色模式与手机宽度皆可用。
        页面只呈现服务端给的文字，不做任何判断
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -64,6 +65,13 @@ main { display: flex; flex-direction: column; min-height: 0; }
 .entry.ending h2 { margin: 0 0 8px; font-size: 18px; color: var(--cinnabar); letter-spacing: 0.1em; }
 .cursor::after { content: "▍"; color: var(--ink-soft); animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 20px 0; min-height: 0; }
+.chips:empty { display: none; }
+.chips button {
+  font-size: 14px; padding: 3px 11px; border-radius: 999px; color: var(--jade); background: transparent;
+  border: 1px solid var(--jade); opacity: 0.85;
+}
+.chips button:hover { opacity: 1; background: var(--paper-2); }
 form.say { display: flex; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid var(--line); background: var(--paper); }
 form.say input {
   flex: 1; font: inherit; font-size: 16px; padding: 10px 12px; color: var(--ink);
@@ -92,6 +100,7 @@ aside.side { border-left: 1px solid var(--line); padding: 18px 16px; display: fl
   aside.side .tip { display: none; }
   .stat .v { font-size: 15px; }
   #log { padding: 14px 16px 6px; }
+  .chips { padding: 6px 16px 0; }
   form.say { padding: 10px 16px 14px; }
 }
 </style>
@@ -101,6 +110,7 @@ aside.side { border-left: 1px solid var(--line); padding: 18px 16px; display: fl
   <header class="top"><span class="seal">江湖</span><h1 id="title">天龙</h1><span class="mode" id="mode"></span></header>
   <main>
     <div id="log" aria-live="polite"></div>
+    <div class="chips" id="chips" aria-label="可以这样做"></div>
     <form class="say" id="form" autocomplete="off">
       <input id="input" placeholder="说你想做的事，或想说的话……" maxlength="300" autofocus>
       <button class="primary" id="send" type="submit">行</button>
@@ -139,9 +149,25 @@ function paragraphs(text) { return text.split(/\n+/).filter(Boolean).map((p) => 
 function setState(s) {
   if (s.clock) $("clock").textContent = s.clock;
   if (s.place) $("place").textContent = s.place;
+  chips(s.suggest || []);
+}
+// 行动建议：只凭玩家自己的认知生成，点一下就照做；落幕或结算中不显示
+let lastChips = [];
+function chips(list) {
+  lastChips = list;
+  const box = $("chips");
+  box.innerHTML = "";
+  if (ended) return;
+  for (const t of list) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = t;
+    b.addEventListener("click", () => play(t));
+    box.appendChild(b);
+  }
 }
 function showEnding(title, epilogue) {
   ended = true;
+  $("chips").innerHTML = "";
   const card = add("ending", `<h2>${esc(title || "落幕")}</h2>` + paragraphs(epilogue || ""));
   card.scrollIntoView({ behavior: "smooth" });
   input.placeholder = "本幕已终。点“重开”再入江湖。";
@@ -165,10 +191,11 @@ async function start() {
 async function play(text) {
   if (busy || ended || !text.trim()) return;
   lock(true);
+  $("chips").innerHTML = "";
   add("me", esc(text));
   const aside = text.startsWith("/") || /^GM[:：]/i.test(text);
   const box = add(aside ? "aside cursor" : "gm cursor");
-  let acc = "";
+  let acc = "", settled = false;
   try {
     const resp = await fetch("/api/turn", { method: "POST", headers: { "Content-Type": "application/json" },
                                             body: JSON.stringify({ text }) });
@@ -185,6 +212,7 @@ async function play(text) {
         const data = JSON.parse((chunk.match(/^data: (.*)$/m) || [, "{}"])[1]);
         if (ev === "text") { acc += data.t; box.innerHTML = paragraphs(acc); log.scrollTop = log.scrollHeight; }
         else if (ev === "done") {
+          settled = true;
           if (!acc && data.narration) box.innerHTML = paragraphs(data.narration);
           if (data.kind === "ask_gm" || data.kind === "meta" || data.kind === "unclear") box.className = "entry aside";
           setState(data);
@@ -196,6 +224,7 @@ async function play(text) {
     add("error", "与主持人失去联系，请稍后再试。");
   } finally {
     box.classList.remove("cursor");
+    if (!settled) chips(lastChips);          // 出错时把上一回合的建议放回去
     lock(false);
     if (!ended) input.focus();
   }
