@@ -1,10 +1,10 @@
 """
-[INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，scenarios 的 SCENARIOS 注册表，language/llm 的 llm_from_env，
-         language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/predictor、learning/rl/policy
+[INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，runtime/versions 的 IncompatibleSave，scenarios 的 SCENARIOS 注册表，
+         language/llm 的 llm_from_env，language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/predictor、learning/rl/policy
 [OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()
 [POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
-       --world 选择世界（默认天龙八部·无量山），--store/--save 选择持久化与存档，--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC
-       （缺模型或词表过期时一句话说明并退出）
+       --world 选择世界（默认天龙八部·无量山），--store/--save 选择持久化与存档（存档版本不符时一句话说明并退出，
+       --allow-migration 显式接续旧档），--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC（缺模型或词表过期时一句话说明并退出）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -21,6 +21,7 @@ from tianlong.core import Fact
 from tianlong.language.llm import llm_from_env
 from tianlong.language.templates import render_fact
 from tianlong.runtime.session import GameSession, TurnReport
+from tianlong.runtime.versions import IncompatibleSave
 from tianlong.scenarios import SCENARIOS
 
 _META = "元指令：/beliefs 查看你的认知  /debug 切换开发者视角  /quit 退出"
@@ -63,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--policy", choices=["scripted", "learned"], default="scripted",
                     help="learned：加载 artifacts/policy_ppo.pt 作为 NPC 的决策策略")
     ap.add_argument("--artifacts", default="artifacts")
+    ap.add_argument("--allow-migration", action="store_true", help="存档版本与当前代码不符时仍显式接续（不补写旧档信息）")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
@@ -89,8 +91,12 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as e:     # 缺模型或模型过期（StaleModel）：说清楚，不甩一屏张量报错
         print(f"无法加载训练好的模型：{e}")
         return 2
-    session = GameSession(scenario, store=store, llm=llm, policies=policies, predictor=predictor,
-                          max_candidates=max_cands)
+    try:
+        session = GameSession(scenario, store=store, llm=llm, policies=policies, predictor=predictor,
+                              max_candidates=max_cands, allow_migration=args.allow_migration)
+    except IncompatibleSave as e:                   # 旧规则下建的档：说清楚，由玩家决定是否显式迁移
+        print(f"无法读档：{e}")
+        return 2
     debug = args.debug
     print(f"【{session.clock()}】{'（Gemini 叙述）' if llm else '（模板叙述）'}")
     if scenario.setting and not session.resumed:

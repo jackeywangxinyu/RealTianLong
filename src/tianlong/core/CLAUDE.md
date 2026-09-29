@@ -1,7 +1,7 @@
 # core/
 > L2 | 父级: /CLAUDE.md
 
-领域语言层。只依赖标准库，是整座依赖图的最底层：kernel 用它裁定事实，cognition 用它表达信念，persistence 用它存储，learning 用它构造标签。所有值对象不可变、可哈希、可 pickle，查询一律返回排序元组——回放确定性在这一层就被保证。
+领域语言层。只依赖标准库，是整座依赖图的最底层：kernel 用它裁定事实，cognition 用它表达信念，persistence 用它存储，learning 用它构造标签。所有值对象不可变、可哈希、可 pickle，映射字段一律是 FrozenMap（连内容也改不动），查询一律返回排序元组——回放确定性与快照安全在这一层就被保证。
 
 成员清单
 schema.py: 领域词汇表，Kind/Rel/Op/Manner 枚举（含动手/研读/施用）+ RelSpec（函数型关系决定信念互斥槽位）+ OpSignature（行动语法，MOVE = 目的地 + 路线门）+ ATTR_PREFIX
@@ -9,7 +9,8 @@ attributes.py: 类型化属性规格——每个属性的类型（布尔/数值/
 goals.py: 目标语义单一定义——七类目标的达成（三态，不知道 = None）/势能（只作塑形）/一次性或持续（ACHIEVE/MAINTAIN），GoalReader 协议让同一套语义由世界读者（奖励、评测）与信念读者（角色观测）分别求值；GoalRegistry 对未注册或缺字段的目标明确报错 UnsupportedGoal，绝不静默套用递送兜底
 entities.py: Entity/Relation 值对象，属性存为有序元组以保证可哈希与 repr 稳定
 changes.py: 世界变化语言 AddRelation/RemoveRelation/SetAttr，带前置条件（删除要求存在、改值要求旧值匹配），relocate() 表达 AT 的一删一增
-world.py: WorldState 不可变实际世界图，apply() 只改事实、stamp() 才推进版本，fingerprint() 是回放验收判据
+world.py: WorldState 不可变实际世界图（实体表与内部邻接索引为 FrozenMap），apply() 只改事实、stamp() 才推进版本，fingerprint() 是回放验收判据
+frozen.py: FrozenMap 只读快照映射，dict 子类封死全部就地修改（赋值/删除/update/pop/popitem/clear/setdefault/|=），__reduce__ 重建使 pickle/deepcopy 可用，JSON 可序列化、与 dict 判等、拷贝走 C 实现——frozen dataclass 冻不住的“字段里那个 dict”由它封死
 propositions.py: Proposition（命题内容，不含"谁相信"）与 Fact（带极性），slot 定义函数型谓词下的互斥槽位
 events.py: 因果链数据 Intent → Event（真相）→ Observation（服务端溯源）→ Percept（角色可见的片面内容，刻意不带来源 ID）；结算原因封闭词表 RULE_REASONS/ADMISSION_REASONS（kernel 产出、learning 编码的契约，reason_key() 把语法拒绝归一）；MOVE 的 obj 是所走的路线（门）；EntitySketch.seen 区分亲眼所见（有外观）与只闻其名（外观未知）；言语原话 utterance 随意图与感知传递，只是修辞
 grammar.py: signature_error() 行动语法检查，kernel 用真实种类、cognition 用已知种类调用同一把尺子；只查"能不能这样说"，不查"能不能做成"

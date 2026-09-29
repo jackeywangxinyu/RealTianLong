@@ -1,13 +1,15 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore，core 的 Intent / Op
-[OUTPUT]: 对外提供 Scheduler（谁在本 tick 需要完整决策）
+[OUTPUT]: 对外提供 Scheduler（谁在本 tick 需要完整决策；to_state()/from_state() 以 JSON 兼容形状存取调度标记）
 [POS]: agents 的节流阀；调度依据是游戏时间与事件：有新经历、手头有事、约定的时辰到了、闲置太久才完整决策，其余人执行低成本例行动作（原地等待）。
-       不在玩家眼前的角色也照常推进，但不必每分钟都跑一遍完整流程
+       不在玩家眼前的角色也照常推进，但不必每分钟都跑一遍完整流程。
+       调度标记是会话运行态的一部分：随世界提交一起落库，读档后原样恢复——否则读档那一刻所有人都“该决策了”，后续事件就与连续运行分叉
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from tianlong.cognition import BeliefStore
@@ -37,3 +39,17 @@ class Scheduler:
 
     def record(self, agent: str, now: int, intent: Intent) -> None:
         self._marks[agent] = _Mark(now, busy=intent.op != Op.WAIT)
+
+    # ------------------------------------------------------------
+    #  存取：{角色: [上次决策的 tick, 是否手头有事]}，按角色排序，JSON 往返不变
+    # ------------------------------------------------------------
+
+    def to_state(self) -> dict[str, list]:
+        return {a: [m.tick, m.busy] for a, m in sorted(self._marks.items())}
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, Sequence], idle_interval: int = 15) -> Scheduler:
+        sched = cls(idle_interval)
+        for agent, (tick, busy) in sorted(state.items()):
+            sched._marks[agent] = _Mark(int(tick), bool(busy))
+        return sched

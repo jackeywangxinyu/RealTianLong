@@ -1,13 +1,16 @@
 """
-[INPUT]: 依赖 neo4j 驱动的 Driver / GraphDatabase，persistence/store 的协议与值对象，persistence/codec 的编解码，
-         core / cognition 的不可变类型
+[INPUT]: 依赖 neo4j 驱动的 Driver / GraphDatabase，persistence/store 的协议、值对象与 check_request_progress，
+         persistence/codec 的编解码，core / cognition 的不可变类型
 [OUTPUT]: 对外提供 Neo4jWorldStore（WorldStore 协议的图数据库实现）、net_relation_diff()
 [POS]: persistence 的 Neo4j 后端。图模型：
        (:World) 版本锚点；(:Entity:{Person|Place|Item|Surface|Door}) 以 AT/OWNS/MATCHES/CONNECTS 相连；
        (:Event)-[:BY|TARGET|OBJ|OCCURRED_AT]->(:Entity)；(:Entity)-[:OBSERVED]->(:Observation)-[:OF]->(:Event)；
        命题与相信分离：(:Entity)-[:BELIEVES {holds, confidence, ...}]->(:Proposition)-[:ABOUT]->(:Entity)；
-       (:Entity)-[:HAS_MIND]->(:Mind)-[:KNOWS]->(:Entity)；(:Memory {indexed}) 即 outbox。
-       commit 先对 World 节点加写锁再比对版本——read-committed 隔离下由锁保证串行，而不是指望 ACID 自动解决并发
+       (:Entity)-[:HAS_MIND]->(:Mind)-[:KNOWS]->(:Entity)；(:Memory {indexed}) 即 outbox；
+       (:Request {data, narration}) 是玩家请求的进度与叙述；World 节点另存存档版本（versions）与会话运行态（session）。
+       commit 先对 World 节点加写锁再比对版本——read-committed 隔离下由锁保证串行，而不是指望 ACID 自动解决并发；
+       持锁后再做请求绑定检查（进度必须接在已落库的那一份之后），请求进度与会话运行态与世界变化同一事务写入，
+       叙述文字由 record_render() 只补写一次
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -37,11 +40,18 @@ from tianlong.core import (
 )
 from tianlong.core.memories import MemoryRecord
 from tianlong.persistence import codec
-from tianlong.persistence.store import CommitBatch, UnknownWorld, VersionConflict, WorldRef
+from tianlong.persistence.store import (
+    CommitBatch,
+    TurnEnvelope,
+    UnknownWorld,
+    VersionConflict,
+    WorldRef,
+    check_request_progress,
+)
 
 _LABELS = {k: k.value.capitalize() for k in Kind}   # 标签与关系类型只来自枚举白名单，绝不拼接外部输入
 _ROLES = (("BY", "actor"), ("TARGET", "target"), ("OBJ", "obj"), ("OCCURRED_AT", "place"))
-_NODES = ("World", "Entity", "Event", "Observation", "Proposition", "Mind", "Memory")
+_NODES = ("World", "Entity", "Event", "Observation", "Proposition", "Mind", "Memory", "Request")
 
 
 def _uid(ref: WorldRef, *parts: str) -> str:
@@ -119,13 +129,14 @@ class Neo4jWorldStore:
         return self._read(lambda t: t.run("MATCH (w:World {uid:$u}) RETURN count(w) AS n",
                                           u=_uid(ref)).single()["n"] > 0)
 
-    def create(self, ref: WorldRef, state: WorldState, beliefs: Mapping[str, BeliefStore]) -> None:
+    def create(self, ref: WorldRef, state: WorldState, beliefs: Mapping[str, BeliefStore],
+               versions: Mapping[str, str] | None = None) -> None:
         def tx(t: ManagedTransaction) -> None:
             if t.run("MATCH (w:World {uid:$u}) RETURN count(w) AS n", u=_uid(ref)).single()["n"]:
                 raise ValueError(f"世界已存在: {ref}")
-            t.run("CREATE (:World {uid:$u, w:$w, b:$b, version:$v, clock:$c, seed:$s})",
+            t.run("CREATE (:World {uid:$u, w:$w, b:$b, version:$v, clock:$c, seed:$s, versions:$vs})",
                   u=_uid(ref), w=ref.world_id, b=ref.branch_id, v=state.version, c=state.clock,
-                  s=str(state.seed)).consume()
+                  s=str(state.seed), vs=json.dumps(dict(versions or {}), sort_keys=True)).consume()
             by_kind: dict[Kind, list[dict]] = defaultdict(list)
             for e in state.entities.values():
                 by_kind[e.kind].append(self._entity_row(ref, e))
@@ -209,6 +220,23 @@ class Neo4jWorldStore:
             w=ref.world_id, b=ref.branch_id, o=owner, since=since)))
         return tuple(self._memory_from(r["m"]) for r in rows)
 
+    def request(self, ref: WorldRef, request_id: str) -> TurnEnvelope | None:
+        rec = self._read(lambda t: t.run("MATCH (r:Request {uid:$u}) RETURN r.data AS d, r.narration AS n",
+                                         u=_uid(ref, "request", request_id)).single())
+        return codec.envelope_from(json.loads(rec["d"]), rec["n"]) if rec else None
+
+    def session_state(self, ref: WorldRef) -> Mapping[str, Any] | None:
+        rec = self._read(lambda t: t.run("MATCH (w:World {uid:$u}) RETURN w.session AS s", u=_uid(ref)).single())
+        if rec is None:
+            raise UnknownWorld(str(ref))
+        return json.loads(rec["s"]) if rec["s"] is not None else None
+
+    def save_versions(self, ref: WorldRef) -> Mapping[str, str]:
+        rec = self._read(lambda t: t.run("MATCH (w:World {uid:$u}) RETURN w.versions AS v", u=_uid(ref)).single())
+        if rec is None:
+            raise UnknownWorld(str(ref))
+        return json.loads(rec["v"]) if rec["v"] is not None else {}
+
     # ------------------------------------------------------------
     #  写：唯一路径
     # ------------------------------------------------------------
@@ -225,6 +253,12 @@ class Neo4jWorldStore:
                 raise VersionConflict(f"{ref}: head={rec['v']} expected={batch.expected_version}")
             if batch.state.version != batch.expected_version + 1:
                 raise ValueError("新状态版本必须恰好 +1")
+            if batch.request is not None:
+                # 持有 World 锁时读已落库的进度：绑定检查与写入同一事务，重复投递抢在后面提交即整体回滚
+                rec = t.run("MATCH (r:Request {uid:$u}) RETURN r.data AS d",
+                            u=_uid(ref, "request", batch.request.request_id)).single()
+                prior = codec.envelope_from(json.loads(rec["d"])) if rec else None
+                check_request_progress(prior, batch.request, batch.state.version)
 
             # ---- 2. 世界变化：关系按净差异，属性按新状态整体覆盖 ----
             changes = [c for e in batch.events for c in e.changes]
@@ -236,6 +270,9 @@ class Neo4jWorldStore:
             t.run("UNWIND $rows AS r MATCH (e:Entity {uid:r.uid}) SET e.attrs = r.attrs", rows=rows).consume()
             t.run("MATCH (w:World {uid:$u}) SET w.version = $v, w.clock = $c REMOVE w._lock",
                   u=_uid(ref), v=batch.state.version, c=batch.state.clock).consume()
+            if batch.session_state is not None:
+                t.run("MATCH (w:World {uid:$u}) SET w.session = $s", u=_uid(ref),
+                      s=json.dumps(batch.session_state, ensure_ascii=False, sort_keys=True)).consume()
 
             # ---- 3. 事件与观察（环顾类观察量大且可由认知反映，不落库）----
             self._write_events(t, ref, batch.state.version, batch.events)
@@ -266,6 +303,24 @@ class Neo4jWorldStore:
                   "occurred_at:r.occurred_at, known_at:r.known_at, source:r.source, subjects:r.subjects, "
                   "informant:r.informant, verdict:r.verdict, indexed:false}) CREATE (m)-[:OF]->(who)",
                   rows=mems).consume()
+
+            # ---- 5. 请求进度：整份替换 data，narration 只由 record_render 写 ----
+            if batch.request is not None:
+                env = batch.request
+                t.run("MERGE (r:Request {uid:$u}) ON CREATE SET r.w = $w, r.b = $b, r.request_id = $rid "
+                      "SET r.payload_hash = $ph, r.data = $d",
+                      u=_uid(ref, "request", env.request_id), w=ref.world_id, b=ref.branch_id, rid=env.request_id,
+                      ph=env.payload_hash, d=json.dumps(codec.envelope_to(env), ensure_ascii=False)).consume()
+
+        self._write(tx)
+
+    def record_render(self, ref: WorldRef, request_id: str, narration: str) -> None:
+        """幂等：第一次写入的叙述为准，重试不改写；请求不存在是调用方的错。"""
+        def tx(t: ManagedTransaction) -> None:
+            rec = t.run("MATCH (r:Request {uid:$u}) SET r.narration = coalesce(r.narration, $n) RETURN count(r) AS n",
+                        u=_uid(ref, "request", request_id), n=narration).single()
+            if not rec or not rec["n"]:
+                raise KeyError(f"未知请求: {request_id}")
 
         self._write(tx)
 
