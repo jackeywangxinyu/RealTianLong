@@ -3,7 +3,8 @@
 [OUTPUT]: 对外提供 RLConfig、collect_demos()、behavior_clone()、evaluate()、train_ppo()、main()（python -m tianlong.learning.rl.train）
 [POS]: learning/rl 的训练与验收流水线：模仿学习初始化（脚本策略示范）→ PPO（同一策略网络被所有角色共享参数，但各自观测各自的认知）→
        留出种子上对照 随机 / 脚本 / 模仿 / PPO，并做“去掉世界模型预测特征”的消融，回答“每个组件究竟增加了什么”；
-       评测同时数“冤枉人”与“动手”两种手段；env_runners/gpus 让同一 CLI 在 Colab 上并行采样、GPU 学习
+       评测同时数“冤枉人”与“动手”两种手段；env_runners/gpus 让同一 CLI 在 Colab 上并行采样、GPU 学习；
+       示范者约 99% 时刻在等待，模仿学习按 bc_wait_share 平衡两类样本并单独报告非等待动作的准确率，否则会学成“永远等待”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -45,6 +46,7 @@ class RLConfig:
     predictor_path: str = ""
     entropy: float = 0.01          # PPO 熵正则：模仿学习后的策略很尖锐，探索不足时调高
     bc_smoothing: float = 0.0      # 模仿学习的标签平滑：避免初始策略过度确定、PPO 无从探索
+    bc_wait_share: float = 0.5     # 模仿学习里“等待”样本占的总权重：示范者 99% 时间在等，不平衡就学成永远等待
     env_runners: int = 0           # 并行采样进程数；0 = 在驱动进程里采样（小机器），Colab 上可设 2~8
     gpus: float = 0.0              # 学习器 GPU 数（Colab 设 1）
 
@@ -72,12 +74,19 @@ def collect_demos(env: TianlongEnv, episodes: int, seed: int) -> list[tuple[Obs,
 
 
 def behavior_clone(net: GraphPolicyNet, demos: list[tuple[Obs, int]], epochs: int, lr: float = 1e-3,
-                   seed: int = 0, smoothing: float = 0.0, log=print) -> None:
+                   seed: int = 0, smoothing: float = 0.0, wait_share: float | None = None, log=print) -> None:
+    """示范者绝大多数时刻在等待（程序化世界里约 99%），不加权的交叉熵会学成“永远等待”而准确率依旧 99%。
+    wait_share = 等待样本在损失里占的总权重（0.5 即两类平衡；None 为按原样本比例），按实际比例换算成每条的权重——
+    固定权重不行：非等待样本占比随场景从 1% 到 10% 不等。WAIT 永居候选首位（下标 0）；act_acc 单独报告非等待动作的准确率。"""
+    n_wait = sum(a == 0 for _, a in demos)
+    n_act = len(demos) - n_wait
+    wait_weight = 1.0 if wait_share is None or not n_wait or not n_act else \
+        wait_share / (1 - wait_share) * n_act / n_wait
     opt = torch.optim.AdamW(net.parameters(), lr=lr)
     rng = random.Random(seed)
     for epoch in range(epochs):
         rng.shuffle(demos)
-        total, correct, n = 0.0, 0, 0
+        total, correct, n, act_ok, act_n = 0.0, 0, 0, 0, 0
         for i in range(0, len(demos), 128):
             chunk = demos[i:i + 128]
             batch = _stack([o for o, _ in chunk])
@@ -89,16 +98,22 @@ def behavior_clone(net: GraphPolicyNet, demos: list[tuple[Obs, int]], epochs: in
                 soft = valid * (smoothing / valid.sum(-1, keepdim=True).clamp(min=1))
                 soft = soft.scatter_add(1, target.unsqueeze(1), torch.full_like(target, 1 - smoothing,
                                                                                  dtype=soft.dtype).unsqueeze(1))
-                loss = -(soft * torch.log_softmax(logits, -1).clamp(min=-1e4)).sum(-1).mean()
+                per = -(soft * torch.log_softmax(logits, -1).clamp(min=-1e4)).sum(-1)
             else:
-                loss = F.cross_entropy(logits, target)
+                per = F.cross_entropy(logits, target, reduction="none")
+            w = torch.where(target == 0, wait_weight, 1.0)
+            loss = (per * w).sum() / w.sum()
             opt.zero_grad()
             loss.backward()
             opt.step()
+            hit = logits.argmax(-1) == target
             total += float(loss) * len(chunk)
-            correct += int((logits.argmax(-1) == target).sum())
+            correct += int(hit.sum())
             n += len(chunk)
-        log(f"[bc {epoch + 1}] loss={total / n:.4f} acc={correct / n:.3f}")
+            act_ok += int(hit[target != 0].sum())
+            act_n += int((target != 0).sum())
+        act = f"{act_ok / act_n:.3f}" if act_n else "nan"
+        log(f"[bc {epoch + 1}] loss={total / n:.4f} acc={correct / n:.3f} act_acc={act} (非等待 {act_n})")
 
 
 # ============================================================
@@ -221,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     demos = collect_demos(env, cfg.demo_episodes, cfg.seed)
     print(f"[bc] demos={len(demos)}")
     bc = GraphPolicyNet(cfg.hidden)
-    behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing)
+    behavior_clone(bc, demos, cfg.bc_epochs, seed=cfg.seed, smoothing=cfg.bc_smoothing, wait_share=cfg.bc_wait_share)
     report["bc"] = evaluate(env, net_policy(bc), cfg.eval_episodes)
     print("[eval] bc", report["bc"])
 

@@ -1,11 +1,13 @@
 """
 [INPUT]: 依赖 tianlong.learning.rl 的 env / observation / rewards / module / train / policy，tianlong.scenarios
-[OUTPUT]: 强化学习层测试：观测合乎空间、掩码只屏蔽空位、奖励语义（进展/失败/冤枉人）、模仿学习可学、学得的策略接入决策图、PPO 冒烟
+[OUTPUT]: 强化学习层测试：观测合乎空间、掩码只屏蔽空位、奖励语义（进展/失败/冤枉人）、模仿学习可学且不被“几乎全是等待”的示范骗过、学得的策略接入决策图、PPO 冒烟
 [POS]: tests 的 RL 层；PPO 冒烟用例标记 slow（默认不跑，`pytest -m slow` 显式运行）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
+
+import re
 
 import numpy as np
 import pytest
@@ -59,12 +61,28 @@ def test_behavior_cloning_learns_expert():
     net = GraphPolicyNet(32)
     logs = []
     behavior_clone(net, demos, 4, log=logs.append)
-    acc = float(logs[-1].split("acc=")[1])
+    acc = float(re.search(r" acc=([\d.]+)", logs[-1]).group(1))
     assert acc > 0.8, logs
     m = evaluate(env, net_policy(net), 3)
     assert set(m) == {"mean_return", "return_ci95", "goal_rate", "goal_rate_ci95", "false_accusations_per_ep",
                       "attacks_per_ep"}
     assert m["return_ci95"][0] <= m["mean_return"] <= m["return_ci95"][1]
+
+
+def test_behavior_cloning_is_not_fooled_by_waiting():
+    """示范者几乎总在等待：不加权会学成“永远等待”而整体准确率照样很高；压低等待权重后必须学到非等待动作。"""
+    env = TianlongEnv({"horizon": 12})
+    demos = collect_demos(env, 40, seed=3)
+    assert sum(a == 0 for _, a in demos) / len(demos) > 0.9, "前提：示范几乎全是等待"
+
+    def act_acc(wait_share: float | None) -> float:
+        torch.manual_seed(0)
+        logs: list[str] = []
+        behavior_clone(GraphPolicyNet(32), list(demos), 6, seed=0, wait_share=wait_share, log=logs.append)
+        return float(re.search(r"act_acc=([\d.]+)", logs[-1]).group(1))
+
+    assert act_acc(None) == 0.0, "按原比例：一个非等待动作都学不到"
+    assert act_acc(0.5) > 0.5, "两类平衡后，大多数非等待示范被模仿出来"
 
 
 def test_learned_policy_plugs_into_npc_pipeline():
