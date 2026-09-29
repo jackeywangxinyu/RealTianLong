@@ -1,9 +1,10 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate，core 的 Op / Manner / Kind / Rel / Fact / Proposition / signature_error，
-         language/llm 的 LLMClient / LLMUnavailable / parse_json
-[OUTPUT]: 对外提供 Parsed（含等待时长）、IntentParser（规则优先、LLM 兜底、场景别称）、rule_parse()、normalize()
-[POS]: language 的输入解析；把玩家自由文本变成结构化候选行动。可引用的实体只来自玩家自己的认知图——
-       LLM 看不到、也无法指向玩家不认识的东西；解析结果仍要回到 kernel 结算，失败本身也是游戏内容
+         language/command 的 ACTION_WORDS / analyze / clarify / ParsedCommand / Mention，language/llm 的 LLMClient / LLMUnavailable / parse_json
+[OUTPUT]: 对外提供 Parsed（含语态结构与等待时长）、IntentParser（语态闸门 → 规则快路径 → 受约束的 LLM 语义解析）、rule_parse()、normalize()
+[POS]: language 的输入解析；把玩家自由文本变成结构化候选行动。先由 command.analyze() 判定语态：只有单一、肯定、即时的指令
+       才走规则快路径；否定、条件、转述、复合、疑问交给 LLM（它也必须声明语态与主体），仍不确定就追问、不推进时间。
+       LLM 失败时绝不回退到未经语义确认的候选。可引用的实体只来自玩家自己的认知图；解析结果仍要回到 kernel 结算
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -11,11 +12,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from tianlong.cognition import BeliefStore, Candidate
 from tianlong.core import Fact, Kind, Manner, Op, Proposition, Rel
 from tianlong.core.grammar import signature_error
+from tianlong.language.command import ACTION_WORDS, Mention, ParsedCommand, SpeechMode, analyze, clarify
 from tianlong.language.llm import LLMClient, LLMUnavailable, parse_json
 
 log = logging.getLogger(__name__)
@@ -29,28 +31,14 @@ class Parsed:
     source: str = "rules"
     repeat: int = 1                    # 等待的分钟数（“等一炷香”= 30）
     until: str | None = None           # 等到某个时刻（"night"）：会话层按时钟换算
+    command: ParsedCommand | None = None   # 语态结构：否定/条件/转述等非即时语态不会产生候选
 
 
 # ============================================================
-#  规则解析：关键词定操作，实体提及定角色
+#  规则解析：语态闸门之后，关键词定操作，实体提及定角色
 #  言语类最先判定（“告诉守卫我去港口”里的“去”不是移动）
 # ============================================================
 
-_OPS: list[tuple[Op, tuple[str, ...]]] = [
-    (Op.ASK, ("问", "打听", "ask")),
-    (Op.TELL, ("告诉", "说", "tell")),
-    (Op.UNLOCK, ("开锁", "解锁", "打开", "unlock")),
-    (Op.LOCK, ("锁上", "上锁", "lock")),
-    (Op.ATTACK, ("出手", "动手", "攻击", "偷袭", "一掌", "出招", "揍", "打", "attack")),
-    (Op.STUDY, ("研读", "修习", "参详", "参悟", "练", "读", "学", "study")),
-    (Op.USE, ("服下", "服用", "喂", "敷", "救", "用", "use")),
-    (Op.GIVE, ("交给", "递给", "给", "give")),
-    (Op.PUT, ("放", "藏", "put", "hide")),
-    (Op.TAKE, ("拿", "取", "捡", "偷", "揣", "拾", "抓", "take", "grab")),
-    (Op.INSPECT, ("查看", "检查", "搜", "看看", "环顾", "观察", "找找", "端详", "磕头", "叩首", "跪拜", "inspect", "search", "look")),
-    (Op.MOVE, ("去", "走", "前往", "进", "回", "到", "跳", "爬", "钻", "下", "go", "move")),
-    (Op.WAIT, ("等", "休息", "歇", "wait")),
-]
 # 等待时长（分钟）；“等到天黑”交给会话层按时钟换算
 _DURATIONS: tuple[tuple[str, int], ...] = (
     ("一个时辰", 120), ("半个时辰", 60), ("一炷香", 30), ("一盏茶", 15), ("一会", 10), ("片刻", 5),
@@ -73,32 +61,39 @@ def _aliases(name: str, kind: Kind) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _mentions(text: str, store: BeliefStore, extra: Mapping[str, tuple[str, ...]] | None = None
-              ) -> list[tuple[int, str, Kind]]:
+def _mentions(text: str, store: BeliefStore, extra: Mapping[str, tuple[str, ...]] | None = None) -> list[Mention]:
     """按出现位置排序的实体提及；同一位置取最长名字。“我/自己”指玩家自己。别称只对玩家认识的实体生效。"""
-    found: dict[int, tuple[int, str, Kind]] = {}
+    found: dict[int, Mention] = {}
     for eid, sk in store.entities.items():
         for alias in (*_aliases(sk.name, sk.kind), *((extra or {}).get(eid, ()))):
             start = text.find(alias)
             while start != -1:
                 prev = found.get(start)
-                if prev is None or len(alias) > prev[0]:
-                    found[start] = (len(alias), eid, sk.kind)
+                if prev is None or len(alias) > prev.length:
+                    found[start] = Mention(start, len(alias), eid, sk.kind)
                 start = text.find(alias, start + 1)
     for word in ("自己", "我"):
         if word in text:
-            found.setdefault(text.find(word), (len(word), store.owner, Kind.PERSON))
-    return [(pos, eid, kind) for pos, (_, eid, kind) in sorted(found.items())]
+            pos = text.find(word)
+            found.setdefault(pos, Mention(pos, len(word), store.owner, Kind.PERSON))
+    return [found[k] for k in sorted(found)]
 
 
 def rule_parse(text: str, store: BeliefStore, aliases: Mapping[str, tuple[str, ...]] | None = None) -> Parsed:
-    """按优先级尝试每个命中关键词的操作，返回第一个角色齐全的解析（“揣进兜里”的“进”不该赢过“揣”）。"""
+    """语态闸门：非即时语态不产生候选。即时指令按优先级尝试每个命中关键词的操作，返回第一个角色齐全的解析
+    （“揣进兜里”的“进”不该赢过“揣”）。"""
     t = text.strip().lower()
-    ops = [o for o, words in _OPS if any(w in t for w in words)]
+    ms = _mentions(t, store, aliases)
+    command = analyze(text, ms, store.owner)
+    ops = [o for o, words in ACTION_WORDS if any(w in t for w in words)]
     if not ops:
-        return Parsed(None, clarification="没听懂。试试：去后院 / 查看玉璧 / 问马五爷… / 出手 / 研读… / 等到天黑")
-    attempts = [_parse_as(op, text, t, store, aliases) for op in ops]
-    return next((p for p in attempts if p.candidate is not None), attempts[0])
+        return Parsed(None, clarification="没听懂。试试：去后院 / 查看玉璧 / 问马五爷… / 出手 / 研读… / 等到天黑",
+                      command=command)
+    if not command.immediate:
+        return Parsed(None, clarification=clarify(command), command=command)
+    attempts = [_parse_as(op, text, t, store, ms) for op in ops]
+    chosen = next((p for p in attempts if p.candidate is not None), attempts[0])
+    return replace(chosen, command=command)
 
 
 def _wait_length(t: str) -> tuple[int, str | None]:
@@ -110,18 +105,16 @@ def _wait_length(t: str) -> tuple[int, str | None]:
     return next((m for word, m in _DURATIONS if word in t), 1), None
 
 
-def _parse_as(op: Op, text: str, t: str, store: BeliefStore,
-              aliases: Mapping[str, tuple[str, ...]] | None = None) -> Parsed:
+def _parse_as(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention]) -> Parsed:
     manner = Manner.CAREFUL if any(w in t for w in _CAREFUL) else (
         Manner.ROUGH if any(w in t for w in _ROUGH) else Manner.NORMAL)
     me = store.owner
     here = store.location_of(me)
-    ms = _mentions(t, store, aliases)
 
     def first(*kinds: Kind, after: int = -1, exclude: tuple[str, ...] = ()) -> tuple[int, str] | None:
-        for pos, eid, kind in ms:
-            if pos > after and kind in kinds and eid not in exclude:
-                return pos, eid
+        for m in ms:
+            if m.pos > after and m.kind in kinds and m.eid not in exclude:
+                return m.pos, m.eid
         return None
 
     def pick(*kinds: Kind, **kw) -> str | None:
@@ -199,6 +192,9 @@ def _invalid(c: Candidate, store: BeliefStore) -> str | None:
 
 _SYSTEM = (
     "你是文字游戏的指令解析器。把玩家的中文输入解析成一个结构化行动。"
+    "先判断语态 mode：immediate=玩家此刻要亲自做的一件事；negated=否定（不做）；conditional=带条件、计划或斟酌；"
+    "narrative=叙述别人的举动或已经发生的事；quoted=行动只出现在引语里；compound=多件事；question=询问能否。"
+    "actor=行动主体：player=玩家本人，other=别人，unknown=说不清。只有 immediate 且 actor=player 才会被执行。"
     "只能引用实体表里的 id；做不到或意图不明就把 op 设为 unknown 并给出 clarification。"
     "target=行动直接作用的对象（拿的物品、去的地点、开的门、说话的对象、查看的东西）；"
     "obj=工具或被递交/放置的物品（开锁的钥匙、放下或交出的东西）；不适用的字段填 null。"
@@ -212,6 +208,8 @@ def _schema(ids: list[str]) -> dict:
     return {
         "type": "object",
         "properties": {
+            "mode": {"type": "string", "enum": [m.value for m in SpeechMode]},
+            "actor": {"type": "string", "enum": ["player", "other", "unknown"]},
             "op": {"type": "string", "enum": [o.value for o in Op] + ["unknown"]},
             "target": ref, "obj": ref, "topic_subject": ref, "topic_value": ref,
             "topic_holds": {"type": "boolean"},
@@ -219,7 +217,8 @@ def _schema(ids: list[str]) -> dict:
             "clarification": {"type": "string"},
         },
         # 角色字段全部 required（允许 null）：否则模型会干脆省略 target
-        "required": ["op", "target", "obj", "manner", "topic_subject", "topic_value", "topic_holds", "clarification"],
+        "required": ["mode", "actor", "op", "target", "obj", "manner", "topic_subject", "topic_value", "topic_holds",
+                     "clarification"],
     }
 
 
@@ -241,21 +240,30 @@ class IntentParser:
 
     def parse(self, text: str, store: BeliefStore) -> Parsed:
         ruled = rule_parse(text, store, self.aliases)
+        command = ruled.command
+        immediate = command is not None and command.immediate
         if self.llm is None or (ruled.candidate is not None and not self.prefer_llm):
             return ruled
         try:
-            return self._llm_parse(text, store) or ruled
+            got = self._llm_parse(text, store, command)
         except LLMUnavailable as e:
-            log.warning("LLM 解析不可用，回退规则: %s", e)
-            return ruled
+            log.warning("LLM 解析不可用: %s", e)
+            got = None
+        if got is not None:
+            return got
+        # 回退只允许经语态闸门确认过的即时解析；否定/条件/转述绝不因模型失败而被执行
+        return ruled if immediate else Parsed(None, clarification=ruled.clarification, source="rules",
+                                              command=command)
 
-    def _llm_parse(self, text: str, store: BeliefStore) -> Parsed | None:
+    def _llm_parse(self, text: str, store: BeliefStore, command: ParsedCommand | None) -> Parsed | None:
         assert self.llm is not None
         ids = sorted(store.entities)
         prompt = f"你是 {store.owner}。你认识的实体：\n{_table(store)}\n\n玩家输入：{text}"
         data = parse_json(self.llm.generate(prompt, system=_SYSTEM, schema=_schema(ids), temperature=0.0))
-        if data.get("op") in (None, "unknown"):
-            return Parsed(None, clarification=data.get("clarification") or "请说得具体一些。", source="llm")
+        mode = data.get("mode", SpeechMode.UNCLEAR.value)
+        if data.get("op") in (None, "unknown") or mode != SpeechMode.IMMEDIATE.value or data.get("actor") != "player":
+            fallback = clarify(command) if command is not None and not command.immediate else "请说得具体一些。"
+            return Parsed(None, clarification=data.get("clarification") or fallback, source="llm", command=command)
         known = set(ids)
 
         def ref(key: str) -> str | None:
@@ -268,7 +276,10 @@ class IntentParser:
             topic = Fact(Proposition.rel(subject, Rel.AT, ref("topic_value")), bool(data.get("topic_holds", True)))
         cand = normalize(Candidate(Op(data["op"]), ref("target"), ref("obj"), Manner(data.get("manner", "normal")), topic),
                          store)
+        if command is not None and cand.op in command.negated:
+            # 规则层看见了对这个行动的否定：模型说“照做”也不行
+            return Parsed(None, clarification=clarify(command), source="llm", command=command)
         if _invalid(cand, store):
             return None
         utterance = text.strip() if cand.op in (Op.TELL, Op.ASK) else None
-        return Parsed(cand, utterance, source="llm")
+        return Parsed(cand, utterance, source="llm", command=command)

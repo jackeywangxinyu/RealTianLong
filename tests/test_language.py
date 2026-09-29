@@ -73,14 +73,16 @@ def test_rule_parse_speech_and_negation(player_store):
 def test_unknown_entities_cannot_be_referenced(player_store):
     # 玩家不认识账簿：规则解析与 LLM 解析都不能指向它
     assert rule_parse("拿账簿", player_store).candidate is None
-    llm = FakeLLM(json.dumps({"op": "take", "target": "ledger", "obj": None, "manner": "normal",
+    llm = FakeLLM(json.dumps({"mode": "immediate", "actor": "player", "op": "take", "target": "ledger", "obj": None,
+                              "manner": "normal",
                               "topic_subject": None, "topic_value": None, "topic_holds": True, "clarification": ""}))
     parsed = IntentParser(llm).parse("拿账簿", player_store)
     assert parsed.candidate is None and llm.calls
 
 
 def test_llm_consulted_only_when_rules_fail(player_store):
-    llm = FakeLLM(json.dumps({"op": "take", "target": "key", "obj": None, "manner": "careful",
+    llm = FakeLLM(json.dumps({"mode": "immediate", "actor": "player", "op": "take", "target": "key", "obj": None,
+                              "manner": "careful",
                               "topic_subject": None, "topic_value": None, "topic_holds": True, "clarification": ""}))
     p = IntentParser(llm)
     assert p.parse("拿钥匙", player_store).source == "rules" and not llm.calls
