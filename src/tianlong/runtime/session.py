@@ -1,18 +1,25 @@
 """
 [INPUT]: 依赖 runtime/authority 的 WorldAuthority / Settlement，runtime/versions 的 current_versions / check_save，
+         runtime/gm 的主持层纯函数（gm_command / salient / build_brief / self_view / goal_text / aside_prompt / closing_prompt / leaks / reveal），
          agents 的 Orchestrator / NpcContext / AgentPort / Scheduler / Policy / OutcomePredictor，
-         memory 的 QdrantMemoryIndex / Recall / MemoryIndexer / MemoryScope，language 的 IntentParser / Narrator / Speaker / LLMClient，
+         memory 的 QdrantMemoryIndex / Recall / MemoryIndexer / MemoryScope，language 的 IntentParser / MoveKind / Parsed / Narrator /
+         TemplateSpeaker / LLMClient / LLMUnavailable，language/scene 的 SceneBrief / TextSink，
          language/render 的 Rendered / RenderStatus，persistence 的 WorldStore / InMemoryWorldStore / WorldRef / TurnEnvelope /
-         RequestConflict / VersionConflict，scenarios 的 Scenario，cognition 的 Candidate / believed_place，
-         language/templates 的 render_fact（读档开场），memory/view 的 MemoryView（NPC 的长期记忆摘要，增量汇总——水位含边界、按记录 ID 去重，与读档后重建逐项相同）
-[OUTPUT]: 对外提供 GameSession（可玩会话：读档接续并恢复调度标记与已描写实体、请求幂等、存档版本闸门）、
-          TurnReport（一回合的全部产物：世界侧结果与文字侧结果分开记录，含分阶段耗时）
-[POS]: runtime 的装配中心：一回合 = 解析玩家输入 → 基于同一版本扇出 NPC 决策 → 权威结算（同一事务附上请求进度与会话运行态）
-       → 同步记忆索引 → 按玩家视角叙述（过语义闸门）→ 幂等记下叙述。
+         RequestConflict / VersionConflict，scenarios 的 Scenario / Ending，cognition 的 Candidate / believed_place，
+         language/templates 的 render_fact，memory/view 的 MemoryView（NPC 的长期记忆摘要，增量汇总——水位含边界、按记录 ID 去重，与读档后重建逐项相同）
+[OUTPUT]: 对外提供 GameSession（可玩会话：turn() 一回合、intro()/epilogue() 开场与终章、belief_lines() 玩家自己的认知；
+          读档接续并恢复调度标记、已描写实体、最近几段正文与提示进度；请求幂等、存档版本闸门）、
+          TurnReport（一回合的全部产物：世界侧与文字侧分开记录，含这句话的类别、结局、首字耗时、分阶段耗时与叙述上下文）
+[POS]: runtime 的装配中心（主持层的回合循环）：一回合 = 解释玩家输入（后台同时算好本 tick 的 NPC 决策）→ 按类别推进：
+       ACT 走 1~3 步计划（失败即止）、SAY/GESTURE 与冲着在场之人的行动再加一个反应 tick、普通等待按时长且只被要紧的事打断、
+       ASK_GM/META 不推进时间也不落库 → 权威结算（同一事务附上请求进度与会话运行态）→ 同步记忆索引 →
+       主持人之声据玩家感知与 SceneBrief 流式叙述（过语义闸门）→ 幂等记下叙述 → 抵达结局地点即落幕。
+       后台预算的决策只依赖同一版本；首 tick 时版本未变才用，否则或本回合不推进就丢弃——结果与顺序执行逐项相同。
        带 request_id 的请求：同 ID 同内容返回既有结果、不再结算；同 ID 异内容抛 RequestConflict；提交后崩溃的重试只重写文字，
-       多 tick 等待中途崩溃的重试只走剩下的 tick。请求绑定由存储在提交内检查（查询与结算之间没有可钻的空隙）：
-       并发的重复投递只有一次能提交某个 tick，被越过的一方即停、不多走一个 tick，以落库的那一份为准返回，
+       多 tick 请求（等待、多步计划、反应 tick）中途崩溃的重试由已提交的 tick 数推出剩下的步骤，只走剩下的 tick。
+       请求绑定由存储在提交内检查：并发的重复投递只有一次能提交某个 tick，被越过的一方即停、以落库的那一份为准返回，
        对方尚未走完时只给出目前为止的文字、不落库。建档后尚无提交就读档，开场已描写的实体按开场规则补回。
+       NPC 决策图里从不调模型（台词由主持人之声一并写出），向量回忆只为声明 reads_memories 的策略而跑。
        CLI、测试、未来的 Web 前端都只和它打交道
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -21,6 +28,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Mapping
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 
 from tianlong.agents.npc_graph import NpcContext
@@ -35,20 +43,24 @@ from tianlong.core import (
     Event,
     Fact,
     Intent,
+    Kind,
     Modality,
     Op,
+    Outcome,
     Percept,
     Rel,
+    WorldState,
     clock_label,
     digest,
     make_id,
     minutes_until_night,
 )
-from tianlong.language.llm import LLMClient
+from tianlong.language.llm import LLMClient, LLMUnavailable
 from tianlong.language.narrator import Narrator, lore_keys
-from tianlong.language.parser import IntentParser, Parsed
+from tianlong.language.parser import IntentParser, MoveKind, Parsed
 from tianlong.language.render import Rendered, RenderStatus
-from tianlong.language.speaker import LLMSpeaker, Speaker, TemplateSpeaker
+from tianlong.language.scene import SceneBrief, TextSink
+from tianlong.language.speaker import Speaker, TemplateSpeaker
 from tianlong.language.templates import render_fact
 from tianlong.memory.index import MemoryIndex, MemoryScope, QdrantMemoryIndex
 from tianlong.memory.indexer import MemoryIndexer
@@ -62,9 +74,10 @@ from tianlong.persistence import (
     WorldRef,
     WorldStore,
 )
+from tianlong.runtime import gm
 from tianlong.runtime.authority import Settlement, WorldAuthority
 from tianlong.runtime.versions import check_save, current_versions
-from tianlong.scenarios import Scenario
+from tianlong.scenarios import Ending, Scenario
 
 
 @dataclass(frozen=True)
@@ -72,17 +85,24 @@ class TurnReport:
     clock: str
     parsed: Parsed
     narration: str
-    advanced: bool                                    # False：输入没解析成行动，时间未推进
+    advanced: bool                                    # False：时间未推进（没解析成行动、场外问答、元指令、已落幕）
     events: tuple[Event, ...] = ()                    # 真相（调试用，不给玩家看）
     deliberations: tuple[Deliberation, ...] = ()      # NPC 的决策理由（调试用）
     settlement: Settlement | None = field(default=None, repr=False)
-    timings: dict[str, float] = field(default_factory=dict)  # 各阶段耗时（毫秒）：系统成本可观测
+    timings: dict[str, float] = field(default_factory=dict)  # 各阶段耗时（毫秒）：interpret / npc_decide / settle / index / narrate
     render: Rendered | None = None                    # 文字侧结果（来源 + 闸门结论）；None = 叙述取自已落库的结果
     request_id: str | None = None
     replayed: bool = False                            # True：本次调用没有推进世界，只返回（或补写文字）既有请求的结果
+    kind: MoveKind = MoveKind.ACT                     # 这句话的类别（行动/说话/姿态/问主持人/元指令/听不懂）
+    ending: Ending | None = None                      # 本幕已落幕（玩家据世界真相身处结局地点）
+    first_text_ms: float | None = None                # 回车到第一段文字交付的毫秒数；None = 没有交付任何文字
+    brief: SceneBrief | None = field(default=None, repr=False)   # 交给叙述者的上下文（要说出口的话、最近正文、玩家原话）
 
 
-MAX_WAIT = 240   # 一次最多等四个时辰（240 分钟）
+MAX_WAIT = 240       # 一次最多等四个时辰（240 分钟）
+RECENT_KEEP = 3      # 最近几段正文：随会话运行态落库，交给叙述者与解释器接续上下文
+ENDED = "第一幕已终。可以输入 /recap 回顾，或重新开始一局。"
+_ENGAGE = frozenset({Op.ATTACK, Op.GIVE, Op.USE, Op.TELL, Op.ASK})
 
 
 def _last(env: TurnEnvelope) -> int:
@@ -106,15 +126,55 @@ def _compact(percepts: tuple[Percept, ...]) -> tuple[Percept, ...]:
     return tuple(p for i, p in enumerate(percepts) if p.modality != Modality.SCENE or i == last)
 
 
+def _interruptible(env: TurnEnvelope) -> bool:
+    """只有普通等待（不带计划、不带反应 tick）会被身边的事打断；计划的步骤与反应 tick 从不被截短。"""
+    return env.intent.op == Op.WAIT and not env.followups and not env.reaction
+
+
 class _Stopwatch:
     def __init__(self) -> None:
-        self._t = time.perf_counter()
+        self.start = self._t = time.perf_counter()
         self.laps: dict[str, float] = {}
 
     def lap(self, name: str) -> None:
         now = time.perf_counter()
         self.laps[name] = round(self.laps.get(name, 0.0) + (now - self._t) * 1000, 1)   # 多 tick 时累加
         self._t = now
+
+
+class _Sink:
+    """流式交付：记下第一段文字到达的时刻（回车到首字），再转交前端。"""
+
+    def __init__(self, on_text: TextSink | None, start: float) -> None:
+        self.on_text = on_text
+        self.start = start
+        self.first_ms: float | None = None
+
+    def __call__(self, text: str) -> None:
+        if not text:
+            return
+        if self.first_ms is None:
+            self.first_ms = round((time.perf_counter() - self.start) * 1000, 1)
+        if self.on_text is not None:
+            self.on_text(text)
+
+
+@dataclass
+class _Ahead:
+    """解释玩家输入期间在后台算好的首 tick NPC 决策：(例行等待者, 决策)，只依赖 version 这一个版本。"""
+
+    version: int
+    future: Future
+
+    def take(self, version: int) -> tuple[list[str], list[Deliberation]] | None:
+        """等后台算完（本回合的任何写入之前后台必已收手）；版本变了就丢弃，由调用方按新版本重算。"""
+        try:
+            got = self.future.result()
+        except Exception:
+            if version == self.version:
+                raise                              # 与顺序执行一样抛出
+            return None
+        return got if version == self.version else None
 
 
 class GameSession:
@@ -129,7 +189,11 @@ class GameSession:
         predictor: OutcomePredictor | None = None,
         max_candidates: int = 64,
         allow_migration: bool = False,
+        interpreter=None,
+        pipeline: bool = True,
     ) -> None:
+        """llm 是主持人之声（叙述、场外问答、终章）；interpreter 是主持层解释器（interpret(text, me, recent) → Parsed），
+        None 时用规则解析器；pipeline=False 关掉“解释时后台预算 NPC 决策”（与之逐项相同，只是慢一些）。"""
         if scenario.player is None:
             raise ValueError("场景没有玩家角色")
         self.scenario = scenario
@@ -162,17 +226,24 @@ class GameSession:
         # 会话运行态随每次提交落库，读档原样恢复：否则读档那一刻所有 NPC 都“该决策了”，初见描写也会重来一遍
         self.scheduler = Scheduler()
         self._described: set[str] = set()   # 已向玩家描写过外观的实体：只在初见时描写
+        self._recent: list[str] = []        # 最近几段正文（派生数据：叙述之后更新，随下一次提交落库）
+        self._hint = 0                      # 已给出的逐级提示条数
         self._restore(session_state)
+        self.llm = llm
+        self.interpreter = interpreter
+        self.pipeline = pipeline
         self.parser = IntentParser(llm, aliases=scenario.aliases)
         self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style, scenario.aliases)
         self._universe = frozenset(e.name for e in scenario.state.entities.values())  # 闸门拒绝用的名字全集
-        self.speaker: Speaker = (LLMSpeaker(llm, universe=self._universe, aliases=scenario.aliases) if llm
-                                 else TemplateSpeaker())
+        self.speaker: Speaker = TemplateSpeaker()     # 决策图里从不调模型：NPC 的台词由主持人之声一并写出
         # 长期记忆摘要的增量缓存（派生数据）：(水位 tick, 水位 tick 上已并入的记录 ID, 摘要)
         self._memory_views: dict[str, tuple[int, frozenset[str], MemoryView]] = {}
         self.policies = dict(policies or {})
         self.predictor = predictor or HeuristicPredictor()
         self.max_candidates = max_candidates   # 学得的策略按训练时的候选上限看世界
+        self._pool: ThreadPoolExecutor | None = None
+        self._ahead: _Ahead | None = None
+        self.ending: Ending | None = self._ended()    # 读档时落幕与否同样由世界真相推出
 
     # ------------------------------------------------------------
     #  读
@@ -189,14 +260,20 @@ class GameSession:
         return clock_label(self.authority.head().clock)
 
     def session_state(self) -> dict:
-        """会话运行态：随每次世界提交一起落库的那一份（调度标记 + 已描写实体）。"""
-        return {"scheduler": self.scheduler.to_state(), "described": sorted(self._described)}
+        """会话运行态：随每次世界提交一起落库的那一份（调度标记 + 已描写实体 + 最近几段正文 + 提示进度）。"""
+        return self._state(self.scheduler, self._described)
+
+    def _state(self, sched: Scheduler, described: set[str]) -> dict:
+        return {"scheduler": sched.to_state(), "described": sorted(described), "recent": list(self._recent),
+                "hint": self._hint}
 
     def _restore(self, state: Mapping | None) -> None:
         """会话运行态以落库的那一份为准：读档时，以及一次请求被同一请求的另一次投递越过之后。"""
         state = state or {}
         self.scheduler = Scheduler.from_state(state.get("scheduler", {}), self.scheduler.idle_interval)
         self._described = set(state.get("described", ()))
+        self._recent = [str(x) for x in state.get("recent", ())][-RECENT_KEEP:]
+        self._hint = int(state.get("hint", 0))
 
     def _opening_keys(self) -> list[str]:
         """开场讲的初始认知里应当描写外观的实体：新游戏的 intro() 描写它们，建档后尚无提交就读档时据此补回“已描写”。"""
@@ -224,74 +301,128 @@ class GameSession:
         where = me.sketch(here).name if here and me.sketch(here) else "某处"
         return f"（读档）你在{where}。" + ("；".join(around) if around else "")
 
+    def belief_lines(self) -> list[str]:
+        """玩家自己的认知（/beliefs）：亲见与传闻分开标注——是他以为的，不是世界真相。"""
+        me = self.beliefs(self.player)
+        return [f"  [{'传闻' if b.hearsay else '亲见'} {b.confidence:.1f}] "
+                f"{render_fact(Fact(b.prop, b.holds), me.entities, self.player)}"
+                for b in me.sorted_beliefs() if not b.prop.is_attr or b.holds]
+
     # ------------------------------------------------------------
     #  一回合
     # ------------------------------------------------------------
 
-    def turn(self, text: str, request_id: str | None = None) -> TurnReport:
-        """request_id 为 None 时行为与从前一致；给出时，请求以 request_id + 原文摘要绑定，重试不会二次结算。"""
+    def turn(self, text: str, request_id: str | None = None, on_text: TextSink | None = None) -> TurnReport:
+        """request_id 为 None 时每次都推进；给出时，请求以 request_id + 原文摘要绑定，重试不会二次结算。
+        on_text 收到每一段交付给玩家的文字（流式）；TurnReport.first_text_ms 记下回车到首字的时间。"""
         clock = _Stopwatch()
+        sink = _Sink(on_text, clock.start)
+        self._settle_background()
         payload = digest("turn", text)
         if request_id is not None:
             prior = self.store.request(self.ref, request_id)
             if prior is not None:
-                return self._resume_request(_bound(prior, payload), text, clock)
+                return self._resume_request(_bound(prior, payload), text, clock, sink)
         head = self.authority.head()
         me = self.beliefs(self.player)
-        parsed = self.parser.parse(text, me)
-        clock.lap("parse")
-        if parsed.candidate is None:
-            render = Rendered(parsed.clarification or "……", RenderStatus.TEMPLATE)
-            return TurnReport(clock_label(head.clock), parsed, render.text, advanced=False, timings=clock.laps,
-                              render=render, request_id=request_id)
-        intent = parsed.candidate.to_intent(self._intent_id(self.player, head.version), self.player, head.version,
-                                            parsed.utterance)
-        env = TurnEnvelope(request_id or "", payload, intent, self._ticks_for(parsed, head.clock), head.version,
-                           head.clock, source=parsed.source)
-        env, events, deliberations, settlement = self._advance(env, clock, persist=request_id is not None)
+        ahead = self._look_ahead(head) if self.ending is None else None
+        parsed = self._parse(text, me)
+        clock.lap("interpret")
+        if (parsed.kind in (MoveKind.ASK_GM, MoveKind.META) or parsed.candidate is None
+                or self.ending is not None):
+            return self._aside(parsed, head, me, clock, sink, request_id)     # 后台的决策随之作废：它不写任何东西
+        steps, planned, reaction = self._plan(parsed, me, head.clock)
+        slot = next((i for i, c in enumerate(steps) if c.op in (Op.TELL, Op.ASK, Op.WAIT)), 0)   # 原话归属的那一步
+        plan = [c.to_intent(self._intent_id(self.player, head.version), self.player, head.version,
+                            parsed.utterance if i == slot else None) for i, c in enumerate(steps)]
+        env = TurnEnvelope(request_id or "", payload, plan[0], planned, head.version, head.clock,
+                           source=parsed.source, followups=tuple(plan[1:]), reaction=reaction)
+        env, events, deliberations, settlement = self._advance(env, clock, request_id is not None, ahead)
         if not env.done:
             # 被越过：同一请求的另一次投递抢先推进了世界——以落库的那一份为准，本次不再多走
             stored = self.store.request(self.ref, env.request_id)
-            return self._resume_request(_bound(stored, payload), text, clock, execute=False,
+            return self._resume_request(_bound(stored, payload), text, clock, sink, execute=False,
                                         committed=settlement is not None)
-        render = self._render(env, text, clock)
+        render, brief = self._render(env, text, clock, sink)
         if request_id is not None:
             self.store.record_render(self.ref, request_id, render.text)
-        return TurnReport(clock_label(head.clock), parsed, render.text, True, tuple(events),
-                          tuple(deliberations), settlement, clock.laps, render, request_id)
+        self._remember(render.text)
+        return TurnReport(clock_label(head.clock), parsed, render.text, True, tuple(events), tuple(deliberations),
+                          settlement, clock.laps, render, request_id, kind=parsed.kind, ending=self._reach_ending(),
+                          first_text_ms=sink.first_ms, brief=brief)
 
-    def _resume_request(self, env: TurnEnvelope, text: str, clock: _Stopwatch, execute: bool = True,
+    def _parse(self, text: str, me: BeliefStore) -> Parsed:
+        """解释玩家输入：有主持层解释器就用它（带上最近几段正文消解“她/那人”），否则用规则解析器。换解释器只改这一处。"""
+        if self.interpreter is not None:
+            return self.interpreter.interpret(text, me, tuple(self._recent))
+        return gm.gm_command(text) or self.parser.parse(text, me)
+
+    def _plan(self, parsed: Parsed, me: BeliefStore, now: int) -> tuple[tuple[Candidate, ...], int, bool]:
+        """(计划步骤, 计划 tick 数, 是否追加反应 tick)。普通等待照旧按时长；其余按计划的步数，
+        对人说了话、做了姿态、或冲着（玩家以为）在场的人动手/递物/施用/说话，再加一个反应 tick 让在场的人当场回应。"""
+        assert parsed.candidate is not None
+        steps = (parsed.candidate, *parsed.followups)
+        if parsed.kind != MoveKind.GESTURE and len(steps) == 1 and steps[0].op == Op.WAIT:
+            return steps, self._ticks_for(parsed, now), False
+        here = believed_place(me, self.player)
+
+        def engages(c: Candidate) -> bool:
+            sk = me.sketch(c.target) if c.target and c.target != self.player else None
+            return (c.op in _ENGAGE and sk is not None and sk.kind == Kind.PERSON and here is not None
+                    and believed_place(me, sk.id) == here)
+
+        reaction = parsed.kind in (MoveKind.SAY, MoveKind.GESTURE) or any(engages(c) for c in steps)
+        return steps, len(steps) + reaction, reaction
+
+    def _ticks_for(self, parsed: Parsed, now: int) -> int:
+        wanted = minutes_until_night(now) if parsed.until == "night" else parsed.repeat
+        return max(1, min(wanted, MAX_WAIT))
+
+    def _resume_request(self, env: TurnEnvelope, text: str, clock: _Stopwatch, sink: _Sink, execute: bool = True,
                         committed: bool = False) -> TurnReport:
         """既有请求：世界侧没走完且没人越过它就只走剩下的 tick；文字没落库就按已持久化的感知重写；否则原样返回。
         execute=False：本次执行已被同一请求的另一次投递越过，只以落库的那一份为准、不再推进世界；
         那一份若还没走完（对方仍在进行），先给出目前为止的文字但不落库——终稿由走完它的那一方写。
         committed：本次调用在被越过之前是否已提交过 tick（决定 replayed）。"""
-        parsed = Parsed(Candidate.of(env.intent), env.intent.utterance, source=env.source, repeat=env.planned_ticks)
+        parsed = self._parsed_of(env)
         deliberations: list[Deliberation] = []
         settlement = None
         stuck = False
         if execute and not env.done:
             env, version = self._progress(env.request_id)
             if not env.done and version == _last(env):
-                env, _, deliberations, settlement = self._advance(env, clock, persist=True)
+                env, _, deliberations, settlement = self._advance(env, clock, True)
                 if not env.done:                    # 续跑途中又被另一次投递越过
                     env = _bound(self.store.request(self.ref, env.request_id), env.payload_hash)
             else:
                 stuck = not env.done                # 别的写入者越过了它：这个请求再也走不完，按已走的 tick 定稿
-        render = None
+        render = brief = None
         narration = env.narration
         if narration is None or settlement is not None:
-            render = self._render(env, text, clock)
+            render, brief = self._render(env, text, clock, sink)
             narration = render.text
             if env.done or stuck:
                 self.store.record_render(self.ref, env.request_id, render.text)
                 stored = self.store.request(self.ref, env.request_id)   # 先写者为准：返回的一定是已落库的那一份
                 narration = stored.narration if stored and stored.narration else render.text
+                self._remember(narration)
+        else:
+            sink(narration)
         wanted = {v - 1 for v in env.versions}       # 本请求各 tick 的意图都基于提交前的那个版本
         events = tuple(e for e in self.store.events(self.ref) if e.intent.based_on in wanted)
         return TurnReport(clock_label(env.start_clock), parsed, narration, True, events, tuple(deliberations),
                           settlement, clock.laps, render, env.request_id,
-                          replayed=not (committed or settlement is not None))
+                          replayed=not (committed or settlement is not None), kind=parsed.kind,
+                          ending=self._reach_ending(), first_text_ms=sink.first_ms, brief=brief)
+
+    @staticmethod
+    def _parsed_of(env: TurnEnvelope) -> Parsed:
+        """已落库的请求还原成解析结果（续跑与重放的报告用）：类别由计划推出。"""
+        it = env.intent
+        kind = (MoveKind.GESTURE if it.op == Op.WAIT and it.utterance and env.reaction
+                else MoveKind.SAY if it.op in (Op.TELL, Op.ASK) and not env.followups else MoveKind.ACT)
+        return Parsed(Candidate.of(it), it.utterance, source=env.source, repeat=env.planned_ticks, kind=kind,
+                      followups=tuple(Candidate.of(f) for f in env.followups))
 
     def _progress(self, request_id: str) -> tuple[TurnEnvelope, int]:
         """请求进度与世界版本的一致快照：前后两次读到同一份进度，夹在中间读到的版本才与它相符
@@ -304,9 +435,10 @@ class GameSession:
                 return again, version
             env = again
 
-    def _advance(self, env: TurnEnvelope, clock: _Stopwatch,
-                 persist: bool) -> tuple[TurnEnvelope, list[Event], list[Deliberation], Settlement | None]:
-        """一次输入可能跨越多个 tick（“等到天黑”），身边一有动静就停下；每个 tick 的进度与世界同一事务落库。
+    def _advance(self, env: TurnEnvelope, clock: _Stopwatch, persist: bool, ahead: _Ahead | None = None,
+                 ) -> tuple[TurnEnvelope, list[Event], list[Deliberation], Settlement | None]:
+        """一次输入可能跨越多个 tick（多步计划、反应 tick、“等到天黑”）；每个 tick 的进度与世界同一事务落库。
+        第 i 个 tick 走计划的第 i 步——由已提交的 tick 数推出，崩溃后的续跑因此接在正确的一步上。
         带请求时被越过即停、不再多走：世界已不在本请求最后提交的版本上，或这一 tick 的提交被拒（同一请求的另一次投递抢先）。
         此时返回的进度未完结，内存里的会话运行态改回落库的那一份，调用方以落库的请求进度为准。"""
         events: list[Event] = []
@@ -316,46 +448,56 @@ class GameSession:
             now = self.authority.head()
             if persist and env.versions and now.version != env.versions[-1]:
                 break
-            intent = replace(env.intent, id=self._intent_id(self.player, now.version), based_on=now.version)
             try:
-                settlement, delibs, env = self._tick(intent, env, clock, persist)
+                settlement, delibs, env = self._tick(self._step(env, now.version), env, clock, persist, ahead)
             except (VersionConflict, RequestConflict):
                 if not persist or self.store.request(self.ref, env.request_id) is None:
                     raise                            # 与本请求无关的写入者抢先：原样抛出
                 break
+            ahead = None                             # 后台只预算首 tick
             events += settlement.events
             deliberations += delibs
         if not env.done:
             self._restore(self.store.session_state(self.ref))
         return env, events, deliberations, settlement
 
-    def _render(self, env: TurnEnvelope, text: str, clock: _Stopwatch) -> Rendered:
-        """只依据已持久化的请求进度渲染：提交后崩溃的重试写出的是同一回合的文字。"""
+    def _step(self, env: TurnEnvelope, version: int) -> Intent:
+        """第 len(versions) 个 tick 的玩家意图：计划之内取对应的一步，计划走完之后原地等待（反应 tick、多 tick 等待）。"""
+        plan = (env.intent, *env.followups)
+        i = len(env.versions)
+        base = plan[i] if i < len(plan) else (replace(env.intent, utterance=None, social=None)
+                                              if env.intent.op == Op.WAIT else Intent("", self.player, Op.WAIT))
+        return replace(base, id=self._intent_id(self.player, version), based_on=version)
+
+    def _render(self, env: TurnEnvelope, text: str, clock: _Stopwatch, sink: _Sink) -> tuple[Rendered, SceneBrief]:
+        """只依据已持久化的请求进度（加此刻各人的认知）渲染：提交后崩溃的重试写出的是同一回合的文字。
+        叙述者有 narrate_scene（主持人之声）就交给它流式写，否则一次写完再交付。"""
         me = self.beliefs(self.player)
-        lapse = clock_label(env.ticks[-1]) if env.planned_ticks > 1 and env.ticks else ""
-        render = self.narrator.narrate_rendered(self.player, env.percepts, me.entities, fresh=env.fresh, command=text,
-                                                lapse=lapse, known=self._known(me))
+        lapse = clock_label(env.ticks[-1]) if _interruptible(env) and env.planned_ticks > 1 and env.ticks else ""
+        brief = gm.build_brief(env, me, self.scenario, self.beliefs, self._recent)
+        scene = getattr(self.narrator, "narrate_scene", None)
+        if scene is not None:
+            render = scene(self.player, env.percepts, me.entities, brief=brief, fresh=env.fresh, command=text,
+                           lapse=lapse, known=self._known(me), on_text=sink)
+        else:
+            render = self.narrator.narrate_rendered(self.player, env.percepts, me.entities, fresh=env.fresh,
+                                                    command=text, lapse=lapse, known=self._known(me))
+            sink(render.text)
         clock.lap("narrate")
-        return render
+        return render, brief
+
+    def _remember(self, narration: str) -> None:
+        """最近几段正文：叙述写成之后更新（派生数据），随下一次提交落库。"""
+        self._recent = [*self._recent, narration][-RECENT_KEEP:]
 
     def _intent_id(self, agent: str, version: int) -> str:
         return make_id("int", self.ref.world_id, self.ref.branch_id, agent, version)
 
-    def _ticks_for(self, parsed: Parsed, now: int) -> int:
-        if parsed.candidate is None or parsed.candidate.op != Op.WAIT:
-            return 1
-        wanted = minutes_until_night(now) if parsed.until == "night" else parsed.repeat
-        return max(1, min(wanted, MAX_WAIT))
-
-    def _interrupted(self, percepts: tuple[Percept, ...]) -> bool:
-        """有人在身边做了什么、说了什么、或传来响动——等待就此打住，让玩家决定。"""
-        return any(p.event is not None and p.event.actor != self.player for p in percepts)
-
-    def _tick(self, player_intent: Intent, env: TurnEnvelope, clock: _Stopwatch,
-              persist: bool) -> tuple[Settlement, list[Deliberation], TurnEnvelope]:
+    def _tick(self, player_intent: Intent, env: TurnEnvelope, clock: _Stopwatch, persist: bool,
+              ahead: _Ahead | None = None) -> tuple[Settlement, list[Deliberation], TurnEnvelope]:
         head = self.authority.head()
-        due, routine = self._npc_split(head.clock)
-        deliberations = self.orchestrator.decide(self._contexts(due, head.version, head.clock))
+        got = ahead.take(head.version) if ahead is not None else None
+        routine, deliberations = got if got is not None else self._decide(head)
         clock.lap("npc_decide")
         intents = [player_intent, *(d.intent for d in deliberations)]
         intents += [Intent(self._intent_id(a, head.version), a, Op.WAIT, based_on=head.version) for a in routine]
@@ -368,12 +510,19 @@ class GameSession:
         def annotate(s: Settlement) -> tuple[TurnEnvelope | None, dict]:
             mine = tuple(o.percept for o in s.observations_of(self.player))
             fresh = tuple(k for k in lore_keys(self.player, mine, self.narrator.lore) if k not in self._described)
-            done = len(env.versions) + 1 >= env.planned_ticks or self._interrupted(mine)
-            progressed = replace(env, versions=(*env.versions, s.state.version), ticks=(*env.ticks, s.state.clock),
+            n = len(env.versions) + 1
+            plan = env
+            failed = any(e.intent.id == player_intent.id and e.outcome != Outcome.SUCCESS for e in s.events)
+            if failed and n <= len(env.followups):
+                # 计划中的一步落空：后面的步骤不再走，反应 tick 照旧；截短的计划随这一 tick 落库，续跑据此只走剩下的
+                plan = replace(env, followups=env.followups[:n - 1], planned_ticks=n + env.reaction)
+            done = n >= plan.planned_ticks or (_interruptible(env) and gm.salient(
+                mine, self.player, self.scenario.profiles[self.player].allies, s.state.target(self.player, Rel.AT)))
+            progressed = replace(plan, versions=(*env.versions, s.state.version), ticks=(*env.ticks, s.state.clock),
                                  percepts=_compact(env.percepts + mine), fresh=env.fresh + fresh, done=done)
             described = self._described | set(fresh)
             after.update(env=progressed, described=described)
-            return (progressed if persist else None), {"scheduler": sched.to_state(), "described": sorted(described)}
+            return (progressed if persist else None), self._state(sched, described)
 
         settlement = self.authority.settle(intents, annotate)
         if "env" not in after:
@@ -385,6 +534,123 @@ class GameSession:
         self.indexer.drain()
         clock.lap("index")
         return settlement, deliberations, after["env"]
+
+    # ------------------------------------------------------------
+    #  后台预算：解释玩家输入的同时算好首 tick 的 NPC 决策（纯计算，不写存储）
+    # ------------------------------------------------------------
+
+    def _decide(self, head: WorldState) -> tuple[list[str], list[Deliberation]]:
+        due, routine = self._npc_split(head.clock)
+        return routine, self.orchestrator.decide(self._contexts(due, head.version, head.clock))
+
+    def _look_ahead(self, head: WorldState) -> _Ahead | None:
+        if not self.pipeline:
+            return None
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="npc-ahead")
+        self._ahead = _Ahead(head.version, self._pool.submit(self._decide, head))
+        return self._ahead
+
+    def _settle_background(self) -> None:
+        """上一回合作废的预算若还在跑，先等它收手：后台与本回合的写入从不重叠。"""
+        if self._ahead is not None:
+            wait((self._ahead.future,))              # 作废的预算：结果与异常一并丢弃
+            self._ahead = None
+
+    # ------------------------------------------------------------
+    #  不推进时间的回合：场外问答、元指令、追问、落幕之后
+    # ------------------------------------------------------------
+
+    def _aside(self, parsed: Parsed, head: WorldState, me: BeliefStore, clock: _Stopwatch, sink: _Sink,
+               request_id: str | None) -> TurnReport:
+        """不推进时间、不落库：后台预算的决策作废（它从不写任何东西）。"""
+        if self.ending is not None and parsed.kind not in (MoveKind.ASK_GM, MoveKind.META):
+            render = Rendered(ENDED, RenderStatus.TEMPLATE)
+        elif parsed.kind == MoveKind.ASK_GM:
+            render = self._gm_aside(parsed.question or "", me)
+        elif parsed.kind == MoveKind.META:
+            render = Rendered(self._meta(parsed.question or ""), RenderStatus.TEMPLATE)
+        else:
+            render = Rendered(parsed.clarification or "……", RenderStatus.TEMPLATE)
+        clock.lap("aside")
+        sink(render.text)
+        return TurnReport(clock_label(head.clock), parsed, render.text, advanced=False, timings=clock.laps,
+                          render=render, request_id=request_id, kind=parsed.kind, ending=self.ending,
+                          first_text_ms=sink.first_ms)
+
+    def _meta(self, name: str) -> str:
+        if name == "hint":
+            return self._next_hint()
+        if name == "recap":
+            return "\n\n".join(self._recent) if self._recent else "（故事才刚开始。）"
+        if name == "beliefs":
+            return "\n".join(self.belief_lines()) or "（你一无所知。）"
+        return gm.META_HELP
+
+    def _next_hint(self) -> str:
+        """逐级提示：每次给下一条没给过的（给完了就重复最后一条）；进度随下一次提交落库。"""
+        guide = self.scenario.guide
+        if not guide:
+            return "（这一幕没有提示。）"
+        line = guide[min(self._hint, len(guide) - 1)]
+        self._hint = min(self._hint + 1, len(guide))
+        return f"提示：{line}"
+
+    def _gm_aside(self, question: str, me: BeliefStore) -> Rendered:
+        """场外问答：只用玩家自己的认知、他的目标、逐级提示（到下一条为止，不剧透更深的）与最近几段正文。
+        模型只许据此作答，点了玩家不认识的名字即回退模板；模板 = 下一条提示 + 处境摘要。"""
+        view = gm.self_view(me)
+        guide = self.scenario.guide
+        nxt = guide[min(self._hint, len(guide) - 1)] if guide else None
+        plain = "（场外）" + "；".join(view[:3]) + "。" + (f"\n提示：{nxt}" if nxt else "")
+        if self.llm is None:
+            return Rendered(plain, RenderStatus.TEMPLATE)
+        prof = self.scenario.profiles[self.player]
+        goals = [t for t in (gm.goal_text(g, me) for g in prof.goals) if t]
+        prompt = gm.aside_prompt(question, view, prof.persona, goals, guide[:self._hint + 1], self._recent)
+        try:
+            text = self.llm.generate(prompt, system=gm.ASIDE_SYSTEM, temperature=0.4).strip()
+        except LLMUnavailable:
+            return Rendered(plain, RenderStatus.LLM_UNAVAILABLE)
+        if not text or gm.leaks(text, me, self.scenario):
+            return Rendered(plain, RenderStatus.GATED_FALLBACK)
+        return Rendered(f"（场外）{text}", RenderStatus.LLM)
+
+    # ------------------------------------------------------------
+    #  落幕：玩家（据世界真相）身处结局地点
+    # ------------------------------------------------------------
+
+    def _ended(self) -> Ending | None:
+        place = self.authority.head().target(self.player, Rel.AT)
+        return next((e for e in self.scenario.endings if e.place == place), None)
+
+    def _reach_ending(self) -> Ending | None:
+        """推进过的回合之后检查一次：落幕即定，之后的回合不再推进。"""
+        self.ending = self.ending or self._ended()
+        return self.ending
+
+    def epilogue(self) -> str:
+        """终章：先是一段收束（有模型时据 Ending.epilogue 与玩家亲历写成、过名字闸门；否则只有标题），
+        再是明确标作“真相”的揭晓——你以为的 vs 实际的、你没看见的事——由世界状态与玩家认知确定地生成。"""
+        me = self.beliefs(self.player)
+        head = f"【第一幕终·{self.ending.title}】" if self.ending else "【尚未落幕】"
+        truth = gm.reveal(self.scenario, self.authority.head(), me, self.store.events(self.ref))
+        return "\n\n".join(x for x in (head, self._closing(me), truth) if x)
+
+    def _closing(self, me: BeliefStore) -> str:
+        """终章收束只取玩家亲历（他自己的经历记录与最近的正文），从不给模型看真相；点了他不认识的名字即不用。"""
+        if self.llm is None or self.ending is None:
+            return ""
+        lived = sorted(self.store.recent_memories(self.ref, self.player, 0), key=lambda m: (m.known_at, m.id))
+        prompt = gm.closing_prompt(self.ending.epilogue or self.ending.title, [m.text for m in lived[-40:]],
+                                   self._recent)
+        system = gm.CLOSING_SYSTEM + (f"\n世界：{self.scenario.setting}" if self.scenario.setting else "") + (
+            f"\n文风：{self.scenario.style}" if self.scenario.style else "")
+        try:
+            text = self.llm.generate(prompt, system=system, temperature=0.7).strip()
+        except LLMUnavailable:
+            return ""
+        return "" if not text or gm.leaks(text, me, self.scenario) else text
 
     # ------------------------------------------------------------
     #  NPC 装配：每个角色只拿到自己的 port
@@ -420,6 +686,8 @@ class GameSession:
                 recall=lambda q, scope=scope: self.recall.recall(scope, q),
                 memory=lambda a=a, now=now: self._memory_view(a, now),
             )
-            out[a] = NpcContext(port, self.policies.get(a) or ScriptedPolicy(), self.predictor, self.speaker,
-                                self.max_candidates)
+            policy = self.policies.get(a) or ScriptedPolicy()
+            # 向量回忆只为读 Situation.memories 的策略而跑（策略以 reads_memories = True 声明）；现有策略都不读
+            out[a] = NpcContext(port, policy, self.predictor, self.speaker, self.max_candidates,
+                                recall=bool(getattr(policy, "reads_memories", False)))
         return out
