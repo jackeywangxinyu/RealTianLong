@@ -1,9 +1,12 @@
 """
-[INPUT]: 依赖 core 的 Op / Kind
-[OUTPUT]: 对外提供 ACTION_WORDS（操作关键词表）、SpeechMode、Span、Mention、ParsedCommand、analyze()、clarify()
+[INPUT]: 依赖 core 的 Op / Kind / Social
+[OUTPUT]: 对外提供 ACTION_WORDS（操作关键词表）、SOCIAL_WORDS（言语行为词 → Social，归入 TELL）、
+          GESTURE_WORDS（看得见的姿态词 → Social，归入 WAIT）、SpeechMode、Span、Mention、ParsedCommand、
+          action_hits()（去掉引语与被长词覆盖的短词之后的全部行动词命中）、analyze()、clarify()
 [POS]: language 的语态分析层：在“选哪个操作”之前先回答“这句话是不是玩家此刻要做的一件事”。
        否定（我不攻击守卫）、条件（如果……才）、计划与斟酌（再决定是否）、转述（守卫刚刚攻击了我）、引语、复合指令、
        疑问都被识别为非即时语态——规则快路径只接受明确的单一、肯定、即时指令，其余交给受约束的语义解析或追问澄清。
+       言语行为词与姿态词也是行动词：“打招呼”盖住“打”、“救命”盖住“救”、“坐下”盖住“下”，于是也受否定与条件约束。
        parser 在此之上做实体与角色绑定；本模块不引用任何实体表以外的知识
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -15,7 +18,44 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from tianlong.core import Kind, Op
+from tianlong.core import Kind, Op, Social
+
+# ============================================================
+#  言语行为与姿态：没有命题的言语、看得见的姿态，各带一个社交含义（修辞层，不是事实）
+#  长词在前无关紧要——命中时被更长命中覆盖的短词一律丢弃
+# ============================================================
+
+_S = Social
+SOCIAL_WORDS: tuple[tuple[str, Social], ...] = (
+    ("打招呼", _S.GREET), ("打个招呼", _S.GREET), ("招呼", _S.GREET), ("问好", _S.GREET), ("问候", _S.GREET),
+    ("见礼", _S.GREET), ("行礼", _S.GREET), ("寒暄", _S.GREET), ("搭话", _S.GREET), ("搭讪", _S.GREET),
+    ("攀谈", _S.GREET), ("说话", _S.GREET), ("聊聊", _S.GREET), ("聊天", _S.GREET), ("闲聊", _S.GREET),
+    ("道谢", _S.THANK), ("谢谢", _S.THANK), ("多谢", _S.THANK), ("致谢", _S.THANK), ("感谢", _S.THANK),
+    ("赔罪", _S.APOLOGIZE), ("赔礼", _S.APOLOGIZE), ("赔不是", _S.APOLOGIZE), ("道歉", _S.APOLOGIZE),
+    ("认错", _S.APOLOGIZE), ("对不起", _S.APOLOGIZE),
+    ("求饶", _S.PLEAD), ("讨饶", _S.PLEAD), ("求情", _S.PLEAD), ("求救", _S.PLEAD), ("呼救", _S.PLEAD),
+    ("救命", _S.PLEAD),
+    ("称赞", _S.PRAISE), ("夸奖", _S.PRAISE), ("恭维", _S.PRAISE), ("奉承", _S.PRAISE), ("久仰", _S.PRAISE),
+    ("威胁", _S.THREATEN), ("恐吓", _S.THREATEN), ("恫吓", _S.THREATEN),
+    ("挑衅", _S.TAUNT), ("讥讽", _S.TAUNT), ("嘲笑", _S.TAUNT), ("挖苦", _S.TAUNT), ("取笑", _S.TAUNT),
+    ("辱骂", _S.INSULT), ("大骂", _S.INSULT), ("痛骂", _S.INSULT), ("骂", _S.INSULT),
+    ("拒绝", _S.REFUSE), ("回绝", _S.REFUSE),
+    ("答应", _S.AGREE), ("附和", _S.AGREE),
+    ("开玩笑", _S.JOKE), ("说笑", _S.JOKE), ("打趣", _S.JOKE),
+    ("安慰", _S.COMFORT), ("劝解", _S.COMFORT), ("劝慰", _S.COMFORT),
+    ("解释", _S.EXPLAIN), ("辩解", _S.EXPLAIN), ("分辩", _S.EXPLAIN), ("讲道理", _S.EXPLAIN),
+    ("叫阵", _S.CHALLENGE), ("邀战", _S.CHALLENGE), ("挑战", _S.CHALLENGE),
+    ("呵斥", _S.COMMAND), ("喝令", _S.COMMAND),
+    ("告辞", _S.FAREWELL), ("告别", _S.FAREWELL), ("道别", _S.FAREWELL), ("辞行", _S.FAREWELL),
+    ("服软", _S.SUBMIT), ("认输", _S.SUBMIT), ("示弱", _S.SUBMIT),
+)
+# 姿态：不带主语的动作短语即原话（带姿态的 WAIT），在场的人看得见；None = 没有特别的社交含义
+GESTURE_WORDS: tuple[tuple[str, Social | None], ...] = (
+    ("打量", None), ("坐下", None), ("喝茶", None), ("喝口茶", None), ("喝了口茶", None), ("伸懒腰", None),
+    ("拱手", _S.GREET), ("抱拳", _S.GREET), ("作揖", _S.GREET), ("鞠躬", _S.GREET),
+    ("点头", _S.AGREE), ("摇头", _S.REFUSE), ("叹气", _S.REMARK), ("叹了口气", _S.REMARK),
+    ("冷笑", _S.TAUNT), ("哈哈大笑", _S.JOKE), ("跪下", _S.SUBMIT), ("下跪", _S.SUBMIT),
+)
 
 # ============================================================
 #  操作关键词：按优先级排列（言语类最先——“告诉守卫我去港口”里的“去”不是移动）
@@ -23,7 +63,7 @@ from tianlong.core import Kind, Op
 
 ACTION_WORDS: tuple[tuple[Op, tuple[str, ...]], ...] = (
     (Op.ASK, ("问", "打听", "ask")),
-    (Op.TELL, ("告诉", "说", "tell")),
+    (Op.TELL, ("告诉", "说", "tell", *(w for w, _ in SOCIAL_WORDS))),
     (Op.UNLOCK, ("开锁", "解锁", "打开", "unlock")),
     (Op.LOCK, ("锁上", "上锁", "lock")),
     (Op.ATTACK, ("出手", "动手", "还手", "攻击", "偷袭", "一掌", "出招", "揍", "打", "attack")),
@@ -34,8 +74,9 @@ ACTION_WORDS: tuple[tuple[Op, tuple[str, ...]], ...] = (
     (Op.TAKE, ("拿", "取", "捡", "偷", "揣", "拾", "抓", "take", "grab")),
     (Op.INSPECT, ("查看", "检查", "搜", "看看", "环顾", "观察", "找找", "端详", "磕头", "叩首", "跪拜",
                   "inspect", "search", "look")),
-    (Op.MOVE, ("去", "走", "前往", "进", "回", "到", "跳", "爬", "钻", "下", "go", "move")),
-    (Op.WAIT, ("等", "休息", "歇", "wait")),
+    (Op.MOVE, ("去", "走", "前往", "进", "回", "到", "跳", "爬", "钻", "下", "离开", "走出", "溜出", "逃出", "退出",
+               "出去", "go", "move")),
+    (Op.WAIT, ("等", "休息", "歇", "wait", *(w for w, _ in GESTURE_WORDS))),
 )
 _SPEECH_OPS = frozenset({Op.TELL, Op.ASK})
 
@@ -123,6 +164,12 @@ def _quoted(t: str) -> list[tuple[int, int]]:
             spans.append((start, end + 1))
             start = t.find(left, end + 1)
     return spans
+
+
+def action_hits(text: str) -> list[tuple[int, int, Op]]:
+    """全部行动词命中（位置、终点、操作），按位置排序：引语里的不算，被更长命中覆盖的短词丢弃。"""
+    t = text.strip().lower()
+    return _hits(t, {i for a, b in _quoted(t) for i in range(a, b)})
 
 
 def _hits(t: str, masked: set[int]) -> list[tuple[int, int, Op]]:
@@ -253,9 +300,9 @@ def analyze(text: str, mentions: Sequence[Mention], owner: str) -> ParsedCommand
 
 
 def _wait_then(t: str, acts: list[tuple[int, int, Op]]) -> Span | None:
-    """“等守卫走了就拿钥匙”：等 + 就/才/再 + 后续行动 = 条件。"""
+    """“等守卫走了就拿钥匙”：等 + 就/才/再 + 后续行动 = 条件（姿态词虽归 WAIT，却不是“等”）。"""
     for s, _, op in acts:
-        if op != Op.WAIT:
+        if op != Op.WAIT or not t.startswith("等", s):
             continue
         for w in ("就", "才", "再"):
             j = t.find(w, s + 1)
