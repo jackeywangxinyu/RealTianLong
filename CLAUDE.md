@@ -12,7 +12,7 @@ src/tianlong/language/ - 开放语义：模板文本、LLM 接入、对白、玩
 src/tianlong/agents/ - 智能体：LangGraph 单角色决策图、多角色扇出编排、脚本策略、后果预测、调度
 src/tianlong/learning/ - 学习：PyG 关系动态模型（环境/角色两入口）、RLlib 模仿学习 + PPO 角色策略（1 子目录: rl）
 src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知（1 子目录: tianlong 天龙八部，第一幕无量山）
-src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
+src/tianlong/runtime/ - 装配：权威写入器、游戏会话（主持层回合循环）、命令行与网页前端
 tests/ - 验收即规格：每条设计边界对应可证伪断言
 scripts/ - 本地基础设施与演示脚本（无 Docker 环境下的 Neo4j、录制一局“玩家所见 vs 世界真相”、Colab 笔记本生成器、主持层评测“本引擎 vs 纯模型主持人”）
 docs/ - 入库的产出物与设计（3 子目录: demo 演示录像, results 训练报告与结果表, design 手写施工图）
