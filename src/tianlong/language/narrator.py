@@ -1,33 +1,112 @@
 """
-[INPUT]: 依赖 core 的 Percept / Modality / is_night，language/templates 的 Names，language/llm 的 LLMClient，
-         language/render 的 fact_lines / build_plan / check / Violation / Rendered / RenderStatus
-[OUTPUT]: 对外提供 Narrator（narrate() 返回文字，narrate_rendered() 返回带来源与违规明细的 Rendered）、fact_lines()（再导出）、lore_keys()
-[POS]: language 的输出层；输入只有玩家自己的感知（不是世界真相），模板先把它们写成事实清单，LLM 只负责润色，
-       被要求不得添加清单外的任何人物、物品、事件或结论——但提示词拦不住成功返回的错误文字，所以润色结果还要过 render 的语义闸门
-       （场景别称全表一并交给闸门：未出场实体的别称与名字同样被拒），命中即回退清单；玩家原话只作意图与姿态；模型不可用时直接输出清单
+[INPUT]: 依赖 core 的 Percept / Modality / Op / Social / is_night / derive_seed，language/templates 的 Names / render_percept，
+         language/llm 的 LLMClient / LLMUnavailable，language/scene 的 VoiceLine / SceneBrief / TextSink，
+         language/render 的 fact_lines / build_plan / check / check_quotes / sentence_ends / Violation / Rendered / RenderStatus
+[OUTPUT]: 对外提供 Narrator（narrate_scene() 主持人之声：流式生成、逐句过闸门、通过即交付；narrate_rendered() / narrate()
+          以空 SceneBrief 委托之）、render_voice()（一句 NPC 言语的确定性模板）、SOCIAL_PHRASES / SOCIAL_LABELS、
+          MAX_DROPS、fact_lines()（再导出）、lore_keys()
+[POS]: language 的输出层（主持人之声）。输入只有玩家自己的感知与会话交来的 SceneBrief（要替 NPC 说出口的话、最近几回合正文、
+       玩家原话、眼下的钩子），不是世界真相；台词本身算出处（说话者与听者可点名，原话与说法照搬不算违规）。
+       模板先写成事实清单，清单里的言语换成带言语行为的台词（“龚光杰冷笑着向你叫阵：……”），措辞按语义输入确定地轮换。
+       有模型时逐句流式生成：每句对“已交付的文字 + 这一句”跑 check()（传闻归属留到收尾整段查）与台词闸门 check_quotes()，
+       再查钟点数字；通过即经 on_text 交付，违规即丢弃并记下；一句都没通过或丢满 MAX_DROPS 句，补上模板（已交付过正文的，
+       换行后只补清单与台词）。模型中途失败：已交付的留着，补上模板。Rendered.text 恒等于 on_text 收到的全部文字首尾相接。
+       提示词只是请求，闸门才是验收：第二人称、80~250 字、台词写成“某某道：“……””、不替玩家开口、停在钩子上、不写钟点；
+       最近正文只留最后三段、每段末尾约 300 字，钟点换成时辰文字；世界前提与文风来自场景
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+import re
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import replace
 
-from tianlong.core import Modality, Percept, is_night
+from tianlong.core import Modality, Op, Percept, Social, derive_seed, is_night
 from tianlong.language.llm import LLMClient, LLMUnavailable
-from tianlong.language.render import Rendered, RenderStatus, Violation, build_plan, check, fact_lines
-from tianlong.language.templates import Names
+from tianlong.language.render import (
+    Rendered,
+    RenderPlan,
+    RenderStatus,
+    Violation,
+    build_plan,
+    check,
+    check_quotes,
+    fact_lines,
+    sentence_ends,
+)
+from tianlong.language.scene import SceneBrief, TextSink, VoiceLine
+from tianlong.language.templates import Names, render_percept
 
 log = logging.getLogger(__name__)
 
-_SYSTEM = (
-    "你是一部中文文字冒险游戏的叙述者，用第二人称“你”写 2~4 句简洁的叙述。"
-    "只能使用给定清单里的事实；不得添加清单之外的人物、物品、事件、动机或推断；可以适度描写氛围与动作细节。"
-    "程度照清单原样：略有所得不等于学成，受伤不等于被制住。发现了东西不等于拿到手，不要替玩家多走一步。"
-    "玩家的输入只表明意图与姿态，成败与结果一律以事实清单为准。"
+__all__ = ["MAX_DROPS", "SOCIAL_LABELS", "SOCIAL_PHRASES", "Narrator", "fact_lines", "lore_keys", "render_voice"]
+
+MAX_DROPS = 2              # 丢满这么多句就不再相信这段生成：停止读流，补上模板
+RECENT_KEEP = 3            # 提示词里最近几回合的正文：只留最后几段
+RECENT_CHARS = 300         # 每段只留末尾这么多字
+
+# ============================================================
+#  主持人之声的系统提示：第二人称、有限长度、台词归属、不替玩家开口、停在钩子上
+# ============================================================
+
+_GM = (
+    "你是一部武侠文字冒险游戏的主持人，为玩家讲述本回合刚刚发生的事。\n"
+    "1. 用第二人称“你”称呼玩家；写一段 80~250 字的中文，生动而简练，文风见下。只输出正文，不加标题与说明。\n"
+    "2. 只写给定的事实与要说出口的话：不得添加任何新的人物、物品、事件、伤势、承诺或结论。程度照原样：受伤不等于被制住，"
+    "略有所得不等于学成，发现了东西不等于拿到手。玩家的输入只表明意图与姿态，成败一律以事实为准。\n"
+    "3. “要说出口的话”每一句都写成对白，格式为 某某道：“……”，措辞合乎说话者的腔调与言语行为；"
+    "有“说法”的须如实转达、不多不少，闲话里不得夹带任何事实。\n"
+    "4. 某人的台词里只许提到列给他的“可点名”的名字、他说话的对象和玩家，此外任何人与物都不许提。\n"
+    "5. 绝不替玩家说新的话、生新的念头或做任何决定；玩家本回合的原话可以照引，一字不改。\n"
+    "6. 换着说法写：不要重复最近几段正文的开头与句式，不要用“你按兵不动”“静观其变”之类的套话。\n"
+    "7. 不写数字钟点，时辰与天色一律用文字描述。\n"
+    "8. 结尾停在一个钩子上——某人的问话、一个显露出来的代价、或一个摆在玩家面前的选择——停在那里，不替玩家选。"
 )
 
-__all__ = ["Narrator", "fact_lines", "lore_keys"]
+# 言语行为的中文说法（交给模型）与模板措辞（无模型时的台词引子；{to} 是听者，没有听者时是“众人”）
+SOCIAL_LABELS: dict[Social, str] = {
+    Social.GREET: "打招呼", Social.THANK: "道谢", Social.APOLOGIZE: "赔罪", Social.PLEAD: "求情", Social.PRAISE: "称赞",
+    Social.THREATEN: "威胁", Social.TAUNT: "挑衅讥讽", Social.INSULT: "辱骂", Social.REFUSE: "回绝", Social.AGREE: "附和",
+    Social.JOKE: "说笑打趣", Social.COMFORT: "安慰", Social.EXPLAIN: "解释", Social.CHALLENGE: "叫阵",
+    Social.COMMAND: "喝令", Social.FAREWELL: "告辞", Social.REMARK: "随口一说", Social.SUBMIT: "服软",
+}
+SOCIAL_PHRASES: dict[Social, tuple[str, ...]] = {
+    Social.GREET: ("笑嘻嘻地跟{to}打招呼", "拱手向{to}见礼", "朝{to}点头招呼"),
+    Social.THANK: ("向{to}连声道谢", "朝{to}拱手称谢"),
+    Social.APOLOGIZE: ("陪着笑脸向{to}告罪", "向{to}连连赔礼"),
+    Social.PLEAD: ("向{to}苦苦求情", "央求{to}"),
+    Social.PRAISE: ("对{to}赞不绝口", "向{to}大加夸赞"),
+    Social.THREATEN: ("沉下脸来威吓{to}", "按剑向{to}厉声威吓"),
+    Social.TAUNT: ("斜眼讥讽{to}", "冷笑着挖苦{to}"),
+    Social.INSULT: ("指着{to}破口大骂", "向{to}恶声喝骂"),
+    Social.REFUSE: ("摇头回绝{to}", "一口回绝了{to}"),
+    Social.AGREE: ("连连点头附和{to}", "向{to}点头称是"),
+    Social.JOKE: ("笑嘻嘻地打趣{to}", "跟{to}说笑"),
+    Social.COMFORT: ("温言劝慰{to}", "柔声安慰{to}"),
+    Social.EXPLAIN: ("慢条斯理地对{to}讲", "向{to}解释"),
+    Social.CHALLENGE: ("冷笑着向{to}叫阵", "踏上一步向{to}邀斗"),
+    Social.COMMAND: ("厉声喝令{to}", "沉声吩咐{to}"),
+    Social.FAREWELL: ("向{to}拱手告辞", "朝{to}拱了拱手作别"),
+    Social.REMARK: ("随口对{to}说", "自顾自地嘀咕"),
+    Social.SUBMIT: ("向{to}低头服软", "朝{to}连连作揖"),
+}
+_OP_PHRASES: dict[str, tuple[str, ...]] = {Op.TELL.value: ("对{to}说", "对{to}道"), Op.ASK.value: ("问{to}", "向{to}问道")}
+
+# 钟点：提示词里换成时辰文字，正文里出现即丢句
+_CLOCK = re.compile(r"第\s*(\d+)\s*[日天]\s*(\d{1,2})\s*[:：]\s*(\d{2})")
+_CLOCK_ANY = re.compile(r"第\s*\d+\s*[日天]|\d{1,2}\s*[:：]\s*\d{2}")
+_BRANCHES = "子丑寅卯辰巳午未申酉戌亥"
+_SKY = ("夜半", "深夜", "黎明前", "破晓", "清晨", "上午", "正午", "午后", "下午", "傍晚", "入夜", "夜深")
+
+
+def _in_words(text: str) -> str:
+    """“第1日 19:00” → “入夜戌时”：模型只见时辰文字，不见钟点数字。"""
+    def say(m: re.Match[str]) -> str:
+        k = ((int(m.group(2)) + 1) // 2) % 12
+        return f"{_SKY[k]}{_BRANCHES[k]}时"
+    return _CLOCK_ANY.sub("", _CLOCK.sub(say, text))
 
 
 _VISUAL = frozenset({Modality.SELF, Modality.SIGHT, Modality.SCENE})
@@ -59,6 +138,140 @@ def lore_keys(viewer: str, percepts: Sequence[Percept], lore: Mapping[str, str])
     return keys
 
 
+# ============================================================
+#  台词的模板：说话者 + 言语行为措辞 + 原话（或说法）；措辞按语义输入确定地轮换
+# ============================================================
+
+
+def render_voice(line: VoiceLine, salt: str = "") -> str:
+    """“龚光杰冷笑着向你叫阵：“你笑什么？””；没有原话也没有说法的闲话只写言语行为（“钟灵笑嘻嘻地跟你打招呼。”）。
+    salt 让同一句话在不同的上下文里换个说法（会话用上一回合的正文），相同输入永远得到相同文字。"""
+    words = line.template or line.claim
+    options = (SOCIAL_PHRASES.get(line.social) if line.social else None) or _OP_PHRASES.get(line.op, _OP_PHRASES["tell"])
+    pick = derive_seed("voice", line.speaker, line.social.value if line.social else "", words, salt) % len(options)
+    phrase = options[pick].format(to=line.listener_name or "众人")
+    return f"{line.speaker_name}{phrase}：“{words}”" if words else f"{line.speaker_name}{phrase}。"
+
+
+def _with_lines(plan: RenderPlan, brief: SceneBrief) -> RenderPlan:
+    """会话交来的台词本身有出处（与模板里写出的一致）：说话者与听者可以点名，原话与说法算出处。"""
+    if not brief.lines:
+        return plan
+    names = {n for vl in brief.lines for n in (vl.speaker_name, vl.listener_name) if n and n != "你"}
+    said = [x for vl in brief.lines for x in (vl.template, vl.claim) if x]
+    return replace(plan, names=plan.names | names, source="\n".join([plan.source, *said]))
+
+
+def _scene_lines(plan: RenderPlan, viewer: str, percepts: Sequence[Percept], names: Names, brief: SceneBrief,
+                 salt: str) -> tuple[list[str], frozenset[str]]:
+    """事实清单里 NPC 的言语换成带言语行为的台词（同一说话者按先后对应），清单里对不上的台词补在最后。
+    返回 (模板正文, 被台词取代的清单行)。"""
+    pending: dict[str, list[int]] = {}
+    for k, vl in enumerate(brief.lines):
+        pending.setdefault(vl.speaker, []).append(k)
+    spoken: dict[str, str] = {}
+    for p in percepts:
+        ev = p.event
+        if (ev is not None and p.modality != Modality.SCENE and ev.kind in (Op.TELL.value, Op.ASK.value)
+                and ev.actor in pending):
+            spoken.setdefault(render_percept(p, names, viewer, me="你"), ev.actor)
+    out: list[str] = []
+    covered: set[str] = set()
+    used: set[int] = set()
+    for text in plan.lines:
+        who = spoken.get(text)
+        if who is not None and pending.get(who):
+            k = pending[who].pop(0)
+            used.add(k)
+            covered.add(text)
+            out.append(render_voice(brief.lines[k], salt))
+        else:
+            out.append(text)
+    out += [render_voice(vl, salt) for k, vl in enumerate(brief.lines) if k not in used]
+    return out, frozenset(covered)
+
+
+# ============================================================
+#  流式交付与逐句闸门
+# ============================================================
+
+
+class _Delivery:
+    """交付给玩家的全部文字：每一段都经 on_text 流出，Rendered.text 就是它们首尾相接。"""
+
+    def __init__(self, sink: TextSink | None) -> None:
+        self.sink = sink
+        self.parts: list[str] = []
+
+    @property
+    def text(self) -> str:
+        return "".join(self.parts)
+
+    def emit(self, piece: str) -> None:
+        if not piece:
+            return
+        self.parts.append(piece)
+        if self.sink is not None:
+            self.sink(piece)
+
+
+class _Gate:
+    """逐句验收：通过的句子立刻交付，违规的丢弃并记下；丢满 MAX_DROPS 句即停。"""
+
+    def __init__(self, plan: RenderPlan, brief: SceneBrief, known: frozenset[str], command: str,
+                 out: _Delivery) -> None:
+        self.plan, self.brief, self.known, self.command, self.out = plan, brief, known, command, out
+        self.buf = ""
+        self.dropped = 0
+        self.violations: list[Violation] = []
+
+    def feed(self, piece: str) -> bool:
+        """吃进一段增量，交付其中完整的句子；返回 False 表示已丢满，不必再读。"""
+        self.buf += piece
+        return self._drain(final=False, tail=False)
+
+    def finish(self, tail: bool = True) -> None:
+        """流结束：结尾那句没有句末标点也照样验收（tail=False 用于中途失败：半句话不交付）。"""
+        self._drain(final=True, tail=tail)
+        self.buf = ""
+
+    def _drain(self, final: bool, tail: bool) -> bool:
+        cut = 0
+        for end in sentence_ends(self.buf, final):
+            self._judge(self.buf[cut:end])
+            cut = end
+            if self.dropped >= MAX_DROPS:
+                self.buf = ""
+                return False
+        self.buf = self.buf[cut:]
+        if tail and self.buf.strip():
+            self._judge(self.buf)
+            self.buf = ""
+        return self.dropped < MAX_DROPS
+
+    def _judge(self, raw: str) -> None:
+        body = raw.strip()
+        if not body:
+            return
+        before = self.out.text
+        piece = ("\n" if before and "\n" in raw[:len(raw) - len(raw.lstrip())] else "") + body
+        text = before + piece
+        found = [v for v in check(text, self.plan, self.known) if v.kind != "hearsay"]    # 传闻归属收尾时整段查
+        found += check_quotes(text, self.brief, self.plan, self.known, command=self.command, since=len(before))
+        found += [Violation("clock", m.group(0)) for m in _CLOCK_ANY.finditer(piece)]
+        if found:
+            self.dropped += 1
+            self.violations += found
+            log.info("叙述句未通过闸门，丢弃: %s %s", body, found)
+            return
+        self.out.emit(piece)
+
+
+# ============================================================
+#  叙述者
+# ============================================================
+
+
 class Narrator:
     """setting 给出世界前提与文风；lore 是实体外观描写，只在玩家看见该实体时、且仅首次看见时拿来润色；
     aliases 是场景别称全表，只供闸门使用：识别“走进大殿”这类以别称说出的抵达，并拒绝本回合未出场实体的别称（“神仙姐姐”）。"""
@@ -78,29 +291,126 @@ class Narrator:
     def narrate_rendered(self, viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False,
                          fresh: Sequence[str] = (), command: str = "", lapse: str = "",
                          known: Iterable[str] = ()) -> Rendered:
-        """command 是玩家原话（让“跳下断崖”读起来像跳，而不是“走向崖底”）；lapse 是一段等待之后的时辰，
-        排在事实之前——先有“天色已黑”，才有“月光照在玉璧上”。known 是闸门用来拒绝的名字全集（玩家认识的 + 场景全部实体）。"""
+        """没有要替 NPC 说的话、也没有最近正文时的叙述：以空 SceneBrief 委托 narrate_scene()。"""
+        return self.narrate_scene(viewer, percepts, names, brief=SceneBrief(), show_scene=show_scene, fresh=fresh,
+                                  command=command, lapse=lapse, known=known)
+
+    def narrate_scene(self, viewer: str, percepts: Sequence[Percept], names: Names, *, brief: SceneBrief,
+                      show_scene: bool = False, fresh: Sequence[str] = (), command: str = "", lapse: str = "",
+                      known: Iterable[str] = (), on_text: TextSink | None = None) -> Rendered:
+        """command 是玩家原话（让“跳下断崖”读起来像跳，成败仍以清单为准）；lapse 是一段等待之后的时辰，排在事实之前；
+        known 是闸门用来拒绝的名字全集（玩家认识的 + 场景全部实体）；on_text 收到每一段交付的文字（通过闸门即交付）。"""
+        known = frozenset(known)
         looks = [self.lore[k] for k in fresh if k in self.lore]
         passed = [f"（不觉已是{lapse}）"] if lapse else []
-        plan = build_plan(viewer, percepts, names, show_scene, looks, "".join(passed), self.aliases)
-        lines = list(plan.lines)
-        if not lines and not looks:
-            return Rendered("\n".join(["时间悄悄过去，什么也没有发生。", *passed]), RenderStatus.TEMPLATE)
-        plain = "\n".join(passed + lines + [f"（{x}）" for x in looks])
+        plan = _with_lines(build_plan(viewer, percepts, names, show_scene, looks, "".join(passed), self.aliases), brief)
+        scene, covered = _scene_lines(plan, viewer, percepts, names, brief, brief.recent[-1] if brief.recent else "")
+        out = _Delivery(on_text)
+        if not scene and not looks:
+            out.emit("\n".join(["时间悄悄过去，什么也没有发生。", *passed]))
+            return Rendered(out.text, RenderStatus.TEMPLATE)
+        plain = "\n".join(passed + scene + [f"（{x}）" for x in looks])
         if self.llm is None:
-            return Rendered(plain, RenderStatus.TEMPLATE)
-        prompt = (f"玩家的输入：{command}\n\n" if command else "") + "本回合玩家感知到的事实：\n"
-        prompt += "\n".join(passed + (lines or ["（无事发生）"]))
-        if looks:
-            prompt += "\n\n玩家初次看清的人与物（仅作外观描写的依据）：\n" + "\n".join(looks)
-        system = _SYSTEM + (f"\n世界：{self.setting}" if self.setting else "") + (f"\n文风：{self.style}" if self.style else "")
+            out.emit(plain)
+            return Rendered(out.text, RenderStatus.TEMPLATE)
+
+        # ---- 模型：逐句生成、逐句过闸门，通过即交付 ----
+        facts = [x for x in plan.lines if x not in covered]
+        prompt = self._prompt(brief, command, lapse, facts, looks, plan, known)
+        gate = _Gate(plan, brief, known, command, out)
+        failed = False
+        pieces = self._pieces(prompt, self._system())
         try:
-            prose = self.llm.generate(prompt, system=system, temperature=0.6).strip()
+            for piece in pieces:
+                if not gate.feed(piece):
+                    break                                   # 丢满了：不再读流
+            else:
+                gate.finish()
         except LLMUnavailable as e:
-            log.warning("叙述润色失败，回退事实清单: %s", e)
-            return Rendered(plain, RenderStatus.LLM_UNAVAILABLE)
-        violations = check(prose, plan, known) if prose else (Violation("empty", ""),)
-        if violations:
-            log.info("叙述未通过语义闸门，回退事实清单: %s", violations)
-            return Rendered(plain, RenderStatus.GATED_FALLBACK, violations)
-        return Rendered(prose, RenderStatus.LLM)
+            log.warning("叙述生成失败，已交付 %d 字，补上事实清单: %s", len(out.text), e)
+            failed = True
+            gate.finish(tail=False)
+        finally:
+            pieces.close()
+
+        # ---- 收尾：传闻归属整段查；没通过的补模板 ----
+        violations = list(gate.violations)
+        if failed:
+            status = RenderStatus.LLM_UNAVAILABLE
+        elif not out.text:
+            status = RenderStatus.GATED_FALLBACK
+            violations = violations or [Violation("empty", "")]
+        else:
+            hearsay = [v for v in check(out.text, plan, known) if v.kind == "hearsay"]
+            violations += hearsay
+            status = RenderStatus.GATED_FALLBACK if gate.dropped >= MAX_DROPS or hearsay else RenderStatus.LLM
+        if status != RenderStatus.LLM:
+            tail = passed + scene if scene else [f"（{x}）" for x in looks]
+            out.emit("\n" + "\n".join(tail) if out.text else plain)
+            if status == RenderStatus.GATED_FALLBACK:
+                log.info("叙述未通过语义闸门，补上事实清单: %s", violations)
+        return Rendered(out.text, status, tuple(dict.fromkeys(violations)))
+
+    # ------------------------------------------------------------
+    #  提示词
+    # ------------------------------------------------------------
+
+    def _pieces(self, prompt: str, system: str) -> Iterator[str]:
+        """有流式接口就边生成边交付，没有就一次拿全文（同样逐句过闸门）。"""
+        stream = getattr(self.llm, "stream", None)
+        if callable(stream):
+            yield from stream(prompt, system=system)
+        else:
+            yield self.llm.generate(prompt, system=system, temperature=0.7)
+
+    def _system(self) -> str:
+        return _GM + (f"\n世界：{self.setting}" if self.setting else "") + (f"\n文风：{self.style}" if self.style else "")
+
+    def _prompt(self, brief: SceneBrief, command: str, lapse: str, facts: Sequence[str], looks: Sequence[str],
+                plan: RenderPlan, known: frozenset[str]) -> str:
+        parts: list[str] = []
+        recent = [_in_words(p).strip() for p in brief.recent[-RECENT_KEEP:] if p.strip()]
+        if recent:
+            recent = [p if len(p) <= RECENT_CHARS else "……" + p[-RECENT_CHARS:] for p in recent]
+            rows = [f"【{i}】{p}" for i, p in enumerate(recent, 1)]
+            parts.append("最近几段正文（旧→新，只作接续，不要重复其句式）：\n" + "\n".join(rows))
+        if command:
+            parts.append(f"玩家的输入：{command}")
+        if brief.player_line:
+            parts.append(f"玩家本回合说出口的话或做出的姿态（可原样照引，一字不改）：{brief.player_line}")
+        when = [f"（不觉已是{_in_words(lapse)}）"] if lapse else []
+        empty = "（除下列言语外无事发生）" if brief.lines else "（无事发生）"
+        parts.append("本回合玩家感知到的事实：\n" + "\n".join(when + (list(facts) or [empty])))
+        if brief.lines:
+            # 可点名只列真能通过闸门的：本回合计划里的名字、清单里原样有的名字、闸门不认识的名字
+            universe = known | plan.hidden
+            speakable = plan.names | plan.aliases
+
+            def fits(n: str) -> bool:
+                return n in speakable or n in plan.source or n not in universe
+            parts.append("要说出口的话（按先后，逐句写成对白）：\n"
+                         + "\n".join(_describe(i, vl, fits) for i, vl in enumerate(brief.lines, 1)))
+        if looks:
+            parts.append("玩家初次看清的人与物（仅作外观描写的依据）：\n" + "\n".join(looks))
+        if brief.stakes:
+            parts.append(f"眼下的处境（写到这里，停在钩子上）：{brief.stakes}")
+        return "\n\n".join(parts)
+
+
+def _describe(i: int, vl: VoiceLine, fits: Callable[[str], bool]) -> str:
+    """一句要说出口的话交给模型的样子：谁对谁、什么言语行为、说法还是闲话、腔调、谈资、回应什么、可点名什么。"""
+    ask = vl.op == Op.ASK.value
+    act = (SOCIAL_LABELS.get(vl.social) if vl.social else None) or ("问话" if ask else "说话")
+    body = f"说法“{vl.claim}”——须如实转达，不多不少" if vl.claim else "闲话——不含任何事实"
+    if vl.template:
+        body += f"；原话“{vl.template}”——可换措辞，意思不变"
+    rows = [f"{i}. {vl.speaker_name}对{vl.listener_name or '众人'}（{act}）：{body}"]
+    if vl.voice:
+        rows.append(f"   腔调：{vl.voice}")
+    if vl.knows:
+        rows.append(f"   谈资：{vl.knows}")
+    if vl.answering:
+        rows.append(f"   回应的是：“{vl.answering}”")
+    names = sorted(n for n in vl.may_name if n != vl.speaker_name and fits(n))
+    rows.append("   台词里可点名：" + ("、".join(names) if names else "（除说话对象与玩家外，谁也不提）"))
+    return "\n".join(rows)
