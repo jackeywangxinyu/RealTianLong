@@ -254,7 +254,7 @@ class MartialTactics(PolicyKit):
         return self._go_towards(sit, where, f"跟着{self._name(b, g.person)}")
 
     # ------------------------------------------------------------
-    #  见义出声：眼见有人对主角或自己人动手、自己又没有更要紧的事——喝一声住手
+    #  见义出声：眼见有人对自己人、自己要护的人、或已有好感的主角动手，自己又没有更要紧的事——喝一声住手
     # ------------------------------------------------------------
 
     def _witness(self, sit: Situation) -> Choice | None:
@@ -264,7 +264,10 @@ class MartialTactics(PolicyKit):
         here = set(self._persons_here(b))
         allies = set(sit.profile.allies)
         foes = {g.person for g in sit.profile.goals if g.kind == GoalKind.HOSTILE}
-        protected = allies | ({sit.player} if sit.player else set())
+        guarded = {g.person for g in sit.profile.goals if g.kind == GoalKind.DEFEND and g.person}
+        # 只替自己人、自己要护的人、以及对之已有好感的主角出声：满堂宾客不会人人替一个素不相识的书生出头
+        fond = {sit.player} if sit.player and b.attitude(sit.player) >= 1 else set()
+        protected = allies | guarded | fond
         for ep in reversed(b.episodes):
             ev = ep.event
             if ep.modality != Modality.SIGHT or ev.kind != Op.ATTACK.value or sit.now - ep.tick > 1:

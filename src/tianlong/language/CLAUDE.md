@@ -4,7 +4,7 @@
 开放语义与文字表达。LLM 只做两件事：把玩家的自由文本解析为结构化意图、把已经成立的事件按玩家可见范围写成文字。它永远不裁定事实；任何模型输出都要回到 kernel 结算。文字 ≠ 事实：模型成功返回的非空文字也要先过 render 的确定性语义闸门，命中即回退模板——提示词只是请求，闸门才是验收。
 
 成员清单
-templates.py: 确定性文本层（无 LLM），render_fact/render_event/render_experience/render_percept 角色视角措辞（名称表即观察者的实体草图，按种类说"在桌上/在身上"）+ 失败原因/研读进境（未贯通者明说未贯通，免得润色时被夸成学成）/武侠状态措辞 + 自己移动只写“来到”（步态留给原话），旁人推门未果只写“走向那道门” + 事件后果（伤毒被制、学成、暗道与藏匿之物）；memory、speaker、narrator 共用
+templates.py: 确定性文本层（无 LLM），render_fact/render_event/render_experience/render_percept 角色视角措辞（名称表即观察者的实体草图，按种类说"在桌上/在身上"）+ 失败原因/研读进境（未贯通者明说未贯通，免得润色时被夸成学成）/武侠状态措辞 + 没有原话的言语按言语行为写成动作（SOCIAL_VERBS：“向钟灵打了个招呼”，耳语才是“低声说了些什么”）+ 自己移动只写“来到”（步态留给原话），旁人推门未果只写“走向那道门” + 事件后果（伤毒被制、学成、暗道与藏匿之物）；memory、speaker、narrator 共用
 llm.py: LLMClient 协议（generate + stream）+ GeminiClient（REST，密钥只从环境变量读；每线程一条 HTTPS 长连接、经代理走 CONNECT 隧道；显式思考档位，接口不认即去掉重试；SSE 流式；型号不可用退回 -latest 别名；每次调用记首字与总耗时 CallStat）+ CachedLLM 磁盘缓存（只在 TIANLONG_LLM_CACHE=1 时启用）+ ScriptedLLM 离线脚本回放（可模拟延迟与流式）+ llm_from_env()（叙述模型，默认 gemini-3.8-flash、思考 low）/ fast_llm_from_env()（解释用快模型，默认 flash-lite、思考 minimal）；任何失败抛 LLMUnavailable，调用方必须回退模板
 speaker.py: Speaker 协议 + TemplateSpeaker + LLMSpeaker，把结构化言语行动说成符合人设的一句话；事实以命题为准，原话只是修辞；LLM 润色须过对白闸门（只许点名说话者、听者、话题主语与宾语——名或别称，不许多出意图里没有的承诺与状态，必须提到话题主语——本人可称“我”、听者可称“你”），否则回退模板；拒绝全集是会话交来的场景全部实体名与别称加说话者认识的名字，说话者没听说过的真实实体同样不许点名：原话随意图落库、被听者记住，再被叙述者当作有出处的名字照搬，分歧一旦提交就撤不回
 command.py: 语态分析，analyze() 在选操作之前判定这句话是不是“玩家此刻要做的一件事”——否定作用域（跨情态词与介词短语回溯，双重否定判为不确定）、条件/计划/斟酌、转述（他人作主语或过去时标记）、引语、复合分句（言语动词之后的内容不算行动）、可行性疑问；言语行为词 SOCIAL_WORDS（打招呼/赔罪/救命……→ Social，归 TELL）与姿态词 GESTURE_WORDS（打量/坐下/拱手……，归 WAIT）也是行动词，盖住里面的单字（“打招呼”不是打、“救命”不是救、“坐下”不是下），同样受否定与条件约束；action_hits() 给出去掉引语与被长词覆盖之后的命中；ParsedCommand 保留语态、主体、否定操作、条件与分句跨度；clarify() 给出不推进时间的追问

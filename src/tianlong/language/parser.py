@@ -88,7 +88,7 @@ _ASKS = {
     Op.TELL: "你想对谁说？", Op.ASK: "你想问谁？", Op.INSPECT: "你想查看什么？",
     Op.ATTACK: "你想对谁出手？", Op.STUDY: "你想研读什么？", Op.USE: "你想把什么用在谁身上？",
 }
-_HELP = "没听懂。试试：去后院 / 查看玉璧 / 问马五爷… / 出手 / 研读… / 等到天黑"
+_HELP = "没听懂。直接说想做的事或想说的话就好，比如：环顾四周 / 问身边的人话 / 去某处 / 等一会儿"   # 不点具体地名，不剧透
 _GENERIC = frozenset((*_ASKS.values(), _HELP))
 _SOCIAL = dict(SOCIAL_WORDS)
 _GESTURE = dict(GESTURE_WORDS)

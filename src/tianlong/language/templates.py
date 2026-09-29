@@ -1,6 +1,7 @@
 """
-[INPUT]: 依赖 core 的 EntitySketch / Kind / Fact / PerceivedEvent / Percept / Modality / Op / Outcome / Rel
-[OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_experience()、render_percept()、REASONS / SUCCESS_NOTES / ATTR_WORDS
+[INPUT]: 依赖 core 的 EntitySketch / Kind / Fact / PerceivedEvent / Percept / Modality / Op / Outcome / Rel / Social
+[OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_experience()、render_percept()、REASONS / SUCCESS_NOTES / ATTR_WORDS、
+          SOCIAL_VERBS（没有原话的言语按言语行为写成动作：“向钟灵打了个招呼”）
 [POS]: language 的确定性文本层（无 LLM）；memory 用它生成经历文本，narrator 在无模型时用它兜底——同一套措辞，两处复用
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -9,7 +10,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from tianlong.core import EntitySketch, Fact, Kind, Modality, Op, Outcome, PerceivedEvent, Percept, Rel
+from tianlong.core import (
+    EntitySketch,
+    Fact,
+    Kind,
+    Modality,
+    Op,
+    Outcome,
+    PerceivedEvent,
+    Percept,
+    Rel,
+    Social,
+)
 from tianlong.core.schema import ATTR_PREFIX
 
 # 名称表即观察者自己的实体草图：名字 + 种类（决定“在桌上/在身上/在港口”的措辞）
@@ -109,6 +121,24 @@ def render_fact(f: Fact, names: Names, viewer: str | None = None, me: str = "我
 # ============================================================
 
 
+# 没有原话的言语：按言语行为写成一个动作（“向钟灵打了个招呼”），耳语（旁人连言语行为也不知道）才是“低声说了些什么”
+SOCIAL_VERBS: dict[Social, str] = {
+    Social.GREET: "向{t}打了个招呼", Social.THANK: "向{t}道谢", Social.APOLOGIZE: "向{t}赔不是", Social.PLEAD: "向{t}求情",
+    Social.PRAISE: "称赞{t}", Social.THREATEN: "出言威胁{t}", Social.TAUNT: "出言讥讽{t}", Social.INSULT: "骂了{t}几句",
+    Social.REFUSE: "回绝了{t}", Social.AGREE: "应承了{t}", Social.JOKE: "跟{t}说笑", Social.COMFORT: "宽慰{t}",
+    Social.EXPLAIN: "向{t}解释了几句", Social.CHALLENGE: "向{t}叫阵", Social.COMMAND: "喝令{t}", Social.FAREWELL: "向{t}告辞",
+    Social.REMARK: "对{t}说了几句", Social.SUBMIT: "向{t}服软",
+}
+
+
+def _speech(v: PerceivedEvent, t: str, topic: str) -> str:
+    if v.topic or v.utterance:
+        return f"对{t}说：“{v.utterance or topic}”" if v.kind == Op.TELL.value else f"问{t}：“{v.utterance or topic}”"
+    if v.social is not None:
+        return SOCIAL_VERBS[v.social].format(t=t) if v.kind == Op.TELL.value else f"向{t}问了几句"
+    return f"对{t}低声说了些什么" if v.kind == Op.TELL.value else f"向{t}低声问了些什么"
+
+
 def _verb(v: PerceivedEvent, names: Names, viewer: str | None, me: str) -> str:
     t, o = _n(names, v.target, viewer, me), _n(names, v.obj, viewer, me)
     topic = render_fact(v.topic, names, viewer, me) if v.topic else "一些话"
@@ -122,8 +152,8 @@ def _verb(v: PerceivedEvent, names: Names, viewer: str | None, me: str) -> str:
         Op.UNLOCK: f"用{o}开{t}的锁",
         Op.LOCK: f"用{o}锁上{t}",
         Op.INSPECT: f"仔细查看{t}",
-        Op.TELL: f"对{t}说：“{v.utterance or topic}”" if v.topic or v.utterance else f"对{t}低声说了些什么",
-        Op.ASK: f"问{t}：“{v.utterance or topic}”" if v.topic or v.utterance else f"向{t}低声问了些什么",
+        Op.TELL: _speech(v, t, topic),
+        Op.ASK: _speech(v, t, topic),
         Op.WAIT: v.utterance or "静静等待",          # 带姿态的等待：姿态是不带主语的动作短语（“坐下来喝了口茶”）
         Op.ATTACK: f"猛地向{t}出手" if v.kind == Op.ATTACK.value and v.target else "出手",
         Op.STUDY: f"埋头研读{t}",

@@ -230,10 +230,15 @@ class GeminiClient:
                         chars += len(piece)
                         yield piece
             except (OSError, http.client.HTTPException) as e:
-                self._local.conn = None
                 raise LLMUnavailable(f"Gemini 流中断: {e}") from e
             ok = True
         finally:
+            if not ok:
+                # 调用方提前收手（生成器被关闭）或中途出错：响应没读完，这条连接不能再复用——关掉，下次重连
+                conn = getattr(self._local, "conn", None)
+                if conn is not None:
+                    conn.close()
+                self._local.conn = None
             self.stats.add(CallStat(self.model, "stream", first, (time.perf_counter() - t0) * 1000, chars, ok))
 
 

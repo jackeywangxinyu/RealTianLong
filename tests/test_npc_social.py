@@ -329,8 +329,13 @@ def test_without_a_known_player_chatter_goes_round_the_room():
     assert talk == [(T0, "hero", Social.GREET), (T0 + 6, "maid", Social.GREET)]
 
 
-def test_witness_shouts_at_whoever_attacks_the_player():
+def test_witness_shouts_only_for_a_player_they_are_fond_of():
     st = Stage(_world(), _cast())
+    st.step(npc=Candidate(Op.ATTACK, "hero"))
+    choice, _, sit = st.decide("maid")
+    assert choice.free is None, "素不相识的书生挨打，满堂宾客不会人人替他出头"
+    st = Stage(_world(), _cast())
+    st.step(hero=Candidate(Op.TELL, "maid", social=Social.GREET))       # 先见过礼：心里有了好感
     st.step(npc=Candidate(Op.ATTACK, "hero"))
     choice, _, sit = st.decide("maid")
     _free(choice, sit, "npc", Social.COMMAND)
