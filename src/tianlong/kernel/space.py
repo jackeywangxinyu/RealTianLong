@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 core/world 的 WorldState，core/schema 的 Kind / Rel
-[OUTPUT]: 对外提供 holder_of / place_of / neighbors / door_between / passable / hops / persons_in / surfaces_in / contents /
+[OUTPUT]: 对外提供 holder_of / place_of / neighbors / passable / hops / persons_in / surfaces_in / contents /
           visible_in / is_concealed / is_night / is_subdued / status_of / martial_power / venomous
 [POS]: kernel 的空间与身体物理；行动规则与感知规则共享的“谁在哪、能看到什么、隔几道门、身手如何”查询，全部只读。
        暗门（hidden）不出现在环顾里，只能靠仔细查看发现（night_only 的只在夜里显形）；单向通道（oneway）只能往一头走
@@ -70,15 +70,6 @@ def passable(s: WorldState, door: str, dest: str) -> bool:
     """单向通道（断崖、塌落的隧道）只能通往 oneway 所指的一端。"""
     oneway = s.attr(door, "oneway")
     return oneway is None or oneway == dest
-
-
-def door_between(s: WorldState, a: str, b: str) -> str | None:
-    """a→b 之间优先返回可通行（未锁、方向对）的门，否则返回任意一扇；不相邻返回 None。"""
-    doors = [d for d, other in neighbors(s, a) if other == b]
-    if not doors:
-        return None
-    usable = [d for d in doors if not s.attr(d, "locked", False) and passable(s, d, b)]
-    return (usable or doors)[0]
 
 
 def hops(s: WorldState, src: str, max_hops: int) -> dict[str, int]:

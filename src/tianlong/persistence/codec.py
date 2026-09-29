@@ -100,11 +100,11 @@ def event_from(d: J) -> Event:
 
 
 def sketch_to(s: EntitySketch) -> J:
-    return {"id": s.id, "kind": s.kind.value, "name": s.name, "attrs": [list(a) for a in s.attrs]}
+    return {"id": s.id, "kind": s.kind.value, "name": s.name, "attrs": [list(a) for a in s.attrs], "seen": s.seen}
 
 
 def sketch_from(d: J) -> EntitySketch:
-    return EntitySketch(d["id"], Kind(d["kind"]), d["name"], tuple((k, v) for k, v in d["attrs"]))
+    return EntitySketch(d["id"], Kind(d["kind"]), d["name"], tuple((k, v) for k, v in d["attrs"]), bool(d.get("seen", True)))
 
 
 def pevent_to(v: PerceivedEvent | None) -> J | None:

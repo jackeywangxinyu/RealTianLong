@@ -1,15 +1,19 @@
 """
 [INPUT]: 依赖 core 的 WorldState / Event / Percept / Fact 等，kernel/space 的空间查询，kernel/resolution 的 Resolution
-[OUTPUT]: 对外提供 Witnessing（一次事件的目击上下文）、scene_percept()、make_percept()、change_facts()、attr_fact()、sketches_for()、audibility()
-[POS]: kernel 的感知物理：决定“谁以何种方式、获得事件的哪一部分”；规则通过 Witnessing 组合自己的感知方式，从而加新行动不改本模块
+[OUTPUT]: 对外提供 Fragment（行动留下的可感知片段）、Witnessing（一次事件的目击上下文）、scene_percept()、make_percept()、
+          change_facts()、attr_fact()、sketches_for()、audibility()、SILENT_FAILURES
+[POS]: kernel 的感知物理：决定“谁以何种方式、获得事件的哪一部分”。观察不按行动的“目标”投影，而按行动在物理世界里
+       实际留下的片段投影——失败的移动没有抵达，目的地的人就什么也看不见；内部失败原因与未说出口的意图默认不进目击。
+       外观只给亲眼所见：言语提到的实体、隔墙听见的地点、门那头的地点都只有名字（seen=False），不读取真实外观。
+       规则通过覆写 fragments()/perceive() 组合这些积木，加新行动不改本模块
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
 import random
-from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, replace
 
 from tianlong.core import (
     OBSERVABLE_ATTRS,
@@ -19,7 +23,9 @@ from tianlong.core import (
     EntitySketch,
     Event,
     Fact,
+    Kind,
     Modality,
+    Outcome,
     PerceivedEvent,
     Percept,
     Proposition,
@@ -38,7 +44,13 @@ from tianlong.kernel.resolution import Resolution
 # ============================================================
 
 HOP_ATTENUATION = 0.3   # 每隔一道门衰减
-MAX_HEARING_HOPS = 1  # 声音只穿过一道门
+MAX_HEARING_HOPS = 1    # 声音只穿过一道门
+
+# 尚未触及世界就失败的尝试：没有可见的动作，也没有响动（伸手去拿、东西却不在；想去的路不在这里）
+SILENT_FAILURES = frozenset({
+    "out_of_reach", "not_found", "not_holding", "already_there", "already_held", "self_target", "subdued",
+    "nothing_to_learn", "already_learned", "route_not_here", "route_mismatch", "not_adjacent",
+})
 
 
 def audibility(loudness: float, hop_count: int, alertness: float) -> float:
@@ -77,16 +89,41 @@ def attr_fact(entity: str, key: str, old: object, new: object) -> Fact:
     return Fact(Proposition.attr(entity, key, new), True)  # type: ignore[arg-type]
 
 
-def sketches_for(s: WorldState, ids: Iterable[str | None]) -> tuple[EntitySketch, ...]:
-    """为感知中出现的实体生成外观草图——只含肉眼可见属性，不泄露锁状态等隐藏属性。"""
-    seen: dict[str, EntitySketch] = {}
+Seen = Callable[[str], bool]
+
+
+def sketches_for(s: WorldState, ids: Iterable[str | None], seen: Seen | None = None) -> tuple[EntitySketch, ...]:
+    """为感知中出现的实体生成草图。seen(eid) 为假的实体只有名字与种类——外观未知，而不是“没有”。"""
+    out: dict[str, EntitySketch] = {}
     for eid in ids:
-        if eid is None or eid in seen or not s.has_entity(eid):
+        if eid is None or eid in out or not s.has_entity(eid):
             continue
         e = s.entity(eid)
-        attrs = tuple((k, v) for k, v in e.attrs if k in OBSERVABLE_ATTRS)
-        seen[eid] = EntitySketch(e.id, e.kind, e.name, attrs)
-    return tuple(seen[k] for k in sorted(seen))
+        if seen is None or seen(eid):
+            out[eid] = EntitySketch(e.id, e.kind, e.name, tuple((k, v) for k, v in e.attrs if k in OBSERVABLE_ATTRS))
+        else:
+            out[eid] = EntitySketch(e.id, e.kind, e.name, (), seen=False)
+    return tuple(out[k] for k in sorted(out))
+
+
+def in_sight(states: Iterable[WorldState], vantage: str) -> Seen:
+    """站在 vantage 能亲眼看见的：这个地点本身、此处（行动前或后）的人与物、连着此处的门。"""
+    states = tuple(states)
+
+    def seen(eid: str) -> bool:
+        if eid == vantage:
+            return True
+        for st in states:
+            if not st.has_entity(eid):
+                continue
+            if st.kind(eid) == Kind.DOOR:
+                if vantage in st.targets(eid, Rel.CONNECTS):
+                    return True
+            elif space.place_of(st, eid) == vantage:
+                return True
+        return False
+
+    return seen
 
 
 def _referenced(s: WorldState, facts: Iterable[Fact]) -> Iterator[str]:
@@ -113,14 +150,42 @@ def make_percept(
     facts: tuple[Fact, ...] = (),
     scopes: tuple[str, ...] = (),
     informant: str | None = None,
+    vantage: str | None = None,
+    also: WorldState | None = None,
 ) -> Percept:
+    """vantage：感知发生的地点，决定哪些实体是亲眼所见（None 只用于场景作者给出的“过去所见”）。
+    言语只让说话双方被看见——话里提到的东西只闻其名；响动连地点也只是听说。"""
     ids = (*_view_ids(view), *_referenced(s, facts), *scopes, informant)
-    return Percept(s.clock, modality, view, facts, scopes, sketches_for(s, ids), informant)
+    seen: Seen | None
+    if modality == Modality.SOUND:
+        seen = lambda _: False  # noqa: E731
+    elif modality == Modality.SPEECH:
+        present = {informant, view.actor if view else None, view.target if view else None, vantage}
+        seen = lambda eid: eid in present  # noqa: E731
+    elif vantage is not None:
+        seen = in_sight((s, also) if also is not None else (s,), vantage)
+    else:
+        seen = None
+    return Percept(s.clock, modality, view, facts, scopes, sketches_for(s, ids, seen), informant)
+
+
+# ============================================================
+#  Fragment：行动在物理世界里实际留下的、可被感知的片段
+#  成功的移动在出发地留下“离开”、在目的地留下“抵达”；推不开的门只在门这一侧留下“推门未果”与响动；
+#  压根没有路可走的尝试什么也不留下——观察由片段决定，而不是由行动的目标决定
+# ============================================================
+
+
+@dataclass(frozen=True, slots=True)
+class Fragment:
+    place: str
+    view: PerceivedEvent               # 在场者看得见的部分：不含未说出口的意图与内部失败原因
+    facts: tuple[Fact, ...] = ()       # 在场者因此获知的事实
+    loudness: float = 0.0              # 从这里传出的响动（0 = 不出声）
 
 
 # ============================================================
 #  Witnessing：一次事件的目击上下文
-#  规则调用这些积木组合出“行动者 / 在场者 / 隔壁听者”各自得到什么
 # ============================================================
 
 
@@ -137,6 +202,7 @@ class Witnessing:
         return self.event.actor
 
     def full_view(self, with_topic: bool = True) -> PerceivedEvent:
+        """行动者自己眼中的完整事件：意图、目标、成败与原因。"""
         it = self.event.intent
         return PerceivedEvent(
             kind=it.op.value,
@@ -150,9 +216,19 @@ class Witnessing:
             utterance=it.utterance if with_topic else None,
         )
 
+    def public_view(self, public_reasons: frozenset[str] = frozenset(), with_topic: bool = True) -> PerceivedEvent:
+        """旁观者眼中的事件：失败原因只有看得出来的才给（被挡开、被闪开），暗处的东西不给 ID。"""
+        v = self.full_view(with_topic)
+        reason = v.reason if v.reason in public_reasons else None
+        obj = None if v.obj and self.before.has_entity(v.obj) and self.before.attr(v.obj, "hidden", False) \
+            and self.before.kind(v.obj) == Kind.DOOR else v.obj
+        return replace(v, reason=reason, obj=obj)
+
     def actor_percept(self) -> tuple[str, Percept]:
         facts = (*self.resolution.learned, *change_facts(self.resolution.changes))
-        p = make_percept(self.after, Modality.SELF, self.full_view(), facts, self.resolution.scopes)
+        here = space.place_of(self.after, self.actor) or self.event.place
+        p = make_percept(self.after, Modality.SELF, self.full_view(), facts, self.resolution.scopes,
+                         vantage=here, also=self.before)
         # 感知时刻是行动发生的 tick，而非结算后的新时钟
         return self.actor, _at_tick(p, self.event.tick)
 
@@ -165,41 +241,55 @@ class Witnessing:
         found.discard(self.actor)
         return tuple(sorted(found))
 
-    def sight(self, view: PerceivedEvent | None = None, facts: tuple[Fact, ...] | None = None) -> Percept:
-        v = view or self.full_view()
-        fs = change_facts(self.resolution.changes) if facts is None else facts
-        return _at_tick(make_percept(self.after, Modality.SIGHT, v, fs), self.event.tick)
-
-    def speech(self, facts: tuple[Fact, ...]) -> Percept:
-        p = make_percept(self.after, Modality.SPEECH, self.full_view(), facts, informant=self.actor)
+    def sight(self, view: PerceivedEvent, facts: tuple[Fact, ...], place: str) -> Percept:
+        p = make_percept(self.after, Modality.SIGHT, view, facts, vantage=place, also=self.before)
         return _at_tick(p, self.event.tick)
 
-    def sounds(self, exclude: Iterable[str]) -> Iterator[tuple[str, Percept]]:
+    def speech(self, facts: tuple[Fact, ...]) -> Percept:
+        p = make_percept(self.after, Modality.SPEECH, self.full_view(), facts, informant=self.actor,
+                         vantage=self.event.place)
+        return _at_tick(p, self.event.tick)
+
+    def sounds(self, place: str, loudness: float, exclude: Iterable[str], salt: int = 0) -> Iterator[tuple[str, Percept]]:
         """隔壁（经门）的人按概率听到“某处有响动”——不知道是谁、做了什么。"""
-        if self.loudness <= 0 or not self.event.place:
+        if loudness <= 0 or not place:
             return
         skip = set(exclude) | {self.actor}
-        dist = space.hops(self.before, self.event.place, MAX_HEARING_HOPS)
-        for place in sorted(dist):
-            if dist[place] == 0:
+        dist = space.hops(self.before, place, MAX_HEARING_HOPS)
+        for other in sorted(dist):
+            if dist[other] == 0:
                 continue
-            for listener in space.persons_in(self.before, place):
+            for listener in space.persons_in(self.before, other):
                 if listener in skip:
                     continue
                 alertness = float(self.before.attr(listener, "alertness", 0.5))
-                p = audibility(self.loudness, dist[place], alertness)
-                roll = random.Random(derive_seed(self.before.seed, self.event.id, listener, "sound")).random()
-                if roll < p:
-                    view = PerceivedEvent(kind="noise", place=self.event.place)
+                p = audibility(loudness, dist[other], alertness)
+                parts = (self.before.seed, self.event.id, listener, "sound") + ((salt,) if salt else ())
+                if random.Random(derive_seed(*parts)).random() < p:
+                    view = PerceivedEvent(kind="noise", place=place)
                     yield listener, _at_tick(make_percept(self.before, Modality.SOUND, view), self.event.tick)
 
-    def standard(self, witness_places: Iterable[str]) -> Iterator[tuple[str, Percept]]:
-        """默认感知组合：行动者自知 + 在场者目击 + 隔壁听声。"""
-        yield self.actor_percept()
-        seers = self.witnesses(witness_places)
-        for w in seers:
-            yield w, self.sight()
-        yield from self.sounds(exclude=seers)
+    def observe(self, fragments: Iterable[Fragment]) -> Iterator[tuple[str, Percept]]:
+        """在场者看见各自所在处的片段；片段的响动再传到隔壁（看见了的人不必再听见）。"""
+        fragments = tuple(fragments)
+        seers: set[str] = set()
+        for f in fragments:
+            here = self.witnesses((f.place,))
+            for w in here:
+                yield w, self.sight(f.view, f.facts, f.place)
+            seers.update(here)
+        for i, f in enumerate(fragments):
+            yield from self.sounds(f.place, f.loudness, seers, salt=i)
+
+    def default_fragments(self, public_reasons: frozenset[str], facts: tuple[Fact, ...] | None = None
+                          ) -> tuple[Fragment, ...]:
+        """默认片段：行动者所在处一次可见的动作；尚未触及世界就失败的尝试什么也不留下。"""
+        if not self.event.place:
+            return ()
+        if self.event.outcome == Outcome.FAILURE and self.event.reason in SILENT_FAILURES:
+            return ()
+        fs = change_facts(self.resolution.changes) if facts is None else facts
+        return (Fragment(self.event.place, self.public_view(public_reasons), fs, self.loudness),)
 
 
 def _at_tick(p: Percept, tick: int) -> Percept:
@@ -234,4 +324,4 @@ def scene_percept(s: WorldState, observer: str) -> Percept:
         facts.append(Fact(Proposition.rel(door, Rel.CONNECTS, place)))
         facts.append(Fact(Proposition.rel(door, Rel.CONNECTS, other)))
     scopes = (place, *space.surfaces_in(s, place))
-    return make_percept(s, Modality.SCENE, None, tuple(facts), scopes)
+    return make_percept(s, Modality.SCENE, None, tuple(facts), scopes, vantage=place)

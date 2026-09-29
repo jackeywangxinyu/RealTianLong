@@ -27,6 +27,7 @@ class AttackRule(ActionRule):
     op = Op.ATTACK
     loudness_base = 0.9
     initiative = 0.7
+    public_reasons = frozenset({"parried", "evaded"})   # 被挡开、被闪开，旁人看得一清二楚
 
     def resolve(self, s: WorldState, it: Intent) -> Resolution:
         target = it.target

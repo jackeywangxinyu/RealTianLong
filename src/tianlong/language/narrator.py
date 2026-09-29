@@ -42,11 +42,17 @@ def fact_lines(viewer: str, percepts: Sequence[Percept], names: Names, show_scen
     return list(dict.fromkeys(lines))      # 同一分钟里的三声响动，只说一次
 
 
+_VISUAL = frozenset({Modality.SELF, Modality.SIGHT, Modality.SCENE})
+
+
 def lore_keys(viewer: str, percepts: Sequence[Percept], lore: Mapping[str, str]) -> list[str]:
-    """本回合真正映入眼帘、且有外观描写的实体：身处的地点、在场的人与物、眼前的通道与事件的参与者——
-    门那头的地点只是听说了名字，不描写。夜里优先取 "id@night" 变体（月下的玉璧不同于白日的玉璧）。"""
+    """本回合真正映入眼帘、且有外观描写的实体：身处的地点、在场的人与物、眼前的通道与事件的参与者。
+    外观只由亲眼所见触发——听人说起的、隔墙听见的、门那头的地点都只有名字（草图 seen=False），不描写。
+    夜里优先取 "id@night" 变体（月下的玉璧不同于白日的玉璧）。"""
     keys: list[str] = []
     for p in percepts:
+        if p.modality not in _VISUAL:
+            continue
         night = is_night(p.tick)
         in_view = {viewer}
         for f in p.facts:
@@ -57,7 +63,7 @@ def lore_keys(viewer: str, percepts: Sequence[Percept], lore: Mapping[str, str])
         if p.event is not None:
             in_view.update(x for x in (p.event.actor, p.event.target, p.event.obj) if x)
         for sk in p.sketches:
-            if sk.id == viewer or sk.id not in in_view:
+            if sk.id == viewer or sk.id not in in_view or not sk.seen:
                 continue
             key = f"{sk.id}@night" if night and f"{sk.id}@night" in lore else sk.id
             if key in lore and key not in keys:

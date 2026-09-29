@@ -44,8 +44,8 @@ def player_store():
     ("拿走桌上的钥匙", Candidate(Op.TAKE, "key")),
     ("悄悄拿钥匙", Candidate(Op.TAKE, "key", manner=Manner.CAREFUL)),
     ("把桌上那把钥匙揣进兜里", Candidate(Op.TAKE, "key")),
-    ("去仓库入口", Candidate(Op.MOVE, "entrance")),
-    ("走向仓库大门", Candidate(Op.MOVE, "entrance")),
+    ("去仓库入口", Candidate(Op.MOVE, "entrance", "door_main")),
+    ("走向仓库大门", Candidate(Op.MOVE, "entrance", "door_main")),
     ("查看桌面", Candidate(Op.INSPECT, "table")),
     ("看看四周", Candidate(Op.INSPECT, "warehouse")),
     ("等待", Candidate(Op.WAIT)),
@@ -98,7 +98,7 @@ def test_llm_failure_falls_back(player_store):
 
 def test_narrator_sees_only_player_percepts(authority, act):
     act(("player", Op.TAKE, "key"))
-    r = act(("guard", Op.MOVE, "warehouse"))
+    r = act(("guard", Op.MOVE, "warehouse", "door_main"))
     llm = FakeLLM("守卫走了进来。")
     store = authority.store.beliefs(authority.ref, "player")
     text = Narrator(llm).narrate("player", [o.percept for o in r.observations_of("player")], store.entities)
@@ -113,7 +113,7 @@ def test_narrator_sees_only_player_percepts(authority, act):
 
 def test_narrator_orders_lapse_first_and_command_is_only_intent(authority, act):
     """等待之后先交代时辰再讲所见；玩家原话进 prompt 但被标明只是意图。"""
-    r = act(("guard", Op.MOVE, "warehouse"))
+    r = act(("guard", Op.MOVE, "warehouse", "door_main"))
     store = authority.store.beliefs(authority.ref, "player")
     percepts = [o.percept for o in r.observations_of("player")]
     plain = Narrator().narrate("player", percepts, store.entities, lapse="第1日 19:00")

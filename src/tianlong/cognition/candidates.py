@@ -73,13 +73,14 @@ def candidates(
 
     out: list[Candidate] = [Candidate(Op.WAIT)]
 
-    # ---- 移动：经由认为存在的门（含自己发现的暗门），去认为相邻的地点；确知是单向且方向不对的才剪掉 ----
+    # ---- 移动：目的地 + 路线。经由认为存在的门（含自己发现的暗门），去认为相邻的地点；
+    #      认为锁着也照样可以去推（记忆可能过时）；确知是单向且方向不对的才剪掉 ----
     for d in doors:
         oneway = next((b.prop.value for b in store.positives(d, "attr.oneway")), None)
         for b in store.positives(d, Rel.CONNECTS.value):
             if b.prop.value != here and (oneway is None or oneway == b.prop.value):
-                out.append(Candidate(Op.MOVE, target=b.prop.value))  # type: ignore[arg-type]
-                out.append(Candidate(Op.MOVE, target=b.prop.value, manner=Manner.CAREFUL))  # type: ignore[arg-type]
+                out.append(Candidate(Op.MOVE, target=b.prop.value, obj=d))  # type: ignore[arg-type]
+                out.append(Candidate(Op.MOVE, target=b.prop.value, obj=d, manner=Manner.CAREFUL))  # type: ignore[arg-type]
 
     # ---- 物件：拿认为在身边的（含认为已被制住者身上的），放/给/开锁用手里的 ----
     helpless = {p for p in persons if store.holds(Proposition.attr(p, "subdued", True))}

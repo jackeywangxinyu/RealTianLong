@@ -14,7 +14,7 @@ from typing import Protocol
 
 from tianlong.agents.predictors import Prediction
 from tianlong.cognition import BeliefStore, Candidate
-from tianlong.cognition.navigation import next_hop
+from tianlong.cognition.navigation import route_to
 from tianlong.core import Fact, Kind, Manner, Modality, Op, Proposition
 from tianlong.core.profiles import Profile
 
@@ -56,9 +56,10 @@ class PolicyKit:
                 return Choice(i, why)
         return None
 
-    def _go_towards(self, sit: Situation, place: str | None, why: str) -> Choice | None:
-        hop = next_hop(sit.beliefs, place) if place else None
-        return self._pick(sit, why, Op.MOVE, hop) if hop else None
+    def _go_towards(self, sit: Situation, place: str | None, why: str, manner: Manner | None = None) -> Choice | None:
+        """沿自己以为的地图走一步：目的地与路线（门）都来自认知。"""
+        hop = route_to(sit.beliefs, place) if place else None
+        return self._pick(sit, why, Op.MOVE, hop[0], hop[1], manner) if hop else None
 
     # ------------------------------------------------------------
     #  近期经历

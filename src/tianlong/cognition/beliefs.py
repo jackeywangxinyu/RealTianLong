@@ -132,7 +132,8 @@ class BeliefStore:
     def revise(self, percept: Percept) -> tuple[BeliefStore, tuple[BeliefChange, ...]]:
         entities = dict(self.entities)
         for sk in percept.sketches:
-            entities[sk.id] = sk
+            if sk.seen or sk.id not in entities:
+                entities[sk.id] = sk      # 亲眼所见才更新外观；只闻其名不抹掉已见过的样子
         beliefs = dict(self.beliefs)
         changes: list[BeliefChange] = []
         conf = confidence_of(percept.modality, percept.informant, self.trust)

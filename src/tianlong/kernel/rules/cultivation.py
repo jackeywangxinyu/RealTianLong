@@ -1,5 +1,5 @@
 """
-[INPUT]: 依赖 kernel/rules/base 的 ActionRule，kernel/space 的持有查询，kernel/perception 的 Witnessing，core 的 SetAttr
+[INPUT]: 依赖 kernel/rules/base 的 ActionRule，kernel/space 的持有查询，kernel/perception 的 Witnessing / Fragment，core 的 SetAttr
 [OUTPUT]: 对外提供 StudyRule（研读秘籍）、UseRule（施用物品）
 [POS]: kernel/rules 的修习与施治。研读是逐次累积的：秘籍的 teaches 指明所授技能、difficulty 指明所需次数，
        进度是私密数值；旁观者只看见你在读东西，不知道你读到了哪、学没学成。施用只看物品的 cures 是否对症
@@ -8,12 +8,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from dataclasses import replace
-
-from tianlong.core import Intent, Op, Outcome, Percept, SetAttr, WorldState
+from tianlong.core import Intent, Op, Outcome, SetAttr, WorldState
 from tianlong.kernel import space
-from tianlong.kernel.perception import Witnessing
+from tianlong.kernel.perception import Fragment, Witnessing
 from tianlong.kernel.resolution import Resolution, fail, succeed
 from tianlong.kernel.rules.base import ActionRule
 
@@ -41,14 +38,9 @@ class StudyRule(ActionRule):
             return Resolution(Outcome.SUCCESS, "mastered", tuple(changes))
         return Resolution(Outcome.SUCCESS, "progress", tuple(changes))
 
-    def perceive(self, w: Witnessing) -> Iterator[tuple[str, Percept]]:
-        # 修习所得只有自己知道；旁人只看见他埋头读着什么
-        yield w.actor_percept()
-        seers = w.witnesses(self.witness_places(w))
-        quiet = replace(w.full_view(), reason=None)     # 不让旁人看出学没学成
-        for seer in seers:
-            yield seer, w.sight(view=quiet, facts=())
-        yield from w.sounds(exclude=seers)
+    def fragments(self, w: Witnessing) -> tuple[Fragment, ...]:
+        # 修习所得只有自己知道；旁人只看见他埋头读着什么（原因“若有所悟/贯通”不公开，技能变化不给旁人）
+        return w.default_fragments(self.public_reasons, facts=())
 
 
 class UseRule(ActionRule):

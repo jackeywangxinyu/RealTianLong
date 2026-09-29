@@ -49,7 +49,7 @@ def test_reward_semantics_on_warehouse():
     assert step_reward(s0, r.state, "player", thief_goals, r.events) > 0.5, "拿到想要的东西是真实进展"
     assert step_reward(s0, r.state, "guard", guard_goals, r.events) < -0.9, "守护的东西被拿走是真实损失"
     # 守卫搜一个身上没有钥匙的人 = 冤枉人
-    s1 = k.step(s0, [Intent("m", "guard", Op.MOVE, "warehouse", based_on=0)]).state
+    s1 = k.step(s0, [Intent("m", "guard", Op.MOVE, "warehouse", "door_main", based_on=0)]).state
     r2 = k.step(s1, [Intent("i", "guard", Op.INSPECT, "player", based_on=1)])
     assert step_reward(s1, r2.state, "guard", guard_goals, r2.events) <= -FALSE_ACCUSATION
     assert potential(s0, "guard", guard_goals[0]) == 1.0

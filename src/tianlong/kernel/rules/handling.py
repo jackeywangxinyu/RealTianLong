@@ -25,6 +25,7 @@ class TakeRule(ActionRule):
     op = Op.TAKE
     loudness_base = 0.8   # 钥匙串会叮当作响
     initiative = 0.6
+    public_reasons = frozenset({"held_by_other"})    # 伸手去夺、对方攥着不放，旁人看得见
 
     def resolve(self, s: WorldState, it: Intent) -> Resolution:
         item = it.target

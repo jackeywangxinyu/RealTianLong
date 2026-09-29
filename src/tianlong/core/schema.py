@@ -84,7 +84,7 @@ def is_functional(predicate: str) -> bool:
 
 
 class Op(StrEnum):
-    MOVE = "move"        # 经由门移动到相邻地点
+    MOVE = "move"        # 经由指定的门（路线）移动到相邻地点
     TAKE = "take"        # 拿起物件
     PUT = "put"          # 把手中物件放到地点/台面（careful 方式会藏起来）
     GIVE = "give"        # 把手中物件交给某人
@@ -117,7 +117,7 @@ def _k(*kinds: Kind) -> frozenset[Kind]:
 
 
 OP_SIGNATURES: dict[Op, OpSignature] = {
-    Op.MOVE: OpSignature(target=_k(Kind.PLACE)),
+    Op.MOVE: OpSignature(target=_k(Kind.PLACE), obj=_k(Kind.DOOR)),    # 目的地 + 路线：知道地名不等于知道路
     Op.TAKE: OpSignature(target=_k(Kind.ITEM)),
     Op.PUT: OpSignature(target=_k(Kind.PLACE, Kind.SURFACE), obj=_k(Kind.ITEM)),
     Op.GIVE: OpSignature(target=_k(Kind.PERSON), obj=_k(Kind.ITEM)),

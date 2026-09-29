@@ -40,9 +40,8 @@ class HeuristicPredictor:
 
     def _one(self, store: BeliefStore, now: int, c: Candidate, missing: list[str]) -> Prediction:
         me = store.owner
-        here = store.location_of(me)
         if c.op == Op.MOVE:
-            door = self._door(store, here, c.target)
+            door = c.obj
             locked = store.believed(Proposition.attr(door, "locked", True)) if door else None
             p = 0.8 if locked is None else (0.1 if locked.holds else 0.95)
             heard = any(ep.event.place == c.target and now - ep.tick <= 5 for ep in store.episodes)
@@ -65,14 +64,3 @@ class HeuristicPredictor:
         if c.op == Op.TELL:
             return Prediction(0.95, 0.0)
         return Prediction(1.0, 0.0)
-
-    @staticmethod
-    def _door(store: BeliefStore, here: str | None, dest: str | None) -> str | None:
-        for door, sk in sorted(store.entities.items()):
-            if sk.kind != Kind.DOOR or here is None or dest is None:
-                continue
-            ends = {b.prop.value for b in store.positives(door, Rel.CONNECTS.value)}
-            if {here, dest} <= ends:
-                return door
-        return None
-

@@ -74,7 +74,7 @@ class Kernel:
             if self._is_person(s, it.actor):
                 view = PerceivedEvent(it.op.value, evt.place or "", it.actor, it.target, it.obj, Outcome.REJECTED,
                                       reason=reason)
-                percept = make_percept(s, Modality.SELF, view)
+                percept = make_percept(s, Modality.SELF, view, vantage=evt.place)
                 observations.append(Observation(make_id("obs", evt.id, it.actor, 0), it.actor, evt.id, percept))
 
         # ---- 2. 按先手度排序后逐个生效：冲突即由顺序裁定 ----

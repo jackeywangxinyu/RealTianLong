@@ -7,11 +7,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
-from tianlong.core import Fact, Intent, Kind, Op, Percept, Proposition, Rel, WorldState
+from tianlong.core import Fact, Intent, Kind, Op, Proposition, Rel, WorldState
 from tianlong.kernel import space
-from tianlong.kernel.perception import Witnessing
+from tianlong.kernel.perception import Fragment, Witnessing
 from tianlong.kernel.resolution import Resolution, fail, succeed
 from tianlong.kernel.rules.base import ActionRule
 
@@ -73,10 +71,6 @@ class InspectRule(ActionRule):
             found += _secret_passages(s, here, target)
         return succeed(learned=found, scopes=holders)
 
-    def perceive(self, w: Witnessing) -> Iterator[tuple[str, Percept]]:
+    def fragments(self, w: Witnessing) -> tuple[Fragment, ...]:
         # 在场者看见搜查过程，也看见搜出了什么（但不获得“完整看清”的范围）
-        yield w.actor_percept()
-        seers = w.witnesses(self.witness_places(w))
-        for seer in seers:
-            yield seer, w.sight(facts=w.resolution.learned)
-        yield from w.sounds(exclude=seers)
+        return w.default_fragments(self.public_reasons, facts=w.resolution.learned)

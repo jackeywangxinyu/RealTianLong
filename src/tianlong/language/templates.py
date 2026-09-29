@@ -27,6 +27,8 @@ REASONS: dict[str, str] = {
     "already_locked": "本来就锁着",
     "already_unlocked": "本来就没锁",
     "not_adjacent": "从这里过不去",
+    "route_not_here": "这里并没有那条路",
+    "route_mismatch": "那条路并不通往那里",
     "self_target": "不能对自己这么做",
     "stale": "时机已经过去了",
     "duplicate_actor": "同一时刻只能做一件事",
@@ -112,7 +114,8 @@ def _verb(v: PerceivedEvent, names: Names, viewer: str | None, me: str) -> str:
     topic = render_fact(v.topic, names, viewer, me) if v.topic else "一些话"
     op = Op(v.kind)
     table = {
-        Op.MOVE: f"来到{t}" if v.actor == viewer and v.outcome == Outcome.SUCCESS else f"走向{t}",  # 自己只写到达，步态留给原话
+        Op.MOVE: (f"来到{t}" if v.actor == viewer and v.outcome == Outcome.SUCCESS    # 自己只写到达，步态留给原话
+                  else f"走向{t}" if v.target else f"走向{o}" if v.obj else "想要离开"),  # 旁人只看见他走向哪道门
         Op.TAKE: f"拿起{t}",
         Op.PUT: f"把{o}放在{t}",
         Op.GIVE: f"把{o}交给{t}",

@@ -40,14 +40,15 @@ class _SpeechRule(ActionRule):
         if w.resolution.outcome != Outcome.SUCCESS:
             return
         whisper = it.manner == Manner.CAREFUL
-        seers = w.witnesses(self.witness_places(w))
+        place = w.event.place or ""
+        seers = w.witnesses((place,))
         for person in seers:
             if person == it.target or not whisper:
                 yield person, w.speech(self.conveyed(it))
             else:
                 # 耳语：旁人只看见两人在交谈，听不到内容
-                yield person, w.sight(view=w.full_view(with_topic=False), facts=())
-        yield from w.sounds(exclude=seers)
+                yield person, w.sight(w.public_view(with_topic=False), (), place)
+        yield from w.sounds(place, w.loudness, seers)
 
 
 class TellRule(_SpeechRule):

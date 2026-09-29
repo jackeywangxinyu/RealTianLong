@@ -58,7 +58,7 @@ def test_take_moves_location_not_ownership(kernel, warehouse):
 
 def test_locked_door_blocks_and_teaches(kernel, warehouse):
     s = warehouse.state
-    r = kernel.step(s, [make_intent("player", Op.MOVE, "storeroom", based_on=s.version)])
+    r = kernel.step(s, [make_intent("player", Op.MOVE, "storeroom", "door_store", based_on=s.version)])
     e = event_of(r, "player")
     assert (e.outcome, e.reason) == (Outcome.FAILURE, "door_locked")
     assert r.state.target("player", Rel.AT) == "warehouse"
@@ -73,7 +73,7 @@ def test_unlock_then_enter(kernel, warehouse):
     assert event_of(r, "player").outcome == Outcome.SUCCESS
     assert r.state.attr("door_store", "locked") is False
     s = r.state
-    r = kernel.step(s, [make_intent("player", Op.MOVE, "storeroom", based_on=s.version)])
+    r = kernel.step(s, [make_intent("player", Op.MOVE, "storeroom", "door_store", based_on=s.version)])
     assert r.state.target("player", Rel.AT) == "storeroom"
 
 
@@ -144,7 +144,7 @@ def test_hide_then_inspect_reveals(kernel, warehouse):
     s = r.state
     assert s.attr("key", "hidden") is True
     # 守卫走进来环顾：看不见藏起来的钥匙
-    s = kernel.step(s, [make_intent("guard", Op.MOVE, "warehouse", based_on=s.version)]).state
+    s = kernel.step(s, [make_intent("guard", Op.MOVE, "warehouse", "door_main", based_on=s.version)]).state
     r = kernel.step(s, [make_intent("guard", Op.WAIT, based_on=s.version)])
     scene = only(r, "guard", Modality.SCENE)[0]
     assert not any(f.prop.subject == "key" for f in scene.facts)
@@ -158,7 +158,7 @@ def test_hide_then_inspect_reveals(kernel, warehouse):
 def test_search_person_finds_concealed_small_item(kernel, warehouse):
     s = warehouse.state
     s = kernel.step(s, [make_intent("player", Op.TAKE, "key", based_on=s.version)]).state
-    s = kernel.step(s, [make_intent("guard", Op.MOVE, "warehouse", based_on=s.version)]).state
+    s = kernel.step(s, [make_intent("guard", Op.MOVE, "warehouse", "door_main", based_on=s.version)]).state
     r = kernel.step(s, [make_intent("guard", Op.INSPECT, "player", based_on=s.version)])
     assert Fact(Proposition.rel("key", Rel.AT, "player")) in only(r, "guard", Modality.SELF)[0].facts
     assert only(r, "player", Modality.SIGHT), "被搜身的人当然知道自己被搜了"
@@ -212,7 +212,7 @@ def _warehouse_parts():
 def test_step_is_deterministic(kernel, warehouse):
     s = warehouse.state
     intents = [make_intent("player", Op.TAKE, "key", based_on=0, intent_id="p"),
-               make_intent("guard", Op.MOVE, "warehouse", based_on=0, intent_id="g")]
+               make_intent("guard", Op.MOVE, "warehouse", "door_main", based_on=0, intent_id="g")]
     a, b = kernel.step(s, intents), kernel.step(s, list(reversed(intents)))
     assert a.state.fingerprint() == b.state.fingerprint()
     assert [o.id for o in a.observations] == [o.id for o in b.observations]

@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from tianlong.agents.policy_kit import Choice, PolicyKit, Situation
-from tianlong.cognition.navigation import believed_place, next_hop
+from tianlong.cognition.navigation import believed_place
 from tianlong.core import Kind, Manner, Op
 from tianlong.core.profiles import Goal, GoalKind
 
@@ -101,8 +101,7 @@ class MartialTactics(PolicyKit):
         started = self._here(b) != self._origin(sit)
         if started and len(outsiders) == 1:
             return self._pick(sit, f"被{self._name(b, outsiders[0])}撞见了，不能留活口", Op.ATTACK, outsiders[0])
-        hop = next_hop(b, g.home)
-        return self._pick(sit, f"趁夜悄悄往{self._name(b, g.home)}去", Op.MOVE, hop, manner=Manner.CAREFUL) if hop else None
+        return self._go_towards(sit, g.home, f"趁夜悄悄往{self._name(b, g.home)}去", Manner.CAREFUL)
 
     @staticmethod
     def _origin(sit: Situation) -> str | None:

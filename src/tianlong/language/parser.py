@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
 from tianlong.cognition import BeliefStore, Candidate
+from tianlong.cognition.navigation import routes_between
 from tianlong.core import Fact, Kind, Manner, Op, Proposition, Rel
 from tianlong.core.grammar import signature_error
 from tianlong.language.command import ACTION_WORDS, Mention, ParsedCommand, SpeechMode, analyze, clarify
@@ -48,7 +49,7 @@ _CAREFUL = ("悄悄", "小心", "轻轻", "偷偷", "藏")
 _ROUGH = ("用力", "粗暴", "猛", "狠狠")
 _ASKS = {
     Op.TAKE: "你想拿什么？", Op.PUT: "你想把什么放到哪里？", Op.GIVE: "你想把什么交给谁？",
-    Op.UNLOCK: "你想用什么打开哪扇门？", Op.LOCK: "你想用什么锁上哪扇门？", Op.MOVE: "你想去哪里？",
+    Op.UNLOCK: "你想用什么打开哪扇门？", Op.LOCK: "你想用什么锁上哪扇门？", Op.MOVE: "你想去哪里？你知道怎么走过去吗？",
     Op.TELL: "你想告诉谁什么？", Op.ASK: "你想问谁什么？", Op.INSPECT: "你想查看什么？",
     Op.ATTACK: "你想对谁出手？", Op.STUDY: "你想研读什么？", Op.USE: "你想把什么用在谁身上？",
 }
@@ -138,6 +139,7 @@ def _parse_as(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention]) 
         target = pick(Kind.PLACE, Kind.SURFACE, Kind.PERSON, exclude=(me,)) or here
     elif op == Op.MOVE:
         target = pick(Kind.PLACE, Kind.DOOR)
+        obj = pick(Kind.DOOR) if target is not None and store.sketch(target).kind == Kind.PLACE else None
     elif op == Op.ATTACK:
         target = pick(Kind.PERSON, exclude=(me,))
     elif op == Op.STUDY:
@@ -168,13 +170,21 @@ def _parse_as(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention]) 
 
 
 def normalize(c: Candidate, store: BeliefStore) -> Candidate:
-    """“朝那扇门走” = 去门那边的地点（按玩家以为的门连接关系换算）。"""
+    """MOVE 绑定一条玩家自己知道的路：“朝那扇门走” = 经这扇门去门那边的地点；“去某地” = 经玩家认为连通的门
+    （认为没锁的优先）。玩家不知道怎么去，路线就留空——语法检查会追问，内核不会替他从真实地图里挑一条暗道。"""
+    if c.op != Op.MOVE:
+        return c
+    here = store.location_of(store.owner)
     sk = store.sketch(c.target or "")
-    if c.op == Op.MOVE and sk is not None and sk.kind == Kind.DOOR:
-        here = store.location_of(store.owner)
+    if sk is not None and sk.kind == Kind.DOOR:
         others = [b.prop.value for b in store.positives(sk.id, Rel.CONNECTS.value) if b.prop.value != here]
         if len(others) == 1:
-            return Candidate(Op.MOVE, str(others[0]), None, c.manner, None)
+            return Candidate(Op.MOVE, str(others[0]), sk.id, c.manner, None)
+        return c
+    if c.target is not None and c.obj is None and here is not None:
+        routes = routes_between(store, here, c.target)
+        if routes:
+            return Candidate(Op.MOVE, c.target, routes[0], c.manner, None)
     return c
 
 
@@ -197,7 +207,8 @@ _SYSTEM = (
     "actor=行动主体：player=玩家本人，other=别人，unknown=说不清。只有 immediate 且 actor=player 才会被执行。"
     "只能引用实体表里的 id；做不到或意图不明就把 op 设为 unknown 并给出 clarification。"
     "target=行动直接作用的对象（拿的物品、去的地点、开的门、说话的对象、查看的东西）；"
-    "obj=工具或被递交/放置的物品（开锁的钥匙、放下或交出的东西）；不适用的字段填 null。"
+    "obj=工具或被递交/放置的物品（开锁的钥匙、放下或交出的东西）；move 的 obj 是走的那扇门（不确定就填 null）；"
+    "不适用的字段填 null。"
     "manner: careful=小心/悄悄/藏，rough=粗暴/用力，否则 normal。"
     "tell/ask 的语义内容用 topic_subject/topic_value 表示“subject 在 value”（ask 时 topic_value 留空）。"
 )

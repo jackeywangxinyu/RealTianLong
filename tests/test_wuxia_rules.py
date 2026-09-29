@@ -90,15 +90,15 @@ def test_hidden_passage_only_by_night_and_never_in_scene(kernel):
     night = _at_bottom(dojo(clock=at(1, 20, 0)))
     r = step(kernel, night, ("b", Op.INSPECT, "wall"))
     assert Fact(Proposition.rel("crack", Rel.CONNECTS, "cave")) in self_percept(r, "b").facts
-    r = step(kernel, r.state, ("b", Op.MOVE, "cave"))
+    r = step(kernel, r.state, ("b", Op.MOVE, "cave", "crack"))
     assert r.state.target("b", Rel.AT) == "cave"
 
 
 def test_cliff_is_one_way(kernel):
-    s = step(kernel, dojo(), ("b", Op.MOVE, "top")).state
-    s = step(kernel, s, ("b", Op.MOVE, "bottom")).state
+    s = step(kernel, dojo(), ("b", Op.MOVE, "top", "stair")).state
+    s = step(kernel, s, ("b", Op.MOVE, "bottom", "cliff")).state
     assert s.target("b", Rel.AT) == "bottom"
-    r = step(kernel, s, ("b", Op.MOVE, "top"))
+    r = step(kernel, s, ("b", Op.MOVE, "top", "cliff"))
     e = next(e for e in r.events if e.actor == "b")
     assert (e.outcome, e.reason) == (Outcome.FAILURE, "one_way")
     assert Fact(Proposition.attr("cliff", "oneway", "bottom")) in self_percept(r, "b").facts
@@ -116,12 +116,12 @@ def test_wound_then_subdue_then_recover(kernel):
     r = step(kernel, r.state, ("a", Op.ATTACK, "b"))
     s = r.state
     assert s.attr("b", "subdued_until") == s.clock - 1 + SUBDUE_TICKS
-    r = step(kernel, s, ("b", Op.MOVE, "top"))
+    r = step(kernel, s, ("b", Op.MOVE, "top", "stair"))
     assert next(e for e in r.events if e.actor == "b").reason == "subdued"
     r = step(kernel, r.state, ("b", Op.TELL, "a", None), topic=Fact(Proposition.rel("book", Rel.AT, "b")))
     assert next(e for e in r.events if e.actor == "b").outcome == Outcome.SUCCESS, "穴道被制，嘴还能说"
     later = r.state.stamp(r.state.version, r.state.clock + SUBDUE_TICKS)
-    r = step(kernel, later, ("b", Op.MOVE, "top"))
+    r = step(kernel, later, ("b", Op.MOVE, "top", "stair"))
     assert r.state.target("b", Rel.AT) == "top", "时辰一到，穴道自解"
 
 

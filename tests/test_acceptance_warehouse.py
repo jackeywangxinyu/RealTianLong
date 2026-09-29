@@ -44,7 +44,7 @@ def test_design_acceptance_story(authority, act):
     assert any("响动" in t for t in memories(authority, "guard"))
 
     # ---- 第四段：守卫进去查看，行动再次进入实际结算 ----
-    act(("guard", Op.MOVE, "warehouse"))
+    act(("guard", Op.MOVE, "warehouse", "door_main"))
     g = beliefs(authority, "guard")
     assert not g.believed(Proposition.rel("key", Rel.AT, "table")).holds, "发现钥匙不见了"
     assert g.location_of("key") is None, "但不知道谁拿走了它"
@@ -86,9 +86,9 @@ def test_second_writer_gets_version_conflict():
 
 def test_replay_reproduces_world():
     script = [
-        [("player", Op.TAKE, "key"), ("guard", Op.MOVE, "warehouse")],
+        [("player", Op.TAKE, "key"), ("guard", Op.MOVE, "warehouse", "door_main")],
         [("player", Op.UNLOCK, "door_store", "key"), ("guard", Op.INSPECT, "player")],
-        [("player", Op.MOVE, "storeroom"), ("captain", Op.MOVE, "entrance")],
+        [("player", Op.MOVE, "storeroom", "door_store"), ("captain", Op.MOVE, "entrance", "path")],
     ]
 
     def run():

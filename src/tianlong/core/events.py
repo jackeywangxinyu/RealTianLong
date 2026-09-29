@@ -1,7 +1,8 @@
 """
 [INPUT]: 依赖 core/schema 的 Op / Manner / Kind，core/changes 的 Change，core/propositions 的 Fact，core/entities 的 Scalar
-[OUTPUT]: 对外提供 Intent / Outcome / Event / PerceivedEvent / Modality / EntitySketch / Percept / Observation
-[POS]: core 的因果链数据：意图 → 事件（真相，含变化）→ 观察（服务端溯源记录）→ 感知（角色可见的片面内容）
+[OUTPUT]: 对外提供 Intent / Outcome / Event / PerceivedEvent / Modality / EntitySketch（含亲见/只闻其名）/ Percept / Observation
+[POS]: core 的因果链数据：意图 → 事件（真相，含变化）→ 观察（服务端溯源记录）→ 感知（角色可见的片面内容）；
+       MOVE 的 obj 是所走的路线（门），目的地与路线一起构成行动，内核不替角色挑路
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -27,7 +28,7 @@ class Intent:
     actor: str
     op: Op
     target: str | None = None
-    obj: str | None = None          # 工具或被操作的物件（开锁的钥匙、递交的物品）
+    obj: str | None = None          # 工具或被操作的物件（开锁的钥匙、递交的物品）；MOVE 时是所走的路线（门）
     manner: Manner = Manner.NORMAL
     topic: Fact | None = None       # 语义内容：tell 的命题（可以是谎言）、ask 的问题
     based_on: int = 0
@@ -95,12 +96,16 @@ class PerceivedEvent:
 
 @dataclass(frozen=True, slots=True)
 class EntitySketch:
-    """角色得以认识某实体时获得的外观：种类、名字与肉眼可见的属性。"""
+    """角色得以认识某实体时获得的样子：种类、名字，以及——只有亲眼见过才有的——外观属性。
+
+    seen=False 表示只闻其名（听人提起、隔墙听见、门那头的地点）：attrs 恒为空，外观是“未知”而不是“没有”。
+    """
 
     id: str
     kind: Kind
     name: str
     attrs: tuple[tuple[str, Scalar], ...] = ()
+    seen: bool = True
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,7 +30,7 @@ pytestmark = pytest.mark.learn
 def test_featurize_encodes_polarity_direction_and_confidence(warehouse):
     s = warehouse.state
     r = Kernel().step(s, [make_intent("player", Op.TAKE, "key", based_on=0)])
-    r = Kernel().step(r.state, [make_intent("guard", Op.MOVE, "warehouse", based_on=1)])
+    r = Kernel().step(r.state, [make_intent("guard", Op.MOVE, "warehouse", "door_main", based_on=1)])
     store = BeliefStore("guard").revise_all(warehouse.priors["guard"])[0]
     # 守卫从未进入仓库之前与之后的认知差：负边“钥匙不在桌上”应当出现
     for o in r.observations:
@@ -76,10 +76,10 @@ def test_agent_label_keeps_unknown_unknown(warehouse):
     s = warehouse.state
     guard = BeliefStore("guard").revise_all(warehouse.priors["guard"])[0]
     r = Kernel().step(s, [make_intent("player", Op.TAKE, "key", based_on=0)])
-    r2 = Kernel().step(r.state, [make_intent("guard", Op.MOVE, "warehouse", based_on=1)])
+    r2 = Kernel().step(r.state, [make_intent("guard", Op.MOVE, "warehouse", "door_main", based_on=1)])
     before = guard.revise_all(o.percept for o in r.observations if o.observer == "guard")[0]
     after = before.revise_all(o.percept for o in r2.observations if o.observer == "guard")[0]
-    smp = agent_sample(before, after, r.state.clock, "guard", Candidate(Op.MOVE, "warehouse"), True)
+    smp = agent_sample(before, after, r.state.clock, "guard", Candidate(Op.MOVE, "warehouse", "door_main"), True)
     key_pos = list(smp.located).index(smp.graph.index_of("key"))
     assert smp.holder_now[key_pos] == smp.graph.index_of("table")
     assert smp.holder_next[key_pos] == -1, "进门后：钥匙不在桌上，但去向未知"

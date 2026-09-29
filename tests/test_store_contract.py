@@ -20,9 +20,9 @@ from tianlong.runtime.authority import WorldAuthority
 from tianlong.scenarios import build_warehouse
 
 SCRIPT = [
-    [("player", Op.TAKE, "key"), ("guard", Op.MOVE, "warehouse")],
+    [("player", Op.TAKE, "key"), ("guard", Op.MOVE, "warehouse", "door_main")],
     [("player", Op.UNLOCK, "door_store", "key"), ("guard", Op.INSPECT, "player")],
-    [("player", Op.MOVE, "storeroom"), ("guard", Op.TELL, "player")],   # 语法非法 → 被拒也要可回放
+    [("player", Op.MOVE, "storeroom", "door_store"), ("guard", Op.TELL, "player")],   # 语法非法 → 被拒也要可回放
     [("player", Op.PUT, "storeroom", "key")],
 ]
 

@@ -108,7 +108,8 @@ def belief_view(store: BeliefStore, now: int) -> GraphView:
             if not _applies(sk.kind, a):
                 attrs.append((a, 0.0))
             elif a in OBSERVABLE_ATTRS:
-                attrs.append((a, _tri(bool(observable.get(a, False)))))  # 看得见的属性：没看到即为否
+                # 亲眼见过：外观上没有即为否；只闻其名：未知（0），不能把缺失当成 False
+                attrs.append((a, _tri(bool(observable.get(a, False))) if sk.seen else 0.0))
             else:
                 b = store.believed(Proposition.attr(eid, a, True))
                 attrs.append((a, (1.0 if b.holds else -1.0) if b is not None else 0.0))
