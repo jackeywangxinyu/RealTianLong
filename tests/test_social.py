@@ -1,9 +1,10 @@
 """
 [INPUT]: 依赖 tianlong.core 的 Intent / Op / Manner / Social / Fact / Proposition / Rel，tianlong.persistence 的 codec 与 InMemoryWorldStore，
-         tianlong.runtime.authority 的 WorldAuthority，tianlong.scenarios 的 build_wuliang，tianlong.language.templates 的 render_percept
+         tianlong.runtime.authority 的 WorldAuthority，tianlong.scenarios 的 build_wuliang，tianlong.language.templates 的 render_percept，
+         tianlong.kernel.perception 的 scene_percept
 [OUTPUT]: 主持层的内核地基验收：自由言语（不带命题的 TELL/ASK）合法且只传原话与言语行为、不产生任何事实或信念；
           带姿态的等待让在场的人亲眼看见、不带姿态的等待照旧无声无息；耳语时旁人听不到原话也不知道言语行为；
-          言语行为随意图与感知落库往返；模板把自由言语与姿态写成人话
+          言语行为随意图与感知落库往返；模板把自由言语与姿态写成人话，所见清单按所在处归拢且每条事实都在
 [POS]: tests 的主持层地基：证伪“闲话会改变世界”“姿态会被隔墙看见”“耳语泄露了是赔罪还是威胁”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -15,6 +16,7 @@ import itertools
 import pytest
 
 from tianlong.core import Fact, Intent, Manner, Modality, Op, Outcome, Proposition, Rel, Social
+from tianlong.kernel.perception import scene_percept
 from tianlong.language.templates import render_percept
 from tianlong.persistence import InMemoryWorldStore
 from tianlong.persistence.codec import intent_from, intent_to, pevent_from, pevent_to
@@ -113,6 +115,19 @@ def test_templates_render_free_speech_and_gestures(auth):
     texts = [render_percept(p, names, "duanyu", "你") for p in _percepts(s, "duanyu") if p.event is not None]
     assert any("对钟灵说：“多谢姑娘”" in t for t in texts)
     assert any("龚光杰冷笑一声" in t for t in texts)
+
+
+def test_scene_list_groups_by_place_and_keeps_every_fact(auth):
+    """所见清单按所在处归拢成人话，不再一人一句“某某在剑湖宫大殿”；每个在场者与物件照旧都被点到。"""
+    head = auth.head()
+    names = auth.store.beliefs(auth.ref, "duanyu").entities
+    scene = scene_percept(head, "duanyu")
+    text = render_percept(scene, names, "duanyu", "你")
+    assert "都在剑湖宫大殿" in text and text.count("在剑湖宫大殿") == 1
+    assert "长剑在兵器架上" in text
+    for f in scene.facts:
+        if f.holds and f.prop.predicate == Rel.AT.value and "duanyu" not in (f.prop.subject, f.prop.value):
+            assert names[f.prop.subject].name in text
 
 
 # ============================================================

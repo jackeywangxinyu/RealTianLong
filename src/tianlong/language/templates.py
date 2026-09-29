@@ -2,7 +2,8 @@
 [INPUT]: 依赖 core 的 EntitySketch / Kind / Fact / PerceivedEvent / Percept / Modality / Op / Outcome / Rel / Social
 [OUTPUT]: 对外提供 Names 类型、render_fact()、render_event()、render_experience()、render_percept()、REASONS / SUCCESS_NOTES / ATTR_WORDS、
           SOCIAL_VERBS（没有原话的言语按言语行为写成动作：“向钟灵打了个招呼”）
-[POS]: language 的确定性文本层（无 LLM）；memory 用它生成经历文本，narrator 在无模型时用它兜底——同一套措辞，两处复用
+[POS]: language 的确定性文本层（无 LLM）；memory 用它生成经历文本，narrator 在无模型时用它兜底——同一套措辞，两处复用。
+       所见清单按所在处归拢成人话（也是交给声音模型的事实清单：更短、更像话，每条事实照旧都在）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -178,14 +179,26 @@ def render_event(v: PerceivedEvent, names: Names, viewer: str | None = None, me:
 def render_percept(p: Percept, names: Names, viewer: str, me: str = "我") -> str:
     """角色视角的一句话（me 是观察者的自称：记忆里是“我”，对玩家叙述时是“你”）。SCENE 渲染为所见清单。"""
     if p.modality == Modality.SCENE:
-        seen = [render_fact(f, names, viewer, me) for f in p.facts if f.holds and f.prop.predicate == Rel.AT.value
-                and viewer not in (f.prop.subject, f.prop.value)]      # 自己在哪、身上带着什么不必每回念叨
-        return "；".join(seen) if seen else "四下空无一物"
+        return _scene(p, names, viewer, me)
     if p.event is None:
         return "；".join(render_fact(f, names, viewer, me) for f in p.facts)
     text = render_experience(p.modality, p.event, names, viewer, me)
     consequences = _consequences(p, names, viewer, me)
     return text + ("——" + "，".join(consequences) if consequences else "")
+
+
+def _scene(p: Percept, names: Names, viewer: str, me: str) -> str:
+    """所见清单按所在处归拢：“干光豪、葛光佩都在剑湖宫大殿；长剑在兵器架上”，而不是一人一句“某某在剑湖宫大殿”。
+    自己在哪、身上带着什么不必每回念叨；归拢只改措辞，每条“在”的事实照旧都在。"""
+    groups: dict[str, list[str]] = {}
+    for f in p.facts:
+        prop = f.prop
+        if f.holds and prop.predicate == Rel.AT.value and viewer not in (prop.subject, prop.value):
+            groups.setdefault(str(prop.value), []).append(_n(names, prop.subject, viewer, me))
+    if not groups:
+        return "四下空无一物"
+    return "；".join(f"{'、'.join(who)}{'都' if len(who) > 1 else ''}在{_where(names, where, viewer, me)}"
+                    for where, who in groups.items())
 
 
 def _consequences(p: Percept, names: Names, viewer: str, me: str) -> list[str]:
