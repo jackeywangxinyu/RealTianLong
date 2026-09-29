@@ -2,7 +2,7 @@
 [INPUT]: 依赖 core 的 Percept / Modality / Op / Outcome，language/templates 的 render_percept / Names，language/llm 的 LLMClient
 [OUTPUT]: 对外提供 Narrator（把玩家本回合的感知写成叙述）、fact_lines()、lore_keys()
 [POS]: language 的输出层；输入只有玩家自己的感知（不是世界真相），模板先把它们写成事实清单，LLM 只负责润色，
-       被要求不得添加清单外的任何人物、物品、事件或结论；模型不可用时直接输出清单
+       被要求不得添加清单外的任何人物、物品、事件或结论；玩家原话只作意图与姿态；模型不可用时直接输出清单
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -20,6 +20,8 @@ log = logging.getLogger(__name__)
 _SYSTEM = (
     "你是一部中文文字冒险游戏的叙述者，用第二人称“你”写 2~4 句简洁的叙述。"
     "只能使用给定清单里的事实；不得添加清单之外的人物、物品、事件、动机或推断；可以适度描写氛围与动作细节。"
+    "程度照清单原样：略有所得不等于学成，受伤不等于被制住。发现了东西不等于拿到手，不要替玩家多走一步。"
+    "玩家的输入只表明意图与姿态，成败与结果一律以事实清单为准。"
 )
 
 
@@ -74,15 +76,19 @@ class Narrator:
         self.lore = dict(lore or {})
 
     def narrate(self, viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False,
-                fresh: Sequence[str] = ()) -> str:
+                fresh: Sequence[str] = (), command: str = "", lapse: str = "") -> str:
+        """command 是玩家原话（让“跳下断崖”读起来像跳，而不是“走向崖底”）；lapse 是一段等待之后的时辰，
+        排在事实之前——先有“天色已黑”，才有“月光照在玉璧上”。"""
         lines = fact_lines(viewer, percepts, names, show_scene)
         looks = [self.lore[k] for k in fresh if k in self.lore]
+        passed = [f"（不觉已是{lapse}）"] if lapse else []
         if not lines and not looks:
-            return "时间悄悄过去，什么也没有发生。"
-        plain = "\n".join(lines + [f"（{x}）" for x in looks])
+            return "\n".join(["时间悄悄过去，什么也没有发生。", *passed])
+        plain = "\n".join(passed + lines + [f"（{x}）" for x in looks])
         if self.llm is None:
             return plain
-        prompt = "本回合玩家感知到的事实：\n" + "\n".join(lines or ["（无事发生）"])
+        prompt = (f"玩家的输入：{command}\n\n" if command else "") + "本回合玩家感知到的事实：\n"
+        prompt += "\n".join(passed + (lines or ["（无事发生）"]))
         if looks:
             prompt += "\n\n玩家初次看清的人与物（仅作外观描写的依据）：\n" + "\n".join(looks)
         system = _SYSTEM + (f"\n世界：{self.setting}" if self.setting else "") + (f"\n文风：{self.style}" if self.style else "")

@@ -40,7 +40,7 @@ REASONS: dict[str, str] = {
 }
 
 # 成功时的附注（研读的进境）
-SUCCESS_NOTES: dict[str, str] = {"progress": "，若有所悟", "mastered": "，豁然贯通"}
+SUCCESS_NOTES: dict[str, str] = {"progress": "，若有所悟，却还未能融会贯通", "mastered": "，豁然贯通"}
 
 # 属性命题的措辞：(为真, 为假)
 ATTR_WORDS: dict[str, tuple[str, str]] = {
@@ -112,7 +112,7 @@ def _verb(v: PerceivedEvent, names: Names, viewer: str | None, me: str) -> str:
     topic = render_fact(v.topic, names, viewer, me) if v.topic else "一些话"
     op = Op(v.kind)
     table = {
-        Op.MOVE: f"走向{t}",
+        Op.MOVE: f"来到{t}" if v.actor == viewer and v.outcome == Outcome.SUCCESS else f"走向{t}",  # 自己只写到达，步态留给原话
         Op.TAKE: f"拿起{t}",
         Op.PUT: f"把{o}放在{t}",
         Op.GIVE: f"把{o}交给{t}",

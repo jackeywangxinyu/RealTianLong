@@ -164,9 +164,8 @@ class GameSession:
         me = self.beliefs(self.player)
         fresh = [key for key in lore_keys(self.player, percepts, self.narrator.lore) if key not in self._described]
         self._described.update(fresh)
-        narration = self.narrator.narrate(self.player, percepts, me.entities, fresh=fresh)
-        if ticks > 1:
-            narration += f"\n（不觉已是{clock_label(self.authority.head().clock)}）"
+        lapse = clock_label(self.authority.head().clock) if ticks > 1 else ""
+        narration = self.narrator.narrate(self.player, percepts, me.entities, fresh=fresh, command=text, lapse=lapse)
         clock.lap("narrate")
         return TurnReport(clock_label(head.clock), parsed, narration, True, tuple(events),
                           tuple(deliberations), settlement, clock.laps)

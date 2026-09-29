@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 tianlong.language 的 parser / narrator / speaker / llm / templates，tianlong.cognition 的 BeliefStore
-[OUTPUT]: 语言层测试：规则解析表、LLM 只在规则失败时调用、LLM 引用陌生实体被拒、叙述只含玩家感知、失败回退、磁盘缓存
+[OUTPUT]: 语言层测试：规则解析表、LLM 只在规则失败时调用、LLM 引用陌生实体被拒、叙述只含玩家感知、时辰先于所见、玩家原话只作意图、失败回退、磁盘缓存
 [POS]: tests 的语言层；验证“LLM 负责开放语义与文字表达，但永远不裁定事实、不越过认知边界”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -107,6 +107,19 @@ def test_narrator_sees_only_player_percepts(authority, act):
                                                    store.entities)
     assert "看见守卫走向仓库" in fallback and "我" not in fallback
 
+
+
+def test_narrator_orders_lapse_first_and_command_is_only_intent(authority, act):
+    """等待之后先交代时辰再讲所见；玩家原话进 prompt 但被标明只是意图。"""
+    r = act(("guard", Op.MOVE, "warehouse"))
+    store = authority.store.beliefs(authority.ref, "player")
+    percepts = [o.percept for o in r.observations_of("player")]
+    plain = Narrator().narrate("player", percepts, store.entities, lapse="第1日 19:00")
+    assert plain.splitlines()[0] == "（不觉已是第1日 19:00）"
+    assert Narrator().narrate("player", [], store.entities, lapse="第1日 19:00").endswith("（不觉已是第1日 19:00）")
+    llm = FakeLLM("……")
+    Narrator(llm).narrate("player", percepts, store.entities, command="飞上房梁")
+    assert llm.calls[0].startswith("玩家的输入：飞上房梁") and "守卫走向仓库" in llm.calls[0]
 
 def test_speaker_keeps_proposition_on_failure():
     names = build_warehouse()
