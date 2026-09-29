@@ -159,6 +159,8 @@ def test_status_degree_is_preserved():
     plan = build_plan("duanyu", [study], names)
     assert "mastered" not in plan.statuses and "未能融会贯通" in plan.lines[0]
     assert check("你埋头研读凌波微步帛卷，若有所悟，可惜还未能融会贯通。", plan) == ()
+    assert check("你埋头研读凌波微步帛卷，若有所悟，离融会贯通终究还差着一层。", plan) == (), "“离……还差”说的是没到"
+    assert check("你埋头研读凌波微步帛卷，距学成尚远。", plan) == ()
     assert {v.kind for v in check("你研读片刻，豁然贯通，学成了这门步法。", plan)} == {"status"}, "略有所得不等于学成"
 
 

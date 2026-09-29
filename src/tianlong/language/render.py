@@ -15,7 +15,7 @@
        局限（如实）：只做词法比对，不做命题级语义理解——代词不参与点名检查，单字别称（“貂”）太泛、不作拒绝依据，
        两字以上的别称与名字同等对待，“石壁”“山道”这类泛称可能误报（误报只让文字退回模板）；
        传闻只检查“说话者名字之后有言说动词”，LLM 若在带归属的句子之外再以叙述口吻复述同一命题，本闸门查不出；
-       否定只认紧贴关键词的否定词（中间至多隔几个“有/能/曾/会/被”之类的虚字，双重否定算肯定）；
+       否定只认紧贴关键词的否定词（中间至多隔几个“有/能/曾/会/被”之类的虚字，双重否定算肯定），另认“离/距 + 关键词 + 还差/尚远”这种说没到的；
        数量只认“数词 + 量词 + 物品名”与“还有/另有/又……一 + 量词 + 物品名”的直接说法；
        引语归属靠小句主语的词法近似（宾语标记、“的”字结构、感知动词），复杂句式可能归错——归错成玩家只让这一句被丢，
        归成代词或找不到说话者的按所有说话者的交集查；替玩家起念头只认“你……决定/心想”等少数说法。
@@ -276,9 +276,17 @@ def _negated(text: str, i: int) -> bool:
     return count % 2 == 1
 
 
+_SHORT_OF = re.compile(r"^.{0,6}?(?:还差|尚差|差着|差得|还远|尚远|远着|隔着一层)")
+
+
+def _short_of(text: str, i: int, word: str) -> bool:
+    """“离融会贯通还差着一层”“距学成尚远”：离/距 + 关键词 + 还差/尚远，说的是没到。"""
+    return i > 0 and text[i - 1] in "离距" and bool(_SHORT_OF.match(text[i + len(word):]))
+
+
 def _asserted(text: str, patterns: Iterable[str], exclusions: Iterable[str] = ()) -> list[tuple[int, str]]:
-    """文本里被肯定说出的词（去掉被否定的）。"""
-    return [(i, w) for i, w in _lexical(text, patterns, exclusions) if not _negated(text, i)]
+    """文本里被肯定说出的词（去掉被否定的，与“离……还差”这类说没到的）。"""
+    return [(i, w) for i, w in _lexical(text, patterns, exclusions) if not _negated(text, i) and not _short_of(text, i, w)]
 
 
 def _arrivals(text: str) -> list[tuple[int, str]]:
