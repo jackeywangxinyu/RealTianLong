@@ -14,15 +14,17 @@ src/tianlong/learning/ - 学习：PyG 关系动态模型（环境/角色两入�
 src/tianlong/scenarios/ - 内容：初始世界 + 角色设定 + 以感知形式给出的初始认知（1 子目录: tianlong 天龙八部，第一幕无量山）
 src/tianlong/runtime/ - 装配：权威写入器、游戏会话、命令行
 tests/ - 验收即规格：每条设计边界对应可证伪断言
-scripts/ - 本地基础设施与演示脚本（无 Docker 环境下的 Neo4j、录制一局“玩家所见 vs 世界真相”）
+scripts/ - 本地基础设施与演示脚本（无 Docker 环境下的 Neo4j、录制一局“玩家所见 vs 世界真相”、Colab 笔记本生成器）
 docs/ - 脚本生成并入库的演示记录（1 子目录: demo）
-notebooks/ - Colab GPU 放大训练笔记本（只调用同一套训练 CLI）
+notebooks/ - Colab GPU 训练笔记本（生成物：只调用同一套训练 CLI，固定提交、失败即停、产物写进 Drive）
+.github/ - CI（1 子目录: workflows——核心零依赖套件 + 学习层与 Neo4j 全量套件）
 </directory>
 
 <config>
 pyproject.toml - 包元数据；核心零依赖，graph/memory/agents/learn/rl 为可选 extras；pytest 标记 neo4j/learn/rl/slow（slow 默认不跑）
 .env.example - 运行期环境变量模板（GEMINI_API_KEY、NEO4J_*、QDRANT_URL）；真实 .env 被 gitignore，密钥永不入库
 .gitignore - 排除虚拟环境、缓存、密钥、日志与训练产物（artifacts/）
+constraints.txt - 学习层依赖的锁定版本（torch-geometric / ray / gymnasium）：CI 与 Colab 笔记本同用一份，版本随提交走
 README.md - 面向人的入口：架构、快速开始、验收用例、训练结果、边界与测试对照
 </config>
 

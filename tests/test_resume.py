@@ -4,7 +4,8 @@
 [OUTPUT]: 持久化与恢复验收 R01–R04：快照映射不可就地修改且可 pickle；连续运行与中途关闭（含首回合前关闭）再读档的事件、调度、
           认知、叙述逐项一致（内存后端必跑，Neo4j 可达时同跑）；同请求返回既有结果、同 ID 异内容显式冲突；
           并发的重复投递在查询与结算之间插入也只结算一次，重试仍在进行的多 tick 等待不多走 tick；
-          提交后索引/叙述崩溃的重试不二次结算，多 tick 等待中途崩溃只走剩下的 tick；存档版本不一致即拒绝，除非显式迁移
+          提交后索引/叙述崩溃的重试不二次结算，多 tick 等待中途崩溃只走剩下的 tick；存档版本不一致即拒绝，除非显式迁移；
+          NPC 长期记忆摘要的增量缓存与从全部记录重建、与读档后重建逐项相同
 [POS]: tests 的恢复层；证明“重试与读档”不会让世界多走一步、也不会让角色忘掉自己的节奏
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -367,3 +368,21 @@ def test_incompatible_save_is_refused_unless_migration_is_explicit():
     migrated = GameSession(build_warehouse(), store=store, allow_migration=True)
     assert migrated.resumed and migrated.migrated_from["kernel"] == "kernel-v0"
     assert store.save_versions(s.ref)["kernel"] == "kernel-v0", "迁移不改写旧档的版本记录"
+
+
+def test_incremental_memory_view_equals_rebuild_from_all_records():
+    """同一 tick 的经历分两次提交写下（本 tick 末的环顾 + 下一次结算）：增量缓存与读档后从全部记录重建必须逐项相同。"""
+    from tianlong.memory.view import MemoryView
+    scenario = replace(build_wuliang(), world_id=f"mv-{uuid.uuid4().hex[:8]}")
+    store = InMemoryWorldStore()
+    s = GameSession(scenario, store=store)
+    s.intro()
+    for cmd in ["问钟灵长剑在哪", "告诉钟灵长剑在兵器架", "问马五德易经在哪", "等待", "问左子穆长剑在哪", "等待",
+                "告诉左子穆易经在兵器架", "去后院", "等待", "等待"]:
+        s.turn(cmd)
+    now = s.authority.head().clock
+    reopened = GameSession(scenario, store=store)
+    for a in scenario.npcs:
+        full = MemoryView.from_records(store.recent_memories(s.ref, a, 0), now)
+        assert s._memory_view(a, now) == full, a
+        assert reopened._memory_view(a, now) == full, a

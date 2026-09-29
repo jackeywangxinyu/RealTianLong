@@ -1,6 +1,7 @@
 """
 [INPUT]: 依赖 core 的 Op / Manner / Kind / Rel / Fact / Proposition / Intent / signature_error，cognition/beliefs 的 BeliefStore
-[OUTPUT]: 对外提供 Candidate（结构化候选行动）、candidates()（从个人认知生成候选集）、budget()（行动族轮转配额截断）、FAMILIES
+[OUTPUT]: 对外提供 Candidate（结构化候选行动）、candidates()（从个人认知生成候选集）、budget()（行动族轮转配额截断）、FAMILIES、
+          CANDIDATES_VERSION（候选规则语义版本，部署包据此拒绝规则已变的旧策略）
 [POS]: cognition 的行动空间；候选对象只来自角色的认知图——按角色“以为”的世界剪枝是合理的，按真实世界剪枝则是泄密。
        策略（脚本/RL）与预测器都在这个候选集上工作。超出上限时按行动族轮转配额截断（等待、移动、言语、查看、物件、
        动手、施用、锁、研读各轮流取一个，族内与目标相关的在前）：物件组合再多也挤不掉交流、观察与等待
@@ -13,7 +14,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from tianlong.cognition.beliefs import BeliefStore
-from tianlong.core import Fact, Intent, Kind, Manner, Op, Proposition, Rel
+from tianlong.core import Fact, Intent, Kind, Manner, Op, Proposition, Rel, digest
 from tianlong.core.grammar import signature_error
 
 # 候选的规范顺序（下标即策略的动作编号）：WAIT 永居首位，其余按操作、再按对象
@@ -29,6 +30,9 @@ FAMILIES: tuple[tuple[str, frozenset[Op]], ...] = (
     ("study", frozenset({Op.STUDY})),
 )
 assert set().union(*(ops for _, ops in FAMILIES)) == set(Op), "新增操作必须归入某个行动族"
+# 候选规则的语义版本：生成规则（剪枝、话题、配额、顺序）一变就手动递增——候选下标是策略的动作编号，
+# 规则变了，旧策略的输出就指向了别的行动；部署包据此拒绝
+CANDIDATES_VERSION = "candidates-v2:" + digest(_PRIORITY, tuple((n, sorted(o.value for o in ops)) for n, ops in FAMILIES))
 _WHILE_SUBDUED = frozenset({Op.WAIT, Op.TELL, Op.ASK})
 
 

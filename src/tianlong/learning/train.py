@@ -1,13 +1,16 @@
 """
 [INPUT]: 依赖 torch，torch_geometric 的 DataLoader，learning 的 datagen / samples / model / schema / task
-[OUTPUT]: 对外提供 TrainConfig、split_by_world()、split3()、fit_baselines()、coverage()、loss_fn()、fit_temperature()、evaluate()、
-          train_dynamics()、save_checkpoint()、main()（python -m tianlong.learning.train）
+[OUTPUT]: 对外提供 TrainConfig、split_by_world()、split_worlds()、split3()、fit_baselines()、coverage()、loss_fn()、fit_temperature()、evaluate()、
+          mean_loss()、train_dynamics()（按校准损失选轮、可断点续训）、save_checkpoint()、main()（python -m tianlong.learning.train）
 [POS]: learning 的训练与验收：按世界切分（检验对没见过的布局的泛化），指标按 schema.TARGETS 声明的覆盖范围逐项报告——
        位置召回只叫“位置召回”（holder_*），不冒充“全部事实”；动态布尔属性逐属性、数值属性（进度、内力、点穴余时）给 MAE；
        成败按操作分项给 Brier，对照的常数基线取自**训练集**（测试集最优常数只作诊断，标明 test_const）；
        角色视角另报发现新实体、GONE 与有效新观察数；coverage 报告每类机制在数据里出现了多少次。
        世界三分：训练 / 校准（成败头的温度只在这里拟合）/ 测试（只做最终报告，报原始与校准后两种 Brier）；
        报告与检查点都带 manifest（提交、版本、配置、种子、设备）。
+       模型选择：每轮在校准世界上算一次损失，最终用校准损失最低的一轮（测试世界从不参与选择）。
+       断点续训：每轮结束把 模型/优化器/调度器/随机数状态/当前最优 原子写入断点文件；--resume true 时从那里接着训练，
+       配置不一致即拒绝（不会拿别的配置的断点冒充续训）。数据按种子确定性重生成，不缓存。
        device=auto 时有 GPU 即用 GPU，同一 CLI 可直接在 Colab 上放大跑
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -31,7 +34,7 @@ from tianlong.learning.model import DynamicsModel, DynamicsOutput, loss_terms
 from tianlong.learning.provenance import run_manifest
 from tianlong.learning.samples import GONE, NEW, Sample, to_data
 from tianlong.learning.schema import DYN_BOOL, DYN_NUM, FEATURES_VERSION, OBS_GAIN_CAP, OPS, SCHEMA
-from tianlong.learning.task import TaskConfig
+from tianlong.learning.task import TaskConfig, arg_type
 
 
 @dataclass(frozen=True)
@@ -75,13 +78,20 @@ def split_by_world(samples: list[Sample], world_of: list[int], val_frac: float, 
     return train, test
 
 
-def split3(samples: list[Sample], world_of: list[int], test_frac: float, calib_frac: float, seed: int):
-    """按世界三分：训练 / 校准（只拟合温度）/ 测试（只做最终报告）。"""
+def split_worlds(world_of: list[int], test_frac: float, calib_frac: float, seed: int) -> dict[str, set[int]]:
+    """按世界三分（一次洗牌，同一个种子）：测试世界取前段，校准世界紧随其后，其余训练。"""
     worlds = sorted(set(world_of))
     random.Random(seed).shuffle(worlds)
     n_test = max(1, int(len(worlds) * test_frac))
     n_calib = max(1, int(len(worlds) * calib_frac)) if calib_frac > 0 else 0
-    test_w, calib_w = set(worlds[:n_test]), set(worlds[n_test:n_test + n_calib])
+    return {"test": set(worlds[:n_test]), "calib": set(worlds[n_test:n_test + n_calib]),
+            "train": set(worlds[n_test + n_calib:])}
+
+
+def split3(samples: list[Sample], world_of: list[int], test_frac: float, calib_frac: float, seed: int):
+    """按世界三分：训练 / 校准（选轮与拟合温度）/ 测试（只做最终报告）。"""
+    parts = split_worlds(world_of, test_frac, calib_frac, seed)
+    test_w, calib_w = parts["test"], parts["calib"]
     pick = [(s, "test" if w in test_w else "calib" if w in calib_w else "train")
             for s, w in zip(samples, world_of, strict=True)]
     return tuple([s for s, part in pick if part == name] for name in ("train", "calib", "test"))
@@ -233,8 +243,8 @@ def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | No
             c["gain_ae"] += float((out.obs_gain[ag] - data.obs_gain[ag]).abs().sum())
             c["gain_base_ae"] += float((base.get("obs_gain_mean", 0.0) - data.obs_gain[ag]).abs().sum())
 
-    def r(a: str, b: str) -> float:
-        return round(c[a] / c[b], 4) if c[b] else float("nan")
+    def r(a: str, b: str) -> float | None:
+        return round(c[a] / c[b], 4) if c[b] else None          # 分母为 0：算不出来就是 null（报告是严格 JSON）
 
     def split(cnt: Counter) -> dict[str, str]:
         keys = sorted({k for k, _ in cnt})
@@ -280,7 +290,35 @@ def evaluate(model: DynamicsModel, loader: DataLoader, device: torch.device | No
     }
 
 
-def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
+@torch.no_grad()
+def mean_loss(model: DynamicsModel, loader: DataLoader, device: torch.device) -> float | None:
+    """整个 loader 上的平均损失（按批平均）；空 loader 返回 None。"""
+    model.eval()
+    total, n = 0.0, 0
+    for data in loader:
+        data = data.to(device)
+        total += float(loss_fn(model(data), data)[0])
+        n += 1
+    return total / n if n else None
+
+
+def _save_state(path: Path, state: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    torch.save(state, tmp)
+    tmp.replace(path)                     # 原子替换：断在写一半时不留坏断点
+
+
+def _load_state(path: Path, cfg: TrainConfig) -> dict:
+    st = torch.load(path, map_location="cpu", weights_only=True)
+    if st.get("config") != asdict(cfg):
+        diff = sorted(k for k, v in asdict(cfg).items() if (st.get("config") or {}).get(k) != v)
+        raise ValueError(f"断点 {path} 的训练配置与本次不同 {diff}：换配置请换输出目录或删掉断点")
+    return st
+
+
+def train_dynamics(cfg: TrainConfig, log=print, state_path: Path | None = None,
+                   resume: bool = False) -> tuple[DynamicsModel, dict]:
+    """state_path：断点文件（每轮原子写入）；resume 且断点存在时从那里接着训练。"""
     torch.manual_seed(cfg.seed)
     t0 = time.time()
     device = _device(cfg.device)
@@ -291,11 +329,21 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
     log(f"[data] {cfg.view}: train={len(train)} calib={len(calib)} test={len(test)} device={device} ({t_data:.1f}s)")
     baselines = fit_baselines(train)
     tr = DataLoader([to_data(s) for s in train], batch_size=cfg.batch, shuffle=True)
+    ca = DataLoader([to_data(s) for s in calib], batch_size=256)
     te = DataLoader([to_data(s) for s in test], batch_size=256)
     model = DynamicsModel(cfg.hidden).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs)
-    for epoch in range(cfg.epochs):
+    start, best, history = 0, {"epoch": None, "calib_loss": None, "state_dict": None}, []
+    if resume and state_path is not None and state_path.exists():
+        st = _load_state(state_path, cfg)
+        model.load_state_dict(st["model"])
+        opt.load_state_dict(st["opt"])
+        sched.load_state_dict(st["sched"])
+        torch.set_rng_state(st["rng"])
+        start, best, history = int(st["epoch"]), st["best"], list(st["history"])
+        log(f"[resume] 从第 {start} 轮之后接着训练（最优轮 {best['epoch']}）")
+    for epoch in range(start, cfg.epochs):
         model.train()
         total = 0.0
         for data in tr:
@@ -307,12 +355,24 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
             opt.step()
             total += loss.item()
         sched.step()
+        calib_loss = mean_loss(model, ca, device)
+        history.append({"epoch": epoch + 1, "train_loss": round(total / max(len(tr), 1), 5),
+                        "calib_loss": None if calib_loss is None else round(calib_loss, 5)})
+        if calib_loss is None or best["calib_loss"] is None or calib_loss < best["calib_loss"]:
+            best = {"epoch": epoch + 1, "calib_loss": calib_loss,
+                    "state_dict": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}}
         if epoch % 5 == 4 or epoch == cfg.epochs - 1:
             m = evaluate(model, te, device, baselines)
-            log(f"[epoch {epoch + 1}] loss={total / max(len(tr), 1):.4f} succ={m['success_acc']} "
+            log(f"[epoch {epoch + 1}] loss={total / max(len(tr), 1):.4f} calib={calib_loss} succ={m['success_acc']} "
                 f"holder_recall={m['holder_changed_recall']} kept={m['holder_unchanged_kept']} "
                 f"attr={m['attr_changed_acc']}")
-    temperature = fit_temperature(model, DataLoader([to_data(s) for s in calib], batch_size=256), device)
+        if state_path is not None:
+            _save_state(state_path, {"config": asdict(cfg), "epoch": epoch + 1, "model": model.state_dict(),
+                                     "opt": opt.state_dict(), "sched": sched.state_dict(),
+                                     "rng": torch.get_rng_state(), "best": best, "history": history})
+    if best["state_dict"] is not None:
+        model.load_state_dict(best["state_dict"])       # 校准损失最低的一轮；测试世界不参与选择
+    temperature = fit_temperature(model, ca, device)
     metrics = evaluate(model, te, device, baselines)
     calibrated = evaluate(model, te, device, baselines, temperature)
     metrics["success_temperature_fit_on_calib"] = temperature
@@ -322,9 +382,15 @@ def train_dynamics(cfg: TrainConfig, log=print) -> tuple[DynamicsModel, dict]:
     metrics["coverage_train"] = coverage(train)
     metrics["coverage_test"] = coverage(test)
     metrics["timing_seconds"] = {"data": round(t_data, 1), "total": round(time.time() - t0, 1), "device": str(device)}
-    metrics["split"] = {"train": len(train), "calib": len(calib), "test": len(test), "unit": "world"}
+    worlds = split_worlds(rollouts.world_of, cfg.val_frac, cfg.calib_frac, cfg.seed)
+    metrics["split"] = {"worlds": {k: len(v) for k, v in worlds.items()},
+                        "samples": {"train": len(train), "calib": len(calib), "test": len(test)},
+                        "unit_of_split": "world"}
+    metrics["model_selection"] = {"criterion": "min calib_loss (calib worlds; test never used)",
+                                  "best_epoch": best["epoch"], "best_calib_loss": best["calib_loss"],
+                                  "resumed_from_epoch": start or None, "history": history}
     metrics["manifest"] = run_manifest(f"dynamics_{cfg.view}", asdict(cfg), cfg.task(),
-                                       seeds={"data": cfg.seed, "split": cfg.seed, "calib_split": cfg.seed + 1},
+                                       seeds={"data": cfg.seed, "split_test_and_calib": cfg.seed},
                                        extra={"device": str(device), "model_scope": "isolated_action"})
     return model.cpu(), metrics
 
@@ -339,15 +405,17 @@ def save_checkpoint(model: DynamicsModel, cfg: TrainConfig, metrics: dict, path:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tianlong.learning.train", description="训练 GNN 动态模型")
     for f, default in asdict(TrainConfig()).items():
-        ap.add_argument(f"--{f.replace('_', '-')}", type=type(default), default=default)
+        ap.add_argument(f"--{f.replace('_', '-')}", type=arg_type(default), default=default)
     ap.add_argument("--out", default="artifacts")
+    ap.add_argument("--resume", type=arg_type(False), default=False,
+                    help="输出目录里有同配置的断点就接着训练（不进 run_id：续训与不中断是同一次实验）")
     args = vars(ap.parse_args(argv))
-    out_dir = Path(args.pop("out"))
+    out_dir, resume = Path(args.pop("out")), args.pop("resume")
     cfg = TrainConfig(**args)
-    model, metrics = train_dynamics(cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
+    model, metrics = train_dynamics(cfg, state_path=out_dir / f"dynamics_{cfg.view}.resume.pt", resume=resume)
     save_checkpoint(model, cfg, metrics, out_dir / f"dynamics_{cfg.view}.pt")
-    (out_dir / f"dynamics_{cfg.view}.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False))
+    (out_dir / f"dynamics_{cfg.view}.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False, allow_nan=False))
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
     return 0
 

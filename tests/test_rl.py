@@ -4,7 +4,7 @@
 [OUTPUT]: 强化学习层测试：观测合乎空间、掩码只屏蔽空位；奖励分项语义（任务跃迁/塑形/成本、搜身落空）；
           验收 T01–T04（场景配置贯通到环境、寻仇按 until 给任务奖励、持续保护按窗口判定、未注册目标显式失败）
           与 B01–B04（等待权重边界无 NaN、批组成不改变贡献、专家在不知下落时去探索、留出世界上的分动作指标）；
-          学得的策略接入决策图；PPO 冒烟（slow）
+          学得的策略接入决策图；训练期消融（预测/记忆列）在环境、tag、上线策略里是同一个定义；PPO 冒烟（slow）
 [POS]: tests 的 RL 层；PPO 冒烟用例标记 slow（默认不跑，`pytest -m slow` 显式运行）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")   # 学习层 extras 未装时整模块跳过（核心零依赖）
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("ray.rllib")
@@ -376,3 +377,59 @@ def test_expert_detours_around_a_door_it_knows_is_locked():
     cands = candidates(store, [])
     c = cands[ScriptedPolicy().choose(Situation("h", prof, store, s.clock, cands, ())).index]
     assert (c.op, c.target, c.obj) == (Op.MOVE, "c", "dac"), c
+
+
+# ============================================================
+#  评审回归：训练期消融是一个定义，训练、评测、上线同用
+# ============================================================
+
+
+def test_training_time_ablation_zeroes_whole_columns_in_env():
+    env = TianlongEnv({"task": {"jianghu": 1.0, "horizon": 6}, "ablate": ["memory", "predictions"]})
+    obs, _ = env.reset(seed=3)
+    for _ in range(4):
+        for o in obs.values():
+            assert not o["memory"].any() and not o["cand_pred"].any()
+        obs, *_ = env.step(env.expert_actions())
+    with pytest.raises(ValueError, match="未知的消融"):
+        TianlongEnv({"task": {"horizon": 2}, "ablate": ["beliefs"]}).reset(seed=0)
+
+
+def test_rl_config_names_ablations_in_tag_and_env_config():
+    cfg = RLConfig(ablate_memory=True)
+    assert cfg.tag() == "policy_ppo_noMem_s0" and cfg.env_config()["ablate"] == ["memory"]
+    both = RLConfig(ablate_predictions=True, ablate_memory=True, seed=2)
+    assert both.tag() == "policy_ppo_noPred_noMem_s2" and both.ablations() == ("predictions", "memory")
+
+
+def test_deployed_policy_applies_the_ablation_it_was_trained_with(tmp_path):
+    from dataclasses import asdict
+
+    from tianlong.learning.rl.observation import ObsSpec
+    from tianlong.learning.rl.policy import LearnedPolicy
+    from tianlong.learning.schema import SCHEMA
+
+    net = GraphPolicyNet(32)
+    path = tmp_path / "p.pt"
+    torch.save({"state_dict": net.state_dict(), "config": {"hidden": 32, "ablate_predictions": True},
+                "schema": SCHEMA, "view": "policy", "obs_spec": asdict(ObsSpec()), "ablate": ["predictions"]}, path)
+    pol = LearnedPolicy.load(path)
+    assert pol.ablations == ("predictions",)
+    env = TianlongEnv({"task": {"jianghu": 1.0, "horizon": 4}})
+    env.reset(seed=5)
+    sit = env.situation(env.agents[0])
+    seen = {}
+
+    def spy(policy, name):
+        inner = policy.net
+
+        def forward(batch):
+            seen[name] = batch["cand_pred"].clone()
+            return inner(batch)
+        policy.net = forward
+        return policy
+
+    spy(pol, "ablated").choose(sit)
+    spy(LearnedPolicy(net, pol.spec), "plain").choose(sit)
+    assert seen["plain"].any(), "对照：未消融的策略确实看得到预测"
+    assert not seen["ablated"].any(), "训练时没见过预测：上线时预测列同样置零"

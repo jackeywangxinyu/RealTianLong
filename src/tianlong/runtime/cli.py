@@ -1,10 +1,11 @@
 """
 [INPUT]: 依赖 runtime/session 的 GameSession / TurnReport，runtime/versions 的 IncompatibleSave，scenarios 的 SCENARIOS 注册表，
-         language/llm 的 llm_from_env，language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/predictor、learning/rl/policy
+         language/llm 的 llm_from_env，language/templates 的 render_fact，core 的 Fact；按需加载 persistence/neo4j_store、learning/bundle（部署包）
 [OUTPUT]: 对外提供 main()（命令行入口 `tianlong` / `python -m tianlong`）、load_dotenv()
 [POS]: runtime 的终端前端；/debug 显示真相与 NPC 理由（开发者视角），/beliefs 显示玩家自己的认知——两者刻意分开；
        --world 选择世界（默认天龙八部·无量山），--store/--save 选择持久化与存档（存档版本不符时一句话说明并退出，
-       --allow-migration 显式接续旧档），--predictor/--policy 让训练好的 GNN 与 RL 策略驱动 NPC（缺模型或词表过期时一句话说明并退出）
+       --allow-migration 显式接续旧档），--predictor/--policy 让部署包里的 GNN 与 RL 策略驱动 NPC（部署包逐项核对语义版本与文件哈希，策略配套的预测器随包决定；
+       缺包、被改动或与当前代码不兼容时一句话说明并退出）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -60,10 +61,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--store", choices=["memory", "neo4j"], default="memory", help="neo4j：读取 NEO4J_URI 等环境变量")
     ap.add_argument("--save", default=None, help="存档名（作为 world_id，Neo4j 下可跨进程保留）")
     ap.add_argument("--predictor", choices=["heuristic", "gnn"], default="heuristic",
-                    help="gnn：加载 artifacts/dynamics_agent.pt 作为 NPC 的后果预测器")
+                    help="gnn：用部署包里的角色视角动态模型作为 NPC 的后果预测器")
     ap.add_argument("--policy", choices=["scripted", "learned"], default="scripted",
-                    help="learned：加载 artifacts/policy_ppo.pt 作为 NPC 的决策策略")
-    ap.add_argument("--artifacts", default="artifacts")
+                    help="learned：用部署包里的策略驱动 NPC（配套的预测器随包决定）")
+    ap.add_argument("--artifacts", default="artifacts", help="部署包目录（含 bundle.json，由 python -m tianlong.learning.bundle 生成）")
     ap.add_argument("--allow-migration", action="store_true", help="存档版本与当前代码不符时仍显式接续（不补写旧档信息）")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args(argv)
@@ -80,15 +81,16 @@ def main(argv: list[str] | None = None) -> int:
         store = Neo4jWorldStore.from_env()
     predictor, policies, max_cands = None, None, 64
     try:
-        if args.predictor == "gnn":
-            from tianlong.learning.predictor import GNNPredictor
-            predictor = GNNPredictor.load(f"{args.artifacts}/dynamics_agent.pt")
-        if args.policy == "learned":
-            from tianlong.learning.rl.policy import LearnedPolicy
-            learned = LearnedPolicy.load(f"{args.artifacts}/policy_ppo.pt")
-            policies = dict.fromkeys(scenario.npcs, learned)
-            max_cands = learned.spec.max_cands
-    except (FileNotFoundError, ValueError) as e:     # 缺模型或模型过期（StaleModel）：说清楚，不甩一屏张量报错
+        if args.predictor == "gnn" or args.policy == "learned":
+            # 部署包逐项核对语义版本与文件哈希；策略训练时用哪个预测器，上线就用哪个
+            from tianlong.learning.bundle import load_bundle
+            loaded = load_bundle(args.artifacts, want_predictor=args.predictor == "gnn",
+                                 want_policy=args.policy == "learned")
+            predictor = loaded.predictor
+            if loaded.policy is not None:
+                policies = dict.fromkeys(scenario.npcs, loaded.policy)
+                max_cands = loaded.policy.spec.max_cands  # type: ignore[attr-defined]
+    except (FileNotFoundError, ValueError) as e:     # 缺部署包或模型过期（StaleModel）：说清楚，不甩一屏张量报错
         print(f"无法加载训练好的模型：{e}")
         return 2
     try:

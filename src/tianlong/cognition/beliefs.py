@@ -200,7 +200,10 @@ class BeliefStore:
             episodes = (*episodes, Episode(percept.tick, percept.modality, percept.event, percept.informant))
             episodes = episodes[-EPISODE_CAPACITY:]
 
-        obligations, said = fold_agenda(self.owner, self.obligations, self.said, percept)
+        # 认知真正变了值的槽位（传闻被亲眼证实、值没变的不算）：关于它们“说过”的话作废
+        changed = {(c.before or c.after).prop.slot for c in changes  # type: ignore[union-attr]
+                   if not (c.before and c.after and c.before.prop == c.after.prop and c.before.holds == c.after.holds)}
+        obligations, said = fold_agenda(self.owner, self.obligations, self.said, percept, changed)
         store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now, surveyed, searched,
                             obligations, said)
         return store, tuple(changes)

@@ -7,7 +7,8 @@
           coverage 暴露实际抽到的场景与目标分布）
 [POS]: learning/rl 的训练环境：每个角色一个智能体，同一 tick 同时出招、由同一个内核统一结算——与线上完全相同的转移机制。
        世界从 TaskConfig 取样（江湖化比例、规模、启用目标族一路贯通到 reset），启用目标族之外的目标在 reset 时明确报错；
-       观测只来自各自的认知图；奖励 = 目标跃迁的任务奖励 + 命名的塑形 + 分项成本（见 rewards）。
+       观测只来自各自的认知图；config["ablate"] 为训练期消融（整列置零，定义见 observation.ABLATIONS）；
+       奖励 = 目标跃迁的任务奖励 + 命名的塑形 + 分项成本（见 rewards）。
        expert_actions() 给出脚本示范，供模仿学习与评测；last_events 暴露上一步的真实事件，只供评测统计行为，不进观测
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -25,7 +26,7 @@ from tianlong.cognition import BeliefStore, Candidate, candidates
 from tianlong.cognition.candidates import budget
 from tianlong.core import Op, derive_seed, make_id
 from tianlong.kernel import Kernel
-from tianlong.learning.rl.observation import CropReport, ObsSpec, build_observation, observation_space
+from tianlong.learning.rl.observation import CropReport, ObsSpec, ablate, build_observation, observation_space
 from tianlong.learning.rl.rewards import GoalTracker, RewardWeights, step_reward
 from tianlong.learning.task import TaskConfig
 from tianlong.memory.records import records_for
@@ -46,7 +47,7 @@ class TianlongEnv(MultiAgentEnv):
         self.horizon = task.horizon
         self.seed_base = int(cfg.get("seed", 0))
         self.predictor: OutcomePredictor = cfg.get("predictor") or _load_predictor(cfg.get("predictor_path"))
-        self.zero_predictions = bool(cfg.get("zero_predictions", False))   # 训练期消融：策略从头到尾看不到世界模型预测
+        self.ablate = tuple(cfg.get("ablate", ()))    # 训练期消融（observation.ABLATIONS）：策略从头到尾看不到这类输入
         self.possible_agents = [f"h{i}" for i in range(task.max_persons)]
         self.agents: list[str] = []
         obs_space = observation_space(self.obs_spec)
@@ -127,8 +128,7 @@ class TianlongEnv(MultiAgentEnv):
         preds = tuple(self.predictor.predict(store, self.state.clock, cands, interests, profile=profile))
         ob = build_observation(store, self.state.clock, profile, cands, preds, self.obs_spec, self.memories[agent],
                                offered=len(offered))
-        if self.zero_predictions:
-            ob.obs["cand_pred"][:] = 0.0
+        ablate(ob.obs, self.ablate)
         # 动作编号对应裁剪后保留的候选：引用放不下的候选不会以悬空指针出现在策略面前
         self._cands[agent], self._preds[agent], self.crops[agent] = ob.candidates, ob.predictions, ob.report
         self.coverage["crop_events"] += int(ob.report.cropped)

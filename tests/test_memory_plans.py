@@ -4,7 +4,8 @@
 [OUTPUT]: 验收 M01（长期记忆进入决策：同样的眼前认知，谁撒过谎的经历不同，选择就不同；也进入策略观测）、
           M02（被问到的问题跨越经历缓冲仍待回答，答过即勾销，说过的话不重复；两后端持久化）、
           G01（位移不等于获知：确定地走到刚看过的地方几乎没有新观察，原地翻查没翻过的地方才有；GNN 的预期获知只来自有效新观察头）、
-          E04（“先探查”任务旋钮只藏目标物品且默认逐字节不变）；Prediction v2 的进展与风险来自假想分支
+          E04（“先探查”任务旋钮只藏目标物品且默认逐字节不变）；Prediction v2 的进展与风险来自假想分支；
+          评审回归：说法只按说话时的世界评判（自己/所见事件改动的不算、随意环顾不证伪）、“说过”随认知变化或再问作废、记忆特征带时间
 [POS]: tests 的记忆、承诺与预测层；证伪“短期缓冲当长期状态”“记忆检索了却没人用”“把位移当信息”三类错误
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -69,9 +70,11 @@ def said(t: int, who: str, fact: Fact) -> Percept:
 
 
 def _history(liar_is: str) -> MemoryView:
-    """早先的经历：某人说铜钱在后院，我亲眼一看——其实不在（或果然在）。"""
+    """早先的经历：某人说铜钱在后院，我去仔细翻了一遍——其实不在。
+    （随意环顾的负证据不算证伪：藏起来的东西环顾看不见，见 test_memory_verdicts_*）"""
     mind = base_store().revise(said(1, liar_is, at("coin", "yard")))[0]
-    look = Percept(3, Modality.SCENE, None, (at("me", "yard"),), ("yard",), NAMES)
+    search = PerceivedEvent(Op.INSPECT.value, "yard", "me", "yard", None, Outcome.SUCCESS)
+    look = Percept(3, Modality.SELF, search, (at("me", "yard"),), ("yard",), NAMES)
     obs = Observation("o1", "me", None, look)
     store2, changes = mind.revise(look)
     recs = records_for("w", "b", obs, changes, store2.entities)
@@ -244,3 +247,69 @@ def test_e04_probe_knob_hides_only_goal_items_and_defaults_are_unchanged():
         goal_items = {g.item for p in probe.profiles.values() for g in p.goals
                       if g.kind in (GoalKind.ACQUIRE, GoalKind.DELIVER)}
         assert set(changed) <= goal_items
+
+
+# ============================================================
+#  评审回归：评判说法只看“他说话时世界是不是那样”；“说过”随认知变化作废；记忆带着时间
+# ============================================================
+
+
+def _verdicts(mind: BeliefStore, p: Percept) -> list[tuple[str | None, str | None]]:
+    after, changes = mind.revise(p)
+    recs = records_for("w", "b", Observation("o", "me", None, p), changes, after.entities)
+    return [(r.informant, r.verdict) for r in recs if r.verdict]
+
+
+def test_memory_verdicts_ignore_what_the_witnessed_event_itself_changed():
+    locked = Fact(Proposition.attr("d1", "locked", True))
+    mind = base_store().revise(said(1, "honest", locked))[0]
+    unlock = PerceivedEvent(Op.UNLOCK.value, "hall", "me", "d1", "cup", Outcome.SUCCESS)
+    opened = Percept(2, Modality.SELF, unlock, (Fact(Proposition.attr("d1", "locked", False)),), (), NAMES)
+    assert _verdicts(mind, opened) == [], "我亲手开了他说锁着的门：这恰恰说明他说的是真的"
+    mind = base_store().revise(said(1, "honest", at("cup", "hall")))[0]
+    take = PerceivedEvent(Op.TAKE.value, "hall", "liar", "cup", None, Outcome.SUCCESS)
+    assert _verdicts(mind, Percept(2, Modality.SIGHT, take, (at("cup", "liar"),), (), NAMES)) == [], \
+        "看着贼从他说的地方拿走东西，不能判他说谎"
+
+
+def test_memory_verdicts_a_glance_cannot_refute_but_seeing_it_elsewhere_or_searching_can():
+    mind = base_store().revise(said(1, "honest", at("jade", "yard")))[0]
+    glance = Percept(3, Modality.SCENE, None, (at("me", "yard"),), ("yard",), NAMES)
+    assert _verdicts(mind, glance) == [], "随意环顾看不见藏起来的东西：没看见不等于他说谎"
+    elsewhere = Percept(3, Modality.SCENE, None, (at("me", "cellar"), at("jade", "cellar")), ("cellar",), NAMES)
+    assert _verdicts(mind, elsewhere) == [("honest", "refuted")], "亲眼看见它在别处"
+    search = PerceivedEvent(Op.INSPECT.value, "yard", "me", "yard", None, Outcome.SUCCESS)
+    assert _verdicts(mind, Percept(3, Modality.SELF, search, (at("me", "yard"),), ("yard",), NAMES)) == \
+        [("honest", "refuted")], "仔细翻过一遍确实没有"
+    there = Percept(3, Modality.SCENE, None, (at("me", "yard"), at("jade", "yard")), ("yard",), NAMES)
+    assert _verdicts(mind, there) == [("honest", "confirmed")]
+
+
+def test_said_expires_when_my_belief_changes_or_the_listener_asks_again():
+    told = at("cup", "liar")
+    see = Percept(1, Modality.SCENE, None, (told,), (), NAMES)
+    tell = PerceivedEvent(Op.TELL.value, "hall", "me", "honest", None, Outcome.SUCCESS, told)
+    m = base_store().revise(see)[0].revise(Percept(2, Modality.SELF, tell, (), (), NAMES))[0]
+    assert [(s.listener, s.fact) for s in m.said] == [("honest", told)]
+    m = m.revise(Percept(3, Modality.SCENE, None, (told,), (), NAMES))[0]
+    assert m.said, "认知没变：说过的仍算说过，不追着重复"
+    m = m.revise(Percept(4, Modality.SCENE, None, (at("cup", "hall"),), (), NAMES))[0]
+    assert not m.said, "东西追回来了：之前说的已是旧闻，下次再被偷就是新消息"
+    m = m.revise(Percept(5, Modality.SELF, tell, (), (), NAMES))[0]
+    ask = PerceivedEvent(Op.ASK.value, "hall", "honest", "me", None, Outcome.SUCCESS,
+                         Fact(Proposition.rel("cup", Rel.AT, None)))
+    m = m.revise(Percept(6, Modality.SPEECH, ask, (), (), NAMES, "honest"))[0]
+    assert not m.said and [o.counterpart for o in m.obligations] == ["honest"], "又问了一遍：还想听，就得再答"
+
+
+def test_memory_features_carry_time():
+    from tianlong.core.memories import MemoryRecord
+
+    def refuted(t: int) -> MemoryRecord:
+        return MemoryRecord(f"m{t}", "w", "b", "me", "verdict", "x", t, t, "o", ("liar",), "liar", "refuted")
+
+    old, new = MemoryView.from_records([refuted(1)]), MemoryView.from_records([refuted(9990)])
+    assert old.features("liar", 10000)[:3] == new.features("liar", 10000)[:3]
+    assert old.features("liar", 10000)[3] == 0.0 and new.features("liar", 10000)[3] > 0.9, "刚撒过谎 ≠ 很久以前错过一次"
+    assert MemoryView().features("liar", 5) == (0.0, 0.0, 0.0, 0.0)
+    assert all(0.0 <= v <= 1.0 for v in MemoryView.from_records([refuted(t) for t in range(20)]).features("liar", 30))

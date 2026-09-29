@@ -1,9 +1,9 @@
 # notebooks/
 > L2 | 父级: /CLAUDE.md
 
-在别人的算力上跑本仓库的训练入口。笔记本只是“克隆 → 安装 → 调用同一套 CLI（参数放大）→ 取回产物”的外壳，不含任何训练逻辑——逻辑只在 src/tianlong/learning 里一处。
+在别人的算力上跑本仓库的训练入口。笔记本只是“检出固定提交 → 安装 → 全量测试 → 调用同一套 CLI → 产物写进 Drive”的外壳，不含任何训练逻辑——逻辑只在 src/tianlong/learning 里一处。笔记本本身由 scripts/make_colab_notebook.py 生成，不手改。
 
 成员清单
-train_colab.ipynb: Colab GPU 放大训练，GH_TOKEN 从 Colab Secrets 读取且不回显；GNN 两视角（3000 世界 × 40 轮）→ RL 模仿 + PPO（GPU 学习器、以 GNN 预测为候选特征）→ 打印报告 → 打包下载，本地以 --artifacts 指向即可接入游戏
+train_colab.ipynb: Colab GPU 训练与评测（生成物，COMMIT 为占位，交给 Colab 的版本由生成器填入 40 位提交）。检出：代码来自 Drive 上的完整 git bundle 或 GitHub，已有目录不是干净仓库即停、从不嵌套克隆、checkout --detach 后核对 HEAD；私有仓库的令牌只经环境变量注入一次性请求头，remote、.git/config、日志里都没有（最后一格扫描运行目录确认）。sh() 非零即抛异常，安装（constraints.txt 锁定版本）或全量测试失败后续不再执行。阶段：剖析 → GNN 两视角（按轮续训、按校准损失选轮）→ RL 主实验三种子 + 训练期无预测 / 无记忆 + E04 探查有/无预测（PPO 断点续训）→ results（含跨运行配对）→ 部署包；全部写在 MyDrive/RealTianLong/runs/<提交前十位>-<规模>/
 
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

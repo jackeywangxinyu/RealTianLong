@@ -1,11 +1,12 @@
 """
-[INPUT]: 依赖 numpy / gymnasium，learning/featurize 的 featurize / encode_action / GraphTensors，learning/schema 的维度常量，
+[INPUT]: 依赖 numpy（gymnasium 只在 observation_space() 里按需导入），core 的 digest，learning/featurize 的 featurize / encode_action / GraphTensors，learning/schema 的维度常量，
          cognition 的 BeliefStore / Candidate / belief_view，cognition/goals 的 BeliefReader，core/goals 的 GoalRegistry / GoalMode，
          agents/predictors 的 Prediction / PRED_FIELDS，core/profiles 的 Profile / GoalKind / Goal，memory/view 的 MemoryView
 [OUTPUT]: 对外提供 ObsSpec、CropReport、Observation、observation_space()、build_observation()、encode_goals()、
-          GOAL_KINDS / GOAL_FIELDS / GOAL_PTRS / ROLES / CAND_INT / CAND_FLOAT
+          GOAL_KINDS / GOAL_FIELDS / GOAL_PTRS / ROLES / CAND_INT / CAND_FLOAT、OBS_VERSION（观测布局与语义的指纹，部署包据此拒绝旧策略）、
+          ABLATIONS / ablate()（消融 = 某一类输入整列置零：训练期、测试期、上线时同一个定义）
 [POS]: learning/rl 的观测契约：个人认知图 + 候选集（完整行动编码，含言语命题）+ 冻结世界模型的预测 + 目标槽位 + 长期记忆摘要
-       （逐节点：被经历提起几次、此人的说法被亲眼证实/证伪几次——来自 memory/view，与线上同一定义）。
+       （逐节点：被经历提起几次、此人的说法被亲眼证实/证伪几次、最近一次相关经历距今多久——来自 memory/view，与线上同一定义）。
        目标槽位带着指向图中实体的指针（寻仇的是谁、护的是谁、东西送给谁）、权重、是否已激活与距激活的时间、了结条件、
        一次性/持续语义、以及角色自己以为的达成状态与进展（BeliefReader，不知道就是 0）——换一个仇人，输入就不同。
        裁剪契约：超预算时先保证自身、目标所指、以及每个保留候选的全部引用都在图里，其余节点按到这些必要节点的跳数入选；
@@ -17,20 +18,24 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import gymnasium as gym
 import numpy as np
 
 from tianlong.agents.predictors import PRED_FIELDS, Prediction
 from tianlong.cognition import BeliefStore, Candidate, belief_view
 from tianlong.cognition.goals import BeliefReader
+from tianlong.core import digest
 from tianlong.core.goals import GoalMode, GoalRegistry
 from tianlong.core.profiles import Goal, GoalKind, Profile
 from tianlong.learning.featurize import GraphTensors, encode_action, featurize
 from tianlong.learning.schema import F_EDGE, F_NODE, N_OPS, N_TOPICS
-from tianlong.memory.view import MEMORY_FIELDS, MemoryView
+from tianlong.memory.view import COUNT_SCALE, MEMORY_FIELDS, RECENCY_SCALE, MemoryView
+
+if TYPE_CHECKING:
+    import gymnasium as gym
 
 GOAL_KINDS = tuple(GoalKind)
 GOAL_PTRS = ("item", "home", "recipient", "person")
@@ -41,7 +46,23 @@ ROLES = ("self", "goal_item", "goal_place", "goal_recipient", "goal_person", "al
 CAND_INT = ("op", "manner", "target", "obj", "topic_pred", "topic_subj", "topic_val")
 CAND_FLOAT = ("topic_holds", "topic_query")
 WAIT_SCALE = 240.0     # 距目标激活的时间：四个时辰以上视为同等遥远
-MEMORY_SCALE = 5.0     # 记忆计数的尺度：被提起/被证实/被证伪五次以上视为同等
+# 观测布局与语义的指纹：列一变（目标槽位、角色标记、候选编码、预测列、记忆列、尺度），旧策略的输入就换了含义——
+# 形状相同时 load_state_dict 不会报错，只能靠它拒绝；改动编码语义而列名不变时手动递增前缀
+# 消融：某一类输入整列置零。训练期消融的策略从头到尾没见过这类输入——名字写进检查点，上线时照样置零
+ABLATIONS: dict[str, tuple[str, ...]] = {"predictions": ("cand_pred",), "memory": ("memory",)}
+
+
+def ablate(obs: dict[str, np.ndarray], names: Iterable[str]) -> dict[str, np.ndarray]:
+    for name in names:
+        if name not in ABLATIONS:
+            raise ValueError(f"未知的消融 {name!r}：只有 {sorted(ABLATIONS)}")
+        for key in ABLATIONS[name]:
+            obs[key][...] = 0.0
+    return obs
+
+
+OBS_VERSION = digest("obs-v2", tuple(k.value for k in GOAL_KINDS), GOAL_PTRS, UNTIL, GOAL_FIELDS, ROLES, CAND_INT,
+                     CAND_FLOAT, WAIT_SCALE, COUNT_SCALE, RECENCY_SCALE, PRED_FIELDS, MEMORY_FIELDS)
 
 _REGISTRY = GoalRegistry()
 
@@ -78,6 +99,7 @@ class Observation:
 
 
 def observation_space(spec: ObsSpec) -> gym.spaces.Dict:
+    import gymnasium as gym
     n, e, a, g = spec.max_nodes, spec.max_edges, spec.max_cands, spec.max_goals
     f32 = np.float32
     return gym.spaces.Dict({
@@ -248,7 +270,7 @@ def build_observation(
     mem = np.zeros((spec.max_nodes, len(MEMORY_FIELDS)), np.float32)
     if memory is not None:
         for eid, i in index.items():
-            mem[i] = np.clip(np.asarray(memory.features(eid), np.float32) / MEMORY_SCALE, 0.0, 1.0)
+            mem[i] = memory.features(eid, now)
 
     # ---- 候选：完整行动编码 ----
     kept_cands = tuple(cands[i] for i in cand_idx)

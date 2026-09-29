@@ -1,9 +1,11 @@
 """
-[INPUT]: 依赖 core 的 Observation / Fact / Modality / Op / Rel / make_id / MemoryRecord，cognition 的 BeliefChange，language/templates 的渲染函数
+[INPUT]: 依赖 core 的 Observation / Percept / Fact / Modality / Op / Rel / make_id / MemoryRecord，cognition 的 BeliefChange，language/templates 的渲染函数
 [OUTPUT]: 对外提供 records_for()：从一条观察及其引起的信念变化中提炼“值得记住的经历”；claim_verdicts()：传闻被亲眼证实/证伪的判定
 [POS]: memory 的记忆写入策略；被权威写入器与 RL 训练环境在同一处调用（训练与上线的长期记忆是同一个定义）。
        只记事件、意外（原以为在的东西不见了）与“谁的说法被亲眼证实/证伪”，不记每分钟一次的“一切如常”；
-       证伪只认亲眼所见——被另一个更可信的传闻盖过不算谁撒了谎
+       证伪只认亲眼所见——被另一个更可信的传闻盖过不算谁撒了谎。评判的是“他说话时世界是不是那样”：
+       本次所见事件自己改动了的东西（我开了他说锁着的门、我看着贼从他说的桌上拿走钥匙、有人把东西搬到他说的地方）
+       不拿来评判；随意环顾看不见藏匿物，它的负证据也不算证伪（仔细查看的负证据才算）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -12,26 +14,41 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from tianlong.cognition import FIRSTHAND, BeliefChange
-from tianlong.core import Fact, Modality, Observation, Op, Rel, make_id
+from tianlong.core import Fact, Modality, Observation, Op, Percept, Rel, make_id
 from tianlong.core.memories import MemoryRecord
 from tianlong.language.templates import Names, render_fact, render_percept
 
 _AT = Rel.AT.value
 
 
-def claim_verdicts(modality: Modality, changes: Sequence[BeliefChange]) -> list[tuple[str, str, BeliefChange]]:
-    """(说话者, "confirmed"/"refuted", 变化)：只有亲眼所见才能证实或证伪一条传闻。"""
-    if modality not in FIRSTHAND:
+# 不改动被观察之物的行动：看见它们发生，不影响判断别人事前说的话
+_OBSERVING = frozenset({Op.INSPECT.value, Op.WAIT.value, Op.ASK.value, Op.TELL.value})
+
+
+def _touched(p: Percept) -> frozenset[str]:
+    """本次感知所见事件自己改动的实体：这些槽位的新值是事后的世界，不能拿来评判事前的说法。"""
+    e = p.event
+    if e is None or e.kind in _OBSERVING:
+        return frozenset()
+    return frozenset(i for i in (e.actor, e.target, e.obj) if i)
+
+
+def claim_verdicts(p: Percept, changes: Sequence[BeliefChange]) -> list[tuple[str, str, BeliefChange]]:
+    """(说话者, "confirmed"/"refuted", 变化)：只有亲眼所见、且所见能说明说话时的世界，才能证实或证伪一条传闻。"""
+    if p.modality not in FIRSTHAND:
         return []
+    touched = _touched(p)
     out = []
     for c in changes:
         b, a = c.before, c.after
-        if b is None or b.informant is None or not b.hearsay or not b.holds:
+        if b is None or b.informant is None or not b.hearsay or not b.holds or b.prop.subject in touched:
             continue
-        if a is not None and not a.hearsay and a.holds == b.holds and a.prop == b.prop:
+        if a is not None and not a.hearsay and a.holds and a.prop == b.prop:
             out.append((b.informant, "confirmed", c))
-        elif a is None or not a.holds:
-            out.append((b.informant, "refuted", c))
+        elif a is None:
+            out.append((b.informant, "refuted", c))          # 被亲眼所见的另一个值取代：看见它在别处
+        elif not a.holds and p.modality != Modality.SCENE:
+            out.append((b.informant, "refuted", c))          # 仔细查看（或亲身所受）确知不是那样；随意环顾不算
     return out
 
 
@@ -70,7 +87,7 @@ def records_for(
             emit("discovery", "发现" + render_fact(Fact(a.prop, True), names, me), (a.prop.subject,))
 
     # ---- 说法的验证：谁的话被亲眼证实、谁的话落了空 ----
-    for who, verdict, c in claim_verdicts(p.modality, changes):
+    for who, verdict, c in claim_verdicts(p, changes):
         assert c.before is not None
         claim = render_fact(Fact(c.before.prop, True), names, me)
         speaker = names[who].name if who in names else who

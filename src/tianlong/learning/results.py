@@ -1,9 +1,11 @@
 """
-[INPUT]: 依赖标准库 json / statistics / argparse
-[OUTPUT]: 对外提供 load_reports()、seed_summary()（跨训练种子的均值与标准差）、markdown()（带 run_id 与提交号的结果表）、
-          main()（python -m tianlong.learning.results 报告.json ... [--out 结果.md]）
+[INPUT]: 依赖标准库 json / statistics / argparse / hashlib，learning/rl/stats 的 EpisodeLog / compare（纯 numpy，不需要 torch / ray）
+[OUTPUT]: 对外提供 load_reports()、seed_summary()（跨训练种子的均值与标准差）、pair_reports()（两份报告在同一批留出世界上的配对比较）、
+          markdown()（带 run_id 与提交号的结果表）、main()（python -m tianlong.learning.results 报告.json ... [--pair A.json B.json]... [--out 结果.md]）
 [POS]: learning 的结果出口：README 的表格由它从机器可读报告生成，每张表头写明 run_id、提交号、任务指纹与种子——
-       手抄数字、混用不同版本的实验在这里没有入口。策略报告按训练种子汇总（同一任务分布、不同种子的差异另报），
+       手抄数字、混用不同版本的实验在这里没有入口。跨种子汇总只合并“同一提交（含未提交改动的哈希）+ 除种子外配置完全相同”的运行，
+       同一种子重复跑的只留最新一次——换了预测器、轮数或提交的运行不会被当成种子方差；
+       训练期消融（有/无预测、有/无记忆）是另一次运行，用 --pair 按世界配对比较（每份报告带逐世界记录）；
        动态模型报告按视角列出；比率指标一律带分子分母
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -11,10 +13,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 from collections import defaultdict
 from pathlib import Path
+
+from tianlong.learning.rl.stats import EpisodeLog, compare
 
 POLICY_ROWS = ("random", "wait_only", "scripted", "bc", "ppo", "ppo_test_time_no_predictions")
 POLICY_COLS = ("goal_rate", "initial_goal_rate", "new_goal_achievement", "maintenance_success", "search_miss_rate",
@@ -38,16 +43,24 @@ def _val(cell) -> float | None:
     return cell.get("value") if isinstance(cell, dict) else cell
 
 
+_RESOURCE_KEYS = frozenset({"seed", "env_runners", "gpus", "device"})   # 不改变实验含义的配置
+
+
+def _group_key(r: dict) -> tuple:
+    m = r["manifest"]
+    cfg = {k: v for k, v in (m.get("config") or {}).items() if k not in _RESOURCE_KEYS}
+    return (m.get("git_sha"), m.get("git_diff_sha256"), json.dumps(cfg, sort_keys=True))
+
+
 def seed_summary(reports: list[dict]) -> dict:
-    """同一任务指纹下、不同训练种子的策略报告：每个策略每个指标的均值、标准差与种子数。"""
-    groups: dict[tuple, list[dict]] = defaultdict(list)
-    for r in reports:
-        if _kind(r) != "policy":
-            continue
-        m = r["manifest"]
-        groups[(m.get("task_fingerprint"), (m.get("config") or {}).get("ablate_predictions"))].append(r)
+    """同一提交、除种子外配置完全相同的策略报告：每个策略每个指标的均值、标准差与种子数（同一种子只取最新一次）。"""
+    groups: dict[tuple, dict] = defaultdict(dict)
+    for r in sorted((r for r in reports if _kind(r) == "policy"), key=lambda r: r["manifest"].get("created_at") or ""):
+        groups[_group_key(r)][r["manifest"]["seeds"].get("train")] = r       # 后来者覆盖同种子的旧运行
     out = {}
-    for (fp, ablate), rs in groups.items():
+    for key, by_seed in groups.items():
+        rs = list(by_seed.values())
+        m = rs[0]["manifest"]
         table = {}
         for pol in POLICY_ROWS:
             row = {}
@@ -59,10 +72,26 @@ def seed_summary(reports: list[dict]) -> dict:
                                 "sd": round(statistics.stdev(vals), 4) if len(vals) > 1 else None, "seeds": len(vals)}
             if row:
                 table[pol] = row
-        out[f"{fp}{'·训练期无预测' if ablate else ''}"] = {
-            "runs": [r["manifest"]["run_id"] for r in rs], "commits": sorted({r["manifest"].get("git_sha") for r in rs}),
-            "train_seeds": [r["manifest"]["seeds"].get("train") for r in rs], "table": table}
+        ablation = m.get("training_time_ablation") or []
+        name = (f"{(key[0] or 'None')[:10]}{'+' + key[1][:6] if key[1] else ''}·{m.get('task_fingerprint')}"
+                f"·cfg {hashlib.sha256(key[2].encode()).hexdigest()[:8]}{''.join('·训练期无' + a for a in ablation)}")
+        out[name] = {"commit": key[0], "diff": key[1], "runs": [r["manifest"]["run_id"] for r in rs],
+                     "train_seeds": sorted(by_seed, key=str), "table": table}
     return out
+
+
+def pair_reports(a: dict, b: dict, policy: str = "ppo", margin: float | None = None) -> dict:
+    """两份策略报告里同一策略在同一批留出世界上的配对差 a − b（如训练期有/无预测）。"""
+    wa, wb = (r.get("worlds", {}).get(policy) for r in (a, b))
+    if not wa or not wb:
+        raise ValueError(f"报告缺少 {policy} 的逐世界记录（worlds）：请用当前代码重新评测")
+    la, lb = [EpisodeLog.from_dict(d) for d in wa], [EpisodeLog.from_dict(d) for d in wb]
+    ma, mb = a["manifest"], b["manifest"]
+    return {"a": ma["run_id"], "b": mb["run_id"], "policy": policy,
+            "same_commit": (ma.get("git_sha"), ma.get("git_diff_sha256")) == (mb.get("git_sha"), mb.get("git_diff_sha256")),
+            "config_diff": sorted(k for k in set(ma["config"]) | set(mb["config"])
+                                  if ma["config"].get(k) != mb["config"].get(k)),
+            "goal_rate": compare(la, lb, "goal_rate", margin), "mean_return": compare(la, lb, "mean_return")}
 
 
 def _fmt(cell) -> str:
@@ -87,7 +116,7 @@ def markdown(reports: list[dict]) -> str:
                 p = r["policies"].get(pol)
                 if p:
                     ci = p["mean_return_ci95_world"]
-                    lines.append(f"| {pol} | {p['mean_return']:.3f} [{ci[0]}, {ci[1]}] | "
+                    lines.append(f"| {pol} | {_fmt(p['mean_return'])} [{ci[0]}, {ci[1]}] | "
                                  + " | ".join(_fmt(p[c]) for c in POLICY_COLS) + " |")
             lines += ["", "| 配对比较（同一批世界） | 差 | 95% 区间 | 判定 |", "|---|---|---|---|"]
             for k, c in r.get("paired_comparisons", {}).items():
@@ -107,6 +136,9 @@ def markdown(reports: list[dict]) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="tianlong.learning.results", description="从报告生成可溯源的结果表")
     ap.add_argument("reports", nargs="+")
+    ap.add_argument("--pair", nargs=2, action="append", default=[], metavar=("A", "B"),
+                    help="两份策略报告的 ppo 在同一批留出世界上配对比较（A − B），可重复")
+    ap.add_argument("--margin", type=float, default=0.05, help="目标达成率的等效容许差")
     ap.add_argument("--out")
     a = ap.parse_args(argv)
     reports = load_reports(a.reports)
@@ -114,7 +146,17 @@ def main(argv: list[str] | None = None) -> int:
     summary = seed_summary(reports)
     if summary:
         text += "\n#### 跨训练种子\n\n```json\n" + json.dumps(summary, indent=1, ensure_ascii=False) + "\n```\n"
+    if a.pair:
+        text += "\n#### 跨运行配对比较（同一批留出世界，A − B）\n\n| A | B | 配置差异 | 同一提交 | 目标达成率差 [95%] 判定 | 平均回报差 [95%] 判定 |\n" \
+                "|---|---|---|---|---|---|\n"
+        for pa, pb in a.pair:
+            ra, rb = load_reports([pa, pb])
+            c = pair_reports(ra, rb, margin=a.margin)
+            g, m = c["goal_rate"], c["mean_return"]
+            text += (f"| `{c['a']}` | `{c['b']}` | {', '.join(c['config_diff']) or '—'} | {c['same_commit']} | "
+                     f"{g['diff']} {g['ci95_world']} {g['verdict']} | {m['diff']} {m['ci95_world']} {m['verdict']} |\n")
     if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(text)
     print(text)
     return 0

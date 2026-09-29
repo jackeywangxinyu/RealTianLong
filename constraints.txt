@@ -1,0 +1,5 @@
+# 本地与 CI 验证过的学习层版本（pip install -c constraints.txt ...）：Colab 笔记本与 CI 都经它安装，版本随提交走。
+# torch 不在此列：CI 装 CPU 轮子，Colab 用自带的 CUDA 版（都满足 pyproject 的 torch>=2.4）。
+torch-geometric==2.8.0.post1
+ray==2.58.0
+gymnasium==1.2.2

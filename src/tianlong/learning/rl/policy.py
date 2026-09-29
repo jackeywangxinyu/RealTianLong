@@ -1,8 +1,10 @@
 """
-[INPUT]: 依赖 torch，learning/rl 的 GraphPolicyNet / ObsSpec / build_observation，learning/schema 的 check_schema，agents/policies 的 Choice / Situation
+[INPUT]: 依赖 torch，learning/rl 的 GraphPolicyNet / ObsSpec / build_observation / ablate，learning/schema 的 check_schema，
+         agents/policies 的 Choice / Situation
 [OUTPUT]: 对外提供 LearnedPolicy（Policy 协议的神经网络实现）
 [POS]: learning/rl 与 agents 的接缝：训练好的策略以“策略”身份接入 LangGraph 决策图，替换 ScriptedPolicy 而不改图。
-       游玩时运行的是训练好的网络，不在每次玩家输入后临时重新训练；加载时核对规格指纹，并按训练时的 ObsSpec 看世界
+       游玩时运行的是训练好的网络，不在每次玩家输入后临时重新训练；加载时核对规格指纹，并按训练时的 ObsSpec 看世界；
+       训练期消融过的策略（从没见过预测或记忆列）上线时照样置零——评测里看到的行为，就是游戏里的行为
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -15,14 +17,15 @@ import torch
 
 from tianlong.agents.policies import Choice, Situation
 from tianlong.learning.rl.module import GraphPolicyNet
-from tianlong.learning.rl.observation import ObsSpec, build_observation
+from tianlong.learning.rl.observation import ObsSpec, ablate, build_observation
 from tianlong.learning.schema import check_schema
 
 
 class LearnedPolicy:
-    def __init__(self, net: GraphPolicyNet, spec: ObsSpec | None = None) -> None:
+    def __init__(self, net: GraphPolicyNet, spec: ObsSpec | None = None, ablations: tuple[str, ...] = ()) -> None:
         self.net = net.eval()
         self.spec = spec or ObsSpec()
+        self.ablations = tuple(ablations)
 
     @classmethod
     def load(cls, path: str | Path) -> LearnedPolicy:
@@ -30,11 +33,13 @@ class LearnedPolicy:
         check_schema(ckpt, path, view="policy")
         net = GraphPolicyNet(ckpt["config"]["hidden"])
         net.load_state_dict(ckpt["state_dict"])
-        return cls(net, ObsSpec(**ckpt["obs_spec"]) if "obs_spec" in ckpt else None)
+        legacy = ("predictions",) if ckpt["config"].get("ablate_predictions") else ()
+        return cls(net, ObsSpec(**ckpt["obs_spec"]) if "obs_spec" in ckpt else None, tuple(ckpt.get("ablate", legacy)))
 
     @torch.no_grad()
     def choose(self, sit: Situation) -> Choice:
         ob = build_observation(sit.beliefs, sit.now, sit.profile, sit.candidates, sit.predictions, self.spec, sit.memory)
+        ablate(ob.obs, self.ablations)
         batch = {k: torch.as_tensor(np.expand_dims(v, 0)) for k, v in ob.obs.items()}
         logits, _ = self.net(batch)
         probs = torch.softmax(logits[0], -1)

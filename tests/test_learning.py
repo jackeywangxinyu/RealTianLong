@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
+
+np = pytest.importorskip("numpy")   # 学习层 extras 未装时整模块跳过（核心零依赖）
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")

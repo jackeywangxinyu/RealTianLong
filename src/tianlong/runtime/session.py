@@ -4,7 +4,7 @@
          memory 的 QdrantMemoryIndex / Recall / MemoryIndexer / MemoryScope，language 的 IntentParser / Narrator / Speaker / LLMClient，
          language/render 的 Rendered / RenderStatus，persistence 的 WorldStore / InMemoryWorldStore / WorldRef / TurnEnvelope /
          RequestConflict / VersionConflict，scenarios 的 Scenario，cognition 的 Candidate / believed_place，
-         language/templates 的 render_fact（读档开场），memory/view 的 MemoryView（NPC 的长期记忆摘要，增量汇总、读档后重建）
+         language/templates 的 render_fact（读档开场），memory/view 的 MemoryView（NPC 的长期记忆摘要，增量汇总——水位含边界、按记录 ID 去重，与读档后重建逐项相同）
 [OUTPUT]: 对外提供 GameSession（可玩会话：读档接续并恢复调度标记与已描写实体、请求幂等、存档版本闸门）、
           TurnReport（一回合的全部产物：世界侧结果与文字侧结果分开记录，含分阶段耗时）
 [POS]: runtime 的装配中心：一回合 = 解析玩家输入 → 基于同一版本扇出 NPC 决策 → 权威结算（同一事务附上请求进度与会话运行态）
@@ -168,7 +168,8 @@ class GameSession:
         self._universe = frozenset(e.name for e in scenario.state.entities.values())  # 闸门拒绝用的名字全集
         self.speaker: Speaker = (LLMSpeaker(llm, universe=self._universe, aliases=scenario.aliases) if llm
                                  else TemplateSpeaker())
-        self._memory_views: dict[str, tuple[int, MemoryView]] = {}   # 长期记忆摘要的增量缓存（派生数据）
+        # 长期记忆摘要的增量缓存（派生数据）：(水位 tick, 水位 tick 上已并入的记录 ID, 摘要)
+        self._memory_views: dict[str, tuple[int, frozenset[str], MemoryView]] = {}
         self.policies = dict(policies or {})
         self.predictor = predictor or HeuristicPredictor()
         self.max_candidates = max_candidates   # 学得的策略按训练时的候选上限看世界
@@ -396,13 +397,17 @@ class GameSession:
         return due, routine
 
     def _memory_view(self, agent: str, now: int) -> MemoryView:
-        """长期记忆摘要：从权威经历记录汇总（可重建的派生数据），按角色增量缓存。"""
-        seen, view = self._memory_views.get(agent, (-1, MemoryView()))
-        fresh = [m for m in self.authority.store.recent_memories(self.ref, agent, seen + 1) if m.known_at <= now]
+        """长期记忆摘要：从权威经历记录汇总（可重建的派生数据），按角色增量缓存。
+        known_at 不是逐次提交唯一的（本 tick 末的环顾与下一次结算写下的记录同一个 tick）：水位含边界、按记录 ID 去重，
+        与从全部记录重建（读档后）逐项相同。"""
+        seen, ids, view = self._memory_views.get(agent, (0, frozenset(), MemoryView()))
+        fresh = [m for m in self.authority.store.recent_memories(self.ref, agent, seen)
+                 if m.known_at <= now and not (m.known_at == seen and m.id in ids)]
         if fresh:
             view = view.add(fresh, now)
-            seen = max(m.known_at for m in fresh)
-            self._memory_views[agent] = (seen, view)
+            top = max(seen, max(m.known_at for m in fresh))
+            ids = (ids if top == seen else frozenset()) | {m.id for m in fresh if m.known_at == top}
+            self._memory_views[agent] = (top, ids, view)
         return view
 
     def _contexts(self, agents: list[str], version: int, now: int) -> dict[str, NpcContext]:

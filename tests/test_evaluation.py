@@ -3,7 +3,8 @@
          tianlong.cognition 的 BeliefStore，tianlong.kernel 的 Kernel，tianlong.scenarios 的 build_warehouse
 [OUTPUT]: 评测口径验收 E01–E03、E05、E06：被动损失不算搜身、行为计数与奖励权重无关、以世界为单位的区间与配对比较、
           “没差异 ≠ 等效”、永远等待基线把“保持初态”与“新达成”分开、结果带可溯源 manifest 且结果表写明 run 与提交；
-          动态模型的温度只在校准世界上拟合
+          动态模型的温度只在校准世界上拟合；评审回归（动手缘由、无效循环与随机重掷、严格 JSON、run_id 含未提交改动、
+          跨种子汇总的分组与去重、两次运行按世界配对）
 [POS]: tests 的统计口径层；证伪“指标从奖励推算”“把同一局的角色当独立样本”“把初态当学会”这三类错误
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -130,5 +131,124 @@ def test_dynamics_temperature_is_fit_on_calibration_worlds_only():
     assert not wt & {world_of[s] for s in te} and not wt & {world_of[s] for s in ca}
     assert not {world_of[s] for s in ca} & {world_of[s] for s in te}
     _, m = train_dynamics(TrainConfig(view="agent", worlds=24, epochs=2, seed=2), log=lambda *_: None)
-    assert m["split"]["calib"] > 0 and m["success_temperature_fit_on_calib"] > 0
+    assert m["split"]["worlds"]["calib"] > 0 and m["split"]["samples"]["calib"] > 0
+    assert m["success_temperature_fit_on_calib"] > 0
     assert "success_brier_calibrated" in m and m["manifest"]["kind"] == "dynamics_agent"
+
+
+# ============================================================
+#  评审回归：动手缘由、无效循环、严格 JSON、run_id、结果汇总与跨运行配对
+# ============================================================
+
+
+def _advance(k, state, stores, intents):
+    r = k.step(state, intents)
+    for o in r.observations:
+        stores[o.observer] = stores[o.observer].revise(o.percept)[0]
+    return r
+
+
+def test_attack_on_the_believed_holder_of_a_goal_item_is_goal_driven():
+    sc = build_warehouse()
+    profiles = {"guard": Profile("guard", "x", "x", (Goal(GoalKind.PROTECT, "key", home="table"),)),
+                "player": Profile("player", "x", "x", (Goal(GoalKind.ACQUIRE, "key"),))}
+    k, stores = Kernel(), _stores(sc)
+    s1 = _advance(k, sc.state, stores, [Intent("m", "guard", Op.MOVE, "warehouse", "door_main", based_on=0)]).state
+    before_take = dict(stores)
+    hit = [Intent("a0", "guard", Op.ATTACK, "player", based_on=1)]
+    c0 = event_counts(profiles, s1, before_take, k.step(s1, hit).events, ())
+    assert c0["attack_unprovoked"] == 1, "守卫并不认为钥匙在他身上：动手就是无端"
+    s2 = _advance(k, s1, stores, [Intent("t", "player", Op.TAKE, "key", based_on=1)]).state   # 守卫亲眼看着他拿走
+    c = event_counts(profiles, s2, stores, k.step(s2, [Intent("a1", "guard", Op.ATTACK, "player", based_on=2)]).events, ())
+    assert (c["attacks"], c["attack_goal_driven"], c["attack_unprovoked"]) == (1, 1, 0), "制住再搜是为了守护物"
+
+
+def test_escape_goal_does_not_excuse_attacking_an_ally():
+    sc = build_warehouse()
+    k, stores = Kernel(), _stores(sc)
+    s1 = _advance(k, sc.state, stores, [Intent("m", "guard", Op.MOVE, "warehouse", "door_main", based_on=0)]).state
+    esc = Goal(GoalKind.ESCAPE, home="yard") if hasattr(GoalKind, "ESCAPE") else None
+    hit = k.step(s1, [Intent("a", "guard", Op.ATTACK, "player", based_on=1)]).events
+    ally = {"guard": Profile("guard", "x", "x", (esc,), allies=("player",)), "player": Profile("player", "x", "x")}
+    foe = {"guard": Profile("guard", "x", "x", (esc,)), "player": Profile("player", "x", "x")}
+    assert event_counts(ally, s1, stores, hit, ())["attack_unprovoked"] == 1
+    assert event_counts(foe, s1, stores, hit, ())["attack_goal_driven"] == 1
+
+
+def test_only_deterministic_failures_count_as_invalid_loops():
+    from tianlong.core import Event, Outcome
+    from tianlong.learning.rl.evaluation import repeat_kind
+
+    def ev(i, op, target, outcome, reason=None, obj=None):
+        return Event(f"e{i}", i, Intent(f"i{i}", "guard", op, target, obj, based_on=i), "warehouse", outcome, reason)
+
+    parried = ev(0, Op.ATTACK, "player", Outcome.FAILURE, "parried")
+    assert repeat_kind(parried, ev(1, Op.ATTACK, "player", Outcome.SUCCESS)) == "retries_stochastic"
+    locked = ev(0, Op.MOVE, "yard", Outcome.FAILURE, "door_locked", obj="door_main")
+    assert repeat_kind(locked, ev(1, Op.MOVE, "yard", Outcome.FAILURE, "door_locked", obj="door_main")) == "loops"
+    assert repeat_kind(locked, ev(1, Op.MOVE, "yard", Outcome.FAILURE, obj="door_back")) is None, "换了路线不是重复"
+    assert repeat_kind(ev(0, Op.TAKE, "key", Outcome.SUCCESS), ev(1, Op.TAKE, "key", Outcome.FAILURE)) is None
+    assert repeat_kind(None, locked) is None
+
+
+def test_reports_are_strict_json_when_denominators_are_zero():
+    import json
+
+    from tianlong.learning.rl.evaluation import summarize
+    s = summarize([_log(w, 2, 0, 0.0) for w in range(3)], draws=50)
+    assert s["search_miss_rate"]["value"] is None and s["search_miss_rate"]["ci95_world"] == [None, None]
+    json.dumps(s, allow_nan=False)
+    assert summarize([], draws=10)["mean_return"] is None
+
+
+def test_run_id_distinguishes_uncommitted_changes(monkeypatch):
+    from tianlong.learning import provenance
+    ids = []
+    for diff in ("aaaa", "bbbb", None):
+        monkeypatch.setattr(provenance, "git_state", lambda d=diff: {"git_sha": "c" * 40, "git_dirty": d is not None,
+                                                                     "git_diff_sha256": d})
+        ids.append(provenance.run_manifest("policy", {"seed": 0}, seeds={"train": 0})["run_id"])
+    assert len(set(ids)) == 3, "同一提交上的不同改动、以及干净工作区，各是不同的实验"
+
+
+def _report(seed, value, created, sha="c" * 40, **cfg):
+    """结构与 rl.train 写出的一致：summarize 的策略表 + 逐世界记录；goal_rate 的值钉成 value 便于断言。"""
+    from tianlong.learning.rl.evaluation import summarize
+    logs = [_log(w, 2, 2 if (w + seed) % 3 else 0, value) for w in range(24)]
+    ppo = summarize(logs, draws=20)
+    ppo["goal_rate"]["value"] = value
+    return {"manifest": {"run_id": f"r{seed}{created}", "kind": "policy", "git_sha": sha, "git_diff_sha256": None,
+                         "created_at": created, "task_fingerprint": "t", "seeds": {"train": seed},
+                         "config": {"seed": seed, "predictor_path": "", "ppo_iterations": 20, "env_runners": 1, **cfg}},
+            "policies": {"ppo": ppo}, "paired_comparisons": {}, "worlds": {"ppo": [lg.to_dict() for lg in logs]}}
+
+
+def test_seed_summary_only_pools_runs_that_differ_by_seed():
+    from tianlong.learning.results import seed_summary
+    reps = [_report(0, 0.2, "2026-01-01"), _report(1, 0.4, "2026-01-01"),
+            _report(0, 0.6, "2026-01-02"),                              # 同一种子重跑：取最新
+            _report(0, 0.9, "2026-01-01", predictor_path="gnn.pt"),     # 换了预测器：另一组
+            _report(1, 0.9, "2026-01-01", sha="d" * 40),                # 换了提交：另一组
+            _report(2, 0.5, "2026-01-01", env_runners=4)]               # 只换并行度：同一组
+    out = seed_summary(reps)
+    assert len(out) == 3
+    main = next(v for v in out.values() if len(v["train_seeds"]) == 3)
+    assert main["train_seeds"] == [0, 1, 2] and main["table"]["ppo"]["goal_rate"]["mean"] == 0.5
+
+
+def test_pair_reports_compares_two_runs_on_the_same_worlds(tmp_path):
+    import json
+
+    from tianlong.learning.results import main, pair_reports
+    a, b = _report(0, 1.0, "x"), _report(0, 0.0, "y", ablate_predictions=True)
+    c = pair_reports(a, b)
+    assert c["config_diff"] == ["ablate_predictions"] and c["same_commit"]
+    assert c["mean_return"]["diff"] == 1.0 and c["mean_return"]["verdict"] == "different"
+    with pytest.raises(ValueError, match="逐世界"):
+        pair_reports({**a, "worlds": {}}, b)
+    pa, pb = tmp_path / "a.json", tmp_path / "b.json"
+    pa.write_text(json.dumps(a))
+    pb.write_text(json.dumps(b))
+    out = tmp_path / "new" / "dir" / "RESULTS.md"                       # 目录不存在也能写
+    assert main([str(pa), str(pb), "--pair", str(pa), str(pb), "--out", str(out)]) == 0
+    assert "跨运行配对比较" in out.read_text() and "ablate_predictions" in out.read_text()

@@ -98,19 +98,30 @@ python -m tianlong.learning.train --view env   --worlds 1500 --epochs 25 --jiang
 python -m tianlong.learning.train --view agent --worlds 1500 --epochs 25 --jianghu 0.5 --scroll-held 0.3
 # 角色策略：模仿学习 → PPO → 留出世界评测（同一份 TaskConfig 贯通示范、PPO 的每个 env runner 与评测）
 python -m tianlong.learning.rl.train --jianghu 0.5 --demo-episodes 200 --bc-epochs 3 --bc-smoothing 0.1 --entropy 0.03 \
-    --ppo-iterations 40 --train-batch 3000 --eval-episodes 100 --env-runners 1 --seed 0
-# 结果表：从机器可读报告生成（每张表写明 run_id、提交号、任务指纹与种子）
-python -m tianlong.learning.results artifacts/*.json --out docs/results/RESULTS.md
+    --ppo-iterations 40 --train-batch 3000 --eval-episodes 100 --env-runners 1 --seed 0 \
+    --predictor-path artifacts/dynamics_agent.pt --out artifacts/rl/main_s0
+# 训练期消融是另一次运行（--ablate-predictions true / --ablate-memory true），报告带逐世界记录
+# 结果表：从机器可读报告生成（每张表写明 run_id、提交号、任务指纹与种子）；--pair 把两次运行在同一批留出世界上配对比较
+python -m tianlong.learning.results artifacts/*.json artifacts/rl/*/*.json \
+    --pair artifacts/rl/main_s0/policy_ppo_s0.json artifacts/rl/noPred_s0/policy_ppo_noPred_s0.json --out docs/results/RESULTS.md
+# 部署包：记下训练时的全部语义版本与文件哈希；游戏加载前逐项核对，策略配套的预测器随包决定
+python -m tianlong.learning.bundle artifacts --predictor artifacts/dynamics_agent.pt --policy artifacts/rl/main_s0/policy_ppo_s0.pt
+python -m tianlong --predictor gnn --policy learned --artifacts artifacts
+# 剖析：先看清时间花在哪一段（GPU 只帮得上网络前向与学习器）
+python -m tianlong.learning.profile --worlds 20 --out artifacts/profile.json
 ```
 
-更大规模与多训练种子在 Colab GPU 上跑同一套命令：[`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb)。
+两个训练 CLI 都支持 `--resume true`：GNN 按轮续训（与不中断逐位相同），PPO 从最近一次保存的权重接续；换了配置的断点会被拒绝，`--resume` 本身不进 run_id。
+
+**Colab**：更大规模与多训练种子在 Colab GPU 上跑同一套命令——[`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb)（由 `scripts/make_colab_notebook.py` 生成，`--commit <40 位提交>` 填入固定提交）。笔记本检出固定提交（代码来自 Drive 上的 git bundle 或 GitHub，从不嵌套克隆、从不静默用旧提交），按 `constraints.txt` 锁定版本安装，全量测试失败即停，产物全部写进 `MyDrive/RealTianLong/runs/<运行名>/`，断线后重新“全部运行”会跳过已完成的阶段；私有仓库的令牌只经环境变量注入一次性请求头，不进 remote、git 配置与日志。
 
 口径（见 `learning/rl/evaluation.py`、`learning/train.py`）：
 
-- **可溯源**：每份报告与检查点带 manifest（提交号与工作区是否干净、特征/属性/目标/奖励版本、任务指纹、完整配置、训练与评测种子、依赖版本、设备）。README 里的数字只从 `docs/results/` 下的报告生成。
+- **可溯源**：每份报告与检查点带 manifest（提交号、工作区是否干净与未提交改动的哈希、全部语义版本——特征规格/属性/目标/奖励/候选规则/规则内核/观测布局、任务指纹、完整配置、训练与评测种子、依赖版本、设备）。报告是严格 JSON（算不出来的是 null）。跨种子汇总只合并同一提交、除种子外配置相同的运行。README 里的数字只从 `docs/results/` 下的报告生成。
+- **部署**：`bundle.json` 记下训练时的全部语义版本与文件哈希；词表相同但规则、目标、奖励、候选规则或观测布局任一变了，游戏都会拒绝加载并列出不一致项（不做隐式迁移，要迁移就重训）。
 - **动态模型**：指标按声明的预测目标逐项——位置召回叫 `holder_*`（不冒充“全部事实”）、布尔属性逐项、数值属性（进度、内力、点穴余时）给 MAE 对照“不变”、发现新实体与有效新观察数；成败的 Brier 对照**训练集**常数，温度只在独立的校准世界上拟合，测试世界只报告；`coverage` 报告每类机制在数据里出现了几次。
-- **策略**：行为计数只读事件（改奖励权重不改计数）——搜身分“落空”与“无证据”、动手分得手/落空/被拒与“目标所驱/还手护人/无端”、误指控、无效循环；目标分**开局即满足**、**激活后新达成**、**持续目标守住**，并报达成用时与可达性。必报**永远等待**基线：一部分“达成”只是保持初态。
-- **统计**：同一局里的角色互相影响，区间一律以**世界**为单位重采样；策略之间只在同一批世界上**配对**比较；世界少于 20 个不下结论；“没发现差异”不等于“等效”，等效要求整个区间落在事先声明的容许差内。训练期消融（`--ablate-predictions`，策略从头到尾看不到预测）与测试期消融（训练时看得见、评测时置零）分开报告、分开解释。
+- **策略**：行为计数只读事件（改奖励权重不改计数）——搜身分“落空”与“无证据”、动手分得手/落空/被拒与“目标所驱（含为目标物品对自己认定的持有者）/还手护人/无端”、误指控、无效循环（只算确定性失败的重复；被招架/闪避后再出手另计随机重掷）；目标分**开局即满足**、**激活后新达成**、**持续目标守住**，并报达成用时与可达性。必报**永远等待**基线：一部分“达成”只是保持初态。
+- **统计**：同一局里的角色互相影响，区间一律以**世界**为单位重采样；策略之间只在同一批世界上**配对**比较；世界少于 20 个不下结论；“没发现差异”不等于“等效”，等效要求整个区间落在事先声明的容许差内。训练期消融（`--ablate-predictions` / `--ablate-memory`，策略从头到尾看不到预测或长期记忆列；上线时同样置零）与测试期消融（训练时看得见、评测时置零）分开报告、分开解释；训练期消融与主实验用 `results --pair` 按世界配对。
 
 ### 当前结果（Schema v2 / reward-v2 / task-v1）
 
@@ -176,10 +187,12 @@ python -m tianlong.learning.results artifacts/*.json --out docs/results/RESULTS.
 ## 测试
 
 ```bash
-pytest                                  # 默认套件（Neo4j 不可达则跳过相关用例）
+pytest                                  # 默认套件（缺学习层依赖或 Neo4j 不可达则跳过相关用例；只装 dev 也能跑通核心）
 NEO4J_URI=... NEO4J_PASSWORD=... pytest # 含内存/Neo4j 双后端契约测试
 pytest -m slow                          # PPO 冒烟
 ```
+
+CI（`.github/workflows/ci.yml`）跑两份：只装 dev 的核心零依赖套件，与装齐学习层（`constraints.txt` 锁定版本）+ Neo4j 服务的全量套件。
 
 | 边界 | 实现 | 可证伪断言 |
 |---|---|---|
@@ -194,6 +207,8 @@ pytest -m slow                          # PPO 冒烟
 | 文字 ≠ 事实 | `language/render.py` RenderPlan + 确定性词法闸门：清单外实体（名或别称）、状态升级、瞬移、物品复制、编造承诺、传闻去归属一律回退模板；世界结算与文字结果分开记录 | `test_render_gate.py`（L01–L02：合法修辞放行，每类错误各被拦下，另有松散否定、常见说法与误报的词法回归） |
 | 快照不可变 | `core/frozen.py` FrozenMap：世界与认知快照里的映射封死就地修改，仍可 pickle / JSON | `test_resume.py`（R01） |
 | 读档等价 | 调度标记与已描写实体随世界提交落库、读档恢复；存档记下规则/属性/目标版本，不符即拒绝，迁移须显式 | `test_resume.py`（R02：内存与 Neo4j，连续运行 vs 中途读档，事件/调度/认知/叙述逐项一致） |
+| 模型兼容不止词表 | `learning/bundle.py` 部署包：训练时的全部语义版本（取自检查点 manifest）+ 文件哈希 + 策略配套的预测器 | `test_deploy.py`（C02：逐项语义版本、改动的文件、缺配套预测器、跨版本混搭、旧检查点一律拒绝） |
+| 训练可接续、笔记本可复现 | 两个训练 CLI 的 `--resume`；Colab 笔记本固定提交、失败即停、凭据不落地 | `test_deploy.py`（续训与不中断逐位相同）、`test_notebook.py`（C03–C05：把单元格当代码在临时仓库上执行） |
 | 请求幂等 | `TurnEnvelope` 以 request_id + 原文摘要绑定、与世界同事务落库，绑定在提交内检查（进度必须接在已落库的那一份之后）；叙述幂等补写 | `test_resume.py`（R03–R04：故障注入后重试不二次结算，多 tick 等待只走剩下的；同 ID 异内容冲突；并发重复投递只结算一次、不多走 tick）、`test_store_contract.py`（交错提交整体回滚） |
 
 项目地图见 [`CLAUDE.md`](CLAUDE.md)，每个模块目录下都有自己的 `CLAUDE.md`。

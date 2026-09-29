@@ -91,6 +91,10 @@ def weighted_batch_loss(per: torch.Tensor, is_wait: torch.Tensor, w_wait: float,
     return (per * torch.where(is_wait, w_wait, w_act)).sum() / batch
 
 
+def _f(v: float | None, digits: int) -> str:
+    return "—" if v is None else f"{v:.{digits}f}"
+
+
 def behavior_clone(net: GraphPolicyNet, demos: list[Demo], epochs: int, lr: float = 1e-3, seed: int = 0,
                    smoothing: float = 0.0, wait_share: float | None = None, batch: int = BATCH,
                    log=print) -> list[dict]:
@@ -134,12 +138,12 @@ def behavior_clone(net: GraphPolicyNet, demos: list[Demo], epochs: int, lr: floa
             c["batches"] += 1
         weighted = c["wait_loss"] + c["act_loss"]
         rep = {"epoch": epoch + 1, "loss": c["loss"] / max(c["n"], 1), "acc": c["correct"] / max(c["n"], 1),
-               "act_acc": c["act_ok"] / c["act_n"] if c["act_n"] else float("nan"), "act_n": c["act_n"],
-               "declared_wait_share": share, "wait_loss_share": c["wait_loss"] / weighted if weighted else float("nan"),
+               "act_acc": c["act_ok"] / c["act_n"] if c["act_n"] else None, "act_n": c["act_n"],
+               "declared_wait_share": share, "wait_loss_share": c["wait_loss"] / weighted if weighted else None,
                "all_wait_batches": c["all_wait_batches"], "batches": c["batches"]}
         reports.append(rep)
-        log(f"[bc {epoch + 1}] loss={rep['loss']:.4f} acc={rep['acc']:.3f} act_acc={rep['act_acc']:.3f} "
-            f"(非等待 {c['act_n']}) 等待权重份额={share:.2f} 等待损失份额={rep['wait_loss_share']:.2f}")
+        log(f"[bc {epoch + 1}] loss={rep['loss']:.4f} acc={rep['acc']:.3f} act_acc={_f(rep['act_acc'], 3)} "
+            f"(非等待 {c['act_n']}) 等待权重份额={share:.2f} 等待损失份额={_f(rep['wait_loss_share'], 2)}")
     return reports
 
 
@@ -171,7 +175,7 @@ def holdout_metrics(net: GraphPolicyNet, demos: Sequence[Demo]) -> dict:
             c[f"tag_ok:{d.tag or 'goal'}"] += p == d.action
 
     def r(a: str, b: str) -> float:
-        return round(c[a] / c[b], 4) if c[b] else float("nan")
+        return round(c[a] / c[b], 4) if c[b] else None          # 算不出来是 null：报告是严格 JSON
 
     tags = sorted(k[4:] for k in c if k.startswith("tag:"))
     return {"samples": c["n"], "wait_precision": r("wait_tp", "wait_pred"), "wait_recall": r("wait_tp", "wait_true"),

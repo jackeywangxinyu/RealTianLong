@@ -1,7 +1,8 @@
 """
 [INPUT]: 依赖 scenarios/procedural 的 random_scenario，core/goals 的 GoalRegistry / DEFAULT_GOALS / GOALS_VERSION，core/profiles 的 GoalKind，
          core 的 digest
-[OUTPUT]: 对外提供 TaskConfig（训练/评测/部署共用的任务分布定义）、TASK_VERSION
+[OUTPUT]: 对外提供 TaskConfig（训练/评测/部署共用的任务分布定义）、TASK_VERSION、
+          arg_type()（配置字段展平成 CLI 参数时的解析器：布尔严格按 true/false 解析）
 [POS]: learning 的任务契约：场景混合（江湖化比例）、地图规模、人数、启用的目标族、修习机制覆盖旋钮、时限——
        GNN 数据、模仿学习示范、PPO 环境、评测与模型 manifest 读的是同一个解析后的 TaskConfig，
        “训练时的江湖参数没传到 PPO”这种断层在结构上不再可能。启用的目标族同时约束取样（只生成这些目标）与奖励
@@ -11,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict, dataclass, fields
 
 from tianlong.core import digest
@@ -71,3 +73,17 @@ class TaskConfig:
 
     def fingerprint(self) -> str:
         return digest(TASK_VERSION, GOALS_VERSION, repr(sorted(self.to_dict().items())))
+
+
+def _strict_bool(v: str) -> bool:
+    low = str(v).strip().lower()
+    if low in ("1", "true", "yes"):
+        return True
+    if low in ("0", "false", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"布尔参数只认 true/false/1/0/yes/no，收到 {v!r}")
+
+
+def arg_type(default):
+    """配置字段的 CLI 解析器：argparse 的 type=bool 会把字符串 "false" 当成真——布尔字段必须经这里。"""
+    return _strict_bool if isinstance(default, bool) else type(default)
