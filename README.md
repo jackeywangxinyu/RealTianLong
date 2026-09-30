@@ -48,7 +48,8 @@ python scripts/play_demo.py
 # 在浏览器里玩（主持人之声逐句浮现；有 GEMINI_API_KEY 即用 Gemini 叙述，否则模板叙述）
 python -m tianlong.runtime.web            # 打开 http://127.0.0.1:8000/
 
-# Gemini 主持人之声（密钥只从环境变量读取；TIANLONG_LLM_CACHE=1 才把调用结果缓存到 .cache/llm）
+# Gemini 主持人之声（密钥只从环境变量读取；叙述模型 GEMINI_HEDGE_AFTER 秒没出字就请快模型替补，默认 2.5，0 关闭；
+# TIANLONG_LLM_CACHE=1 才把调用结果缓存到 .cache/llm，此时不对冲）
 export GEMINI_API_KEY=...        # 见 .env.example
 python -m tianlong
 
