@@ -3,6 +3,7 @@
 [OUTPUT]: 启动本地游戏与免费的 HTTPS 外网试玩隧道，写 .cache/public/deployment.json 供重新查找入口
 [POS]: 开发部署工具。游戏只监听本机；隧道只代理这个端口；Ctrl+C/TERM 同时关闭两个子进程。
        使用 JSON 回合接口，因为 Quick Tunnel 不支持 SSE。不是常驻云服务器，电脑需保持在线。
+       --allow-migration 显式将迁移选择传给游戏服务；已有存档需事先备份。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -26,6 +27,7 @@ from urllib.request import urlopen
 def main() -> int:
     ap = argparse.ArgumentParser(description="部署 RealTianLong 外网试玩环境（本机需在线）")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--allow-migration", action="store_true", help="显式用当前规则接续此部署的旧存档")
     args = ap.parse_args()
     root = Path(__file__).resolve().parents[1]
     cloudflared = shutil.which("cloudflared")
@@ -49,8 +51,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     try:
         with (directory / "game.log").open("a") as output:
-            game = subprocess.Popen([sys.executable, "-m", "tianlong.runtime.web", "--port", str(args.port),
-                                     "--transport", "json", "--data-dir", str(root / ".cache" / "web-saves")],
+            command = [sys.executable, "-m", "tianlong.runtime.web", "--port", str(args.port),
+                       "--transport", "json", "--data-dir", str(root / ".cache" / "web-saves")]
+            if args.allow_migration:
+                command.append("--allow-migration")
+            game = subprocess.Popen(command,
                                     cwd=root, stdout=output, stderr=output)
         children.append(game)
         for _ in range(120):

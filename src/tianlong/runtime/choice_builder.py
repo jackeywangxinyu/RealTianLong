@@ -3,6 +3,7 @@
 [OUTPUT]: build_choices()，以当前问题为先、枚举至多 24 个候选中的三项组合
 [POS]: 玩家决策层。覆盖威胁、待回答、伤毒、进展和探索；保留路线与方式；多样性来自打算而非动作分类。
        同分按语义 ID 排序，不按展示文字排序；只描述尝试，不承诺内核尚未裁定的结果。
+       已知对症物品在 NPC 身上才提出具体请求；答应后只提供等候实际交付，拿到后才推荐 USE。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -55,7 +56,7 @@ def known_attr(me: BeliefStore, eid: str | None, key: str):
 
 
 def _refs(c: Candidate) -> set[str]:
-    refs = {x for x in (c.target, c.obj) if x}
+    refs = {x for x in (c.target, c.obj, c.beneficiary) if x}
     if c.topic:
         refs.add(c.topic.prop.subject)
         if c.topic.prop.predicate in {r.value for r in Rel} and isinstance(c.topic.prop.value, str):
@@ -112,13 +113,13 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
         if any(not me.knows(ref) for ref in _refs(c)):
             return
         if signature_error(c.op, lambda eid: me.sketch(eid).kind if me.sketch(eid) else None,
-                           c.target, c.obj, c.topic) is not None:
+                           c.target, c.obj, c.topic, c.beneficiary, c.request_ref) is not None:
             return
-        if known_attr(me, player, "subdued") is True and c.op not in (Op.WAIT, Op.TELL, Op.ASK):
+        if known_attr(me, player, "subdued") is True and c.op not in (Op.WAIT, Op.TELL, Op.ASK, Op.REQUEST_ITEM):
             return
         if history.blocked(me, c):
             return
-        kind = MoveKind.SAY if c.op in (Op.TELL, Op.ASK) else MoveKind.ACT
+        kind = MoveKind.SAY if c.op in (Op.TELL, Op.ASK, Op.REQUEST_ITEM) else MoveKind.ACT
         spec = ChoiceSpec.of(label, Parsed(c, utterance, kind=kind, repeat=repeat), c.target, evidence)
         proposed = _Proposal(spec, score, issue, strategy)
         prior = pool.get(spec.semantic_key)
@@ -129,6 +130,12 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
     for obligation in me.obligations:
         who = obligation.counterpart
         if who not in people:
+            continue
+        if obligation.kind in ("request_item", "requested_item"):
+            if obligation.kind == "requested_item" and obligation.state in ("pending", "accepted"):
+                add(Candidate(Op.WAIT), f"留在原处，等候{name(who)}实际递交{name(obligation.item)}", 96,
+                    ("await-transfer", who), f"care:{obligation.beneficiary}", repeat=1,
+                    evidence=(f"request:{obligation.request_ref}:{obligation.state}",))
             continue
         issue = f"threat:{who}" if who in threats else f"answer:{who}"
         if obligation.topic is not None:
@@ -166,6 +173,25 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
         if player in health and who not in threats:
             add(Candidate(Op.TELL, who, social=Social.PLEAD), f"向{name(who)}说明伤势，请求帮助", 76,
                 ("seek-help", who), f"care:{player}", "在下身上不适，还请相助。")
+
+    # 请求中的物品、持有者与对症用途都必须是玩家已知；不从 NPC 私有库存拿出解药。
+    for item, sketch in sorted(me.entities.items()):
+        if sketch.kind != Kind.ITEM or known_attr(me, item, "cures") is None:
+            continue
+        holder = me.location_of(item)
+        if holder not in people:
+            continue
+        for patient in sorted({player, *friends} & health.keys()):
+            if known_attr(me, item, "cures") not in health[patient]:
+                continue
+            if any(o.kind == "requested_item" and o.item == item and o.counterpart == holder and
+                   o.beneficiary == patient and o.state in ("pending", "accepted") for o in me.obligations):
+                continue
+            whom = "我" if patient == player else name(patient)
+            c = Candidate(Op.REQUEST_ITEM, holder, item, social=Social.PLEAD, beneficiary=patient)
+            add(c, f"请求{name(holder)}把{name(item)}交给我，以便救助{whom}", 104,
+                ("request-resource", holder, patient), f"care:{patient}",
+                f"请把{name(item)}交给我，我想用它救助{whom}。", evidence=(f"known-holder:{item}:{holder}",))
 
     for c in candidates(me):
         target, obj = c.target, c.obj
@@ -269,8 +295,14 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
         return ()
 
     def value(combo):
+        def cost(p):
+            c = p.spec.parsed.candidate
+            previous = history.latest(c)
+            if p.issue in urgent or previous is None or previous.reason == "progress" or not history.unchanged(me, c):
+                return 0
+            return 35 if c.op == Op.ASK else 14
         return (sum(p.issue in urgent for p in combo), len({p.issue for p in combo if p.issue in issues}),
-                len({p.strategy for p in combo}), sum(p.relevance for p in combo))
+                len({p.strategy for p in combo}), sum(p.relevance - cost(p) for p in combo))
 
     combinations = itertools.combinations(sorted(bounded, key=lambda p: p.spec.semantic_key), count)
     picked = max(combinations, key=value)

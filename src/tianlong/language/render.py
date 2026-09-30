@@ -20,6 +20,7 @@
        引语归属靠小句主语的词法近似（宾语标记、“的”字结构、感知动词），复杂句式可能归错——归错成玩家只让这一句被丢，
        归成代词或找不到说话者的按所有说话者的交集查；替玩家起念头只认“你……决定/心想”等少数说法。
        出处优先：清单、外观描写与原话里本来就有的词、名字、数量与“抵达”说法，照搬不算违规
+       请求中被实际听见的受益人可点名；任何交付、疗效仍以真实感知为准。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -151,7 +152,7 @@ def build_plan(viewer: str, percepts: Sequence[Percept], names: Names, show_scen
     for p in percepts:
         ev = p.event
         if ev is not None:
-            ids.update(x for x in (ev.actor, ev.target, ev.obj, ev.place) if x)
+            ids.update(x for x in (ev.actor, ev.target, ev.obj, ev.place, ev.beneficiary) if x)
             if ev.kind in (Op.TELL.value, Op.ASK.value) and ev.actor:
                 talkers.add(ev.actor)
             if ev.kind == Op.MOVE.value and ev.outcome == Outcome.SUCCESS and ev.target:

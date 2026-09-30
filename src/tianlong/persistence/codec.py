@@ -4,6 +4,7 @@
           obligation（待答与待回话，命题可缺）/ said（闲话无命题、带言语行为）/ cue 社交线索 / attitudes 态度 / envelope 请求进度 / world 全世界 / mind 完整认知 / memory 经历）；
           请求含冻结选项绑定与展示文字；旧记录缺新键时取缺省（无选项绑定、言语行为为无、态度为空）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
+       物品请求的受益人、回应编号与义务状态显式往返；旧记录缺这些键时按无请求解码。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -76,12 +77,13 @@ def _social(v: str | None) -> Social | None:
 def intent_to(it: Intent) -> J:
     return {"id": it.id, "actor": it.actor, "op": it.op.value, "target": it.target, "obj": it.obj,
             "manner": it.manner.value, "topic": fact_to(it.topic), "based_on": it.based_on, "utterance": it.utterance,
-            "social": it.social.value if it.social else None}
+            "social": it.social.value if it.social else None, "beneficiary": it.beneficiary, "request_ref": it.request_ref}
 
 
 def intent_from(d: J) -> Intent:
     return Intent(d["id"], d["actor"], Op(d["op"]), d.get("target"), d.get("obj"), Manner(d["manner"]),
-                  fact_from(d.get("topic")), int(d["based_on"]), d.get("utterance"), _social(d.get("social")))
+                  fact_from(d.get("topic")), int(d["based_on"]), d.get("utterance"), _social(d.get("social")),
+                  d.get("beneficiary"), d.get("request_ref"))
 
 
 def change_to(c: Change) -> J:
@@ -126,7 +128,8 @@ def pevent_to(v: PerceivedEvent | None) -> J | None:
         return None
     return {"kind": v.kind, "place": v.place, "actor": v.actor, "target": v.target, "obj": v.obj,
             "outcome": v.outcome.value if v.outcome else None, "topic": fact_to(v.topic),
-            "reason": v.reason, "utterance": v.utterance, "social": v.social.value if v.social else None}
+            "reason": v.reason, "utterance": v.utterance, "social": v.social.value if v.social else None,
+            "beneficiary": v.beneficiary, "request_ref": v.request_ref}
 
 
 def pevent_from(d: J | None) -> PerceivedEvent | None:
@@ -134,7 +137,8 @@ def pevent_from(d: J | None) -> PerceivedEvent | None:
         return None
     return PerceivedEvent(d["kind"], d["place"], d.get("actor"), d.get("target"), d.get("obj"),
                           Outcome(d["outcome"]) if d.get("outcome") else None, fact_from(d.get("topic")),
-                          d.get("reason"), d.get("utterance"), _social(d.get("social")))
+                          d.get("reason"), d.get("utterance"), _social(d.get("social")),
+                          d.get("beneficiary"), d.get("request_ref"))
 
 
 def percept_to(p: Percept) -> J:
@@ -176,11 +180,13 @@ def episode_from(d: J) -> Episode:
 
 def obligation_to(o: Obligation) -> J:
     return {"kind": o.kind, "counterpart": o.counterpart, "topic": fact_to(o.topic), "since": o.since,
-            "social": o.social.value if o.social else None}
+            "social": o.social.value if o.social else None, "item": o.item, "beneficiary": o.beneficiary,
+            "request_ref": o.request_ref, "state": o.state}
 
 
 def obligation_from(d: J) -> Obligation:
-    return Obligation(d["kind"], d["counterpart"], fact_from(d.get("topic")), int(d["since"]), _social(d.get("social")))
+    return Obligation(d["kind"], d["counterpart"], fact_from(d.get("topic")), int(d["since"]), _social(d.get("social")),
+                      d.get("item"), d.get("beneficiary"), d.get("request_ref"), d.get("state", "pending"))
 
 
 def said_to(s: Said) -> J:

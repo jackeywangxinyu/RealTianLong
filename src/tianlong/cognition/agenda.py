@@ -12,13 +12,14 @@
        言语行为与动手、救治、赠物确定性地增减——态度只存在于这个角色自己的心里；company 记着眼前每个人“自何时起一直在我身边”
        （只来自环顾），先礼后兵与守卫“一次闯入只动一次手”都以它为准。
        与信念一样只来自感知，不读真相；容量有界且溢出时丢最旧的一条（写明，不静默增长）
+       物品请求义务区分待决定、已答应、暂缓和拒绝；回应绑定请求，实际 GIVE 才结束；暂缓只因相关已知状态变化唤醒。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from tianlong.core import Fact, Kind, Modality, Op, Outcome, Percept, Rel, Social
 
@@ -35,7 +36,7 @@ SOCIAL_ATTITUDE: Mapping[Social, int] = {
 }
 ATTACKED_ME, ATTACKED_ALLY, HELPED_ME = -2, -1, 2
 _SPEECH = frozenset({Op.TELL.value, Op.ASK.value})
-_SOCIAL_KINDS = frozenset({Op.TELL.value, Op.ASK.value, Op.WAIT.value})   # 言语与姿态
+_SOCIAL_KINDS = frozenset({Op.TELL.value, Op.ASK.value, Op.WAIT.value, Op.REQUEST_ITEM.value})
 _CLOSES_QUESTION = frozenset({Social.EXPLAIN, Social.REFUSE})              # “不知道”“不肯说”也是给了回音
 
 
@@ -46,6 +47,10 @@ class Obligation:
     topic: Fact | None              # answer：问的命题（宾语为 None 的提问）；reply：None
     since: int
     social: Social | None = None    # reply：对方那句话的言语行为（回话按它、按性情与态度选）
+    item: str | None = None
+    beneficiary: str | None = None
+    request_ref: str | None = None
+    state: str = "pending"          # 物品请求：pending → accepted/deferred/refused；实际 GIVE 才结束
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,51 @@ def _answers(told: Fact, asked: Fact) -> bool:
     return told.prop.subject == asked.prop.subject and told.prop.predicate == asked.prop.predicate
 
 
+def _item_requests(owner: str, obligations: tuple[Obligation, ...], p: Percept,
+                   changed: Collection[tuple[str, str]]) -> tuple[Obligation, ...]:
+    """听见、答应和交付分别折叠；同意的闲话须明确回应请求编号，不能当成物品已到手。"""
+    awakened = []
+    for o in obligations:
+        related = {owner, o.counterpart, o.item, o.beneficiary}
+        relevant = any(s in related and pred in (Rel.AT.value, "attr.subdued", "attr.poisoned", "attr.wounded")
+                       for s, pred in changed)
+        if o.kind == "request_item" and o.state == "deferred" and relevant:
+            o = replace(o, state="pending")
+        awakened.append(o)
+    obligations = tuple(awakened)
+    ev = p.event
+    if ev is None or ev.outcome != Outcome.SUCCESS:
+        return obligations
+    if ev.kind == Op.REQUEST_ITEM.value and ev.actor and ev.target and ev.obj and ev.beneficiary and ev.request_ref:
+        kind, counterpart = ("request_item", ev.actor) if p.modality == Modality.SPEECH and ev.target == owner \
+                            else ("requested_item", ev.target) if p.modality == Modality.SELF and ev.actor == owner \
+                            else (None, None)
+        if kind:
+            rest = tuple(o for o in obligations if not (o.kind == kind and o.counterpart == counterpart
+                         and o.item == ev.obj and o.beneficiary == ev.beneficiary))
+            return (*rest, Obligation(kind, counterpart, None, p.tick, ev.social, ev.obj,
+                                      ev.beneficiary, ev.request_ref))[-MAX_OBLIGATIONS:]
+    if ev.kind == Op.TELL.value and ev.request_ref:
+        states = {Social.AGREE: "accepted", Social.REFUSE: "refused", Social.EXPLAIN: "deferred"}
+        state = states.get(ev.social)
+        result = []
+        for o in obligations:
+            mine = p.modality == Modality.SELF and o.kind == "request_item" and o.counterpart == ev.target
+            heard = p.modality == Modality.SPEECH and ev.target == owner and o.kind == "requested_item" and o.counterpart == ev.actor
+            if state and (mine or heard) and o.request_ref == ev.request_ref:
+                if not (mine and state == "refused"):
+                    result.append(replace(o, state=state))
+            else:
+                result.append(o)
+        return tuple(result)
+    if ev.kind == Op.GIVE.value and ev.obj:
+        return tuple(o for o in obligations if not (
+            o.item == ev.obj and ((p.modality == Modality.SELF and o.kind == "request_item" and o.counterpart == ev.target)
+            or (p.modality == Modality.SIGHT and o.kind == "requested_item" and o.counterpart == ev.actor and ev.target == owner))
+            and (ev.request_ref == o.request_ref or ev.request_ref is None)))
+    return obligations
+
+
 # ============================================================
 #  承诺状态：待答、待回话、说过
 # ============================================================
@@ -82,6 +132,7 @@ def fold_agenda(owner: str, obligations: tuple[Obligation, ...], said: tuple[Sai
     """changed：本次修正里自己的认知真正变了值的槽位 (主语, 谓词)——关于它们的“说过”作废。"""
     if changed:
         said = tuple(s for s in said if s.fact is None or s.fact.prop.slot not in changed)
+    obligations = _item_requests(owner, obligations, p, changed)
     obligations = tuple(o for o in obligations if o.kind != "reply" or p.tick - o.since <= REPLY_TTL)
     ev = p.event
     if ev is None:

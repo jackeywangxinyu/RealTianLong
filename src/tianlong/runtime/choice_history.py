@@ -3,6 +3,7 @@
 [OUTPUT]: ChoiceHistory：有界的动作结果/相关条件记录与亲眼所见放置线索；随世界同一事务落库
 [POS]: 决策派生状态。失败不会随 12 条经历滚掉；条件摘要只含该动作相关的玩家知识，不含世界版本、NPC 私密目标或后台时间。
        progress 可继续；无收益/已学成/不可达只在相同条件下阻挡；探索因看见的新放置或昼夜变化恢复。
+       NPC 明确拒绝或暂缓作为玩家听见的反馈保留，相关条件未变不重新推荐同一请求。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -21,6 +22,7 @@ CAPACITY = 256
 _BLOCKING = frozenset({"nothing_to_learn", "already_learned", "mastered", "no_effect", "not_holding",
                        "out_of_reach", "not_found", "door_locked", "wrong_key", "held_by_other", "already_there",
                        "already_held", "route_not_here", "route_mismatch", "not_adjacent", "one_way", "subdued"})
+_REQUEST_BLOCKING = frozenset({"request_refused", "request_deferred"})
 
 
 def action_key(c: Candidate) -> str:
@@ -84,6 +86,11 @@ def conditions(me: BeliefStore, c: Candidate, clues: Mapping[str, int] = (), rea
             attr(obj, "cures")
             attr(target, "poisoned")
             attr(target, "wounded")
+        elif c.op == Op.REQUEST_ITEM:
+            location(c.beneficiary)
+            attr(c.beneficiary, "poisoned")
+            attr(c.beneficiary, "wounded")
+            extra.append(("attitude", target, me.attitude(target)))
         if c.topic:
             slot(c.topic.prop.subject, c.topic.prop.predicate)
     values = [(b.prop.sort_key(), b.holds) for b in me.sorted_beliefs() if b.prop.slot in slots]
@@ -129,7 +136,7 @@ class ChoiceHistory:
             return False
         if c.op == Op.INSPECT and prev.outcome == Outcome.SUCCESS:
             return True
-        return prev.reason in _BLOCKING
+        return prev.reason in _BLOCKING or prev.reason in _REQUEST_BLOCKING
 
     def note(self, before: BeliefStore, percepts: Sequence[Percept], c: Candidate) -> ChoiceHistory:
         after = before.revise_all(percepts)[0]
@@ -140,6 +147,18 @@ class ChoiceHistory:
                     and ev.outcome == Outcome.SUCCESS and after.knows(ev.target)):
                 clues[ev.target] = p.tick
         attempts = dict(self.attempts)
+        # NPC 的拒绝/暂缓是实际听见的反馈，“请求说出口了”不表示已获得物品。
+        for o in after.obligations:
+            if o.kind == "requested_item" and o.state in ("refused", "deferred"):
+                for key, a in list(attempts.items()):
+                    cand = a.candidate
+                    if (cand.op == Op.REQUEST_ITEM and (cand.target, cand.obj, cand.beneficiary) ==
+                            (o.counterpart, o.item, o.beneficiary)):
+                        reason = "request_refused" if o.state == "refused" else "request_deferred"
+                        if any(p.modality == Modality.SPEECH and p.event and p.event.request_ref == o.request_ref
+                               for p in percepts):
+                            attempts[key] = Attempt(cand, conditions(after, cand, clues, reason),
+                                                    a.outcome, reason, after.last_tick)
         result = next((p for p in percepts if p.modality == Modality.SELF and p.event
                        and p.event.actor == before.owner and p.event.kind == c.op.value), None)
         if result is not None and c.op != Op.WAIT:

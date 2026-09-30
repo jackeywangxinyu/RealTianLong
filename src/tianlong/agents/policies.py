@@ -13,6 +13,7 @@
        目标所需的东西或人下落不明时，凭自己的地图与勘察记录去找（而不是原地干等）；
        等待带结构化原因（没事可做/目标未到时辰/自以为已达成/不知道而卡住/没有可行候选/找不到动作）。
        它是阶段 A 的初始策略，也是阶段 C 模仿学习的示范者；RL 策略实现同一协议即可替换
+       请求物品按本人知识、能力和目标给予/拒绝/暂缓；先答应、下一 tick 才尝试 GIVE。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Callable
+from dataclasses import replace
 
 from tianlong.agents.policy_kit import Choice, Policy, Situation
 from tianlong.agents.tactics import DEFIANT_SOCIAL, HOT, MartialTactics, reply_act
@@ -56,7 +58,7 @@ __all__ = ["CHAT_COOLDOWN", "Choice", "Policy", "ScriptedPolicy", "Situation"]
 class ScriptedPolicy(MartialTactics):
     def choose(self, sit: Situation) -> Choice:
         steps: list[Callable[[Situation], Choice | None]] = [
-            self._cure_self, self._retaliate, self._heal_allies, self._reply, self._answer_questions,
+            self._cure_self, self._retaliate, self._heal_allies, self._request_item, self._reply, self._answer_questions,
         ]
         steps += [self._goal_step(g) for g in sit.profile.goals if g.active(sit.now)]
         steps += [self._witness, self._chatter, self._investigate_noise]
@@ -65,6 +67,41 @@ class ScriptedPolicy(MartialTactics):
             if choice is not None:
                 return choice
         return self._wait(sit)
+
+    def _request_item(self, sit: Situation) -> Choice | None:
+        """只凭本人知识、能力与动机决定；先明确答应，下一 tick 才尝试 GIVE。"""
+        b = sit.beliefs
+        for ob in sorted(b.obligations, key=lambda o: (o.since, o.request_ref or "")):
+            if ob.kind != "request_item" or ob.state == "deferred" or ob.counterpart not in self._persons_here(b):
+                continue
+            def reply(social, why, ob=ob):
+                choice = self._say(sit, ob.counterpart, social, why)
+                return replace(choice, free=replace(choice.free, request_ref=ob.request_ref))
+
+            hostile = b.attitude(ob.counterpart) < 0 or b.attitude(ob.beneficiary) < 0 or any(
+                g.kind == GoalKind.HOSTILE and g.person in (ob.counterpart, ob.beneficiary)
+                for g in sit.profile.goals if g.active(sit.now))
+            protected = any(g.item == ob.item and g.kind in (GoalKind.PROTECT, GoalKind.ACQUIRE)
+                            or (g.item == ob.item and g.kind == GoalKind.DELIVER and g.recipient != ob.counterpart)
+                            for g in sit.profile.goals if g.active(sit.now))
+            if hostile or protected:
+                return reply(Social.REFUSE, "这项物品请求与我的态度或目标冲突，明确拒绝")
+            can_give = b.location_of(ob.item) == b.owner and not self._status(b, b.owner, "subdued")
+            useful = any(self._status(b, ob.beneficiary, status) and
+                         (dict(b.sketch(ob.item).attrs).get("cures") == status)
+                         for status in ("poisoned", "wounded")) if b.sketch(ob.item) else False
+            willing = (ob.beneficiary in b.allies or ob.counterpart in b.allies or useful
+                       or b.attitude(ob.counterpart) > 0 or b.trust.get(ob.counterpart, 0.6) >= 0.6)
+            if not willing:
+                return reply(Social.REFUSE, "不信任这项物品请求，明确拒绝")
+            if not can_give:
+                return reply(Social.EXPLAIN, "当前没有持有所求物品或无法递交，说明暂缓")
+            if ob.state == "pending":
+                return reply(Social.AGREE, "同意物品请求；答应尚未交付")
+            give = self._pick(sit, "执行已答应的物品请求，尝试实际递交", Op.GIVE, ob.counterpart, ob.item)
+            if give is not None:
+                return replace(give, request_ref=ob.request_ref)
+        return None
 
     def _wait(self, sit: Situation) -> Choice:
         """等待，并说明为什么：模仿学习要区分“合理地等”与“因为不知道而卡住”。"""

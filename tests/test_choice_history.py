@@ -144,3 +144,58 @@ def test_attempt_and_first_tick_are_atomic(tmp_path, when):
     # 未确认提交，不在内存中提前记进度。
     assert s.choice_history.latest(Candidate(Op.STUDY, "book")) is None
     s.index.client.close()
+
+
+def test_failed_not_holding_offers_real_take_then_restores_study():
+    from tianlong.kernel.perception import make_percept
+    sc = choice_scene(book_at="table")
+    # 过时的认知以为秘籍仍在自己手里，实际已在石桌上。
+    priors = dict(sc.priors)
+    priors["player"] += (make_percept(sc.state, Modality.SELF,
+                                     facts=(Fact(Proposition.rel("book", Rel.AT, "player")),)),)
+    sc = replace(sc, priors=priors)
+    s = _session(sc)
+    def choose(op, request):
+        d = s.choices.current()
+        c = next(c for c in d["choices"] if s.choices.resolve(d["decision_id"], c["id"]).parsed.candidate.op == op)
+        return s.choose(d["decision_id"], c["id"], request)
+    first = choose(Op.STUDY, "not-held")
+    assert any(e.actor == "player" and e.reason == "not_holding" for e in first.events)
+    assert Candidate(Op.STUDY, "book") not in _acts(s)
+    assert Candidate(Op.TAKE, "book") in _acts(s)
+    choose(Op.TAKE, "prepare")
+    assert s.authority.head().target("book", Rel.AT) == "player"
+    assert Candidate(Op.STUDY, "book") in _acts(s)
+    assert any(e.actor == "player" and e.reason == "progress" for e in choose(Op.STUDY, "retry").events)
+    s.index.client.close()
+
+
+def test_failed_locked_route_offers_key_unlock_then_restores_exact_route():
+    from tianlong.core import Entity, Kind, Relation, WorldState
+    from tianlong.kernel.perception import make_percept, scene_percept
+    sc = choice_scene()
+    ents = [Entity.make(e.id, e.kind, e.name, **{**dict(e.attrs), **({"locked": True} if e.id == "d1" else {})})
+            for e in sc.state.entities.values()]
+    ents.append(Entity.make("key", Kind.ITEM, "钥匙", small=True))
+    state = WorldState.build(sc.state.seed, sc.state.clock, ents,
+                            (*sc.state.relations, Relation("key", Rel.AT, "table"), Relation("key", Rel.MATCHES, "d1")))
+    priors = {a: (scene_percept(state, a),) for a in sc.profiles}
+    priors["player"] += (make_percept(state, Modality.SELF,
+                                      facts=(Fact(Proposition.rel("key", Rel.MATCHES, "d1")),)),)
+    s = _session(replace(sc, state=state, priors=priors))
+    def choose(op, target, request):
+        d = s.choices.current()
+        c = next(c for c in d["choices"] if
+                 (s.choices.resolve(d["decision_id"], c["id"]).parsed.candidate.op,
+                  s.choices.resolve(d["decision_id"], c["id"]).parsed.candidate.target) == (op, target))
+        return s.choose(d["decision_id"], c["id"], request)
+    first = choose(Op.MOVE, "yard", "locked")
+    assert any(e.actor == "player" and e.reason == "door_locked" for e in first.events)
+    assert Candidate(Op.MOVE, "yard", "d1") not in _acts(s)
+    choose(Op.TAKE, "key", "key")
+    choose(Op.UNLOCK, "d1", "unlock")
+    assert not s.authority.head().attr("d1", "locked")
+    assert Candidate(Op.MOVE, "yard", "d1") in _acts(s)
+    choose(Op.MOVE, "yard", "leave")
+    assert s.authority.head().target("player", Rel.AT) == "yard"
+    s.index.client.close()

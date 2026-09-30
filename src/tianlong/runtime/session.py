@@ -25,6 +25,7 @@
        对方尚未走完时只给出目前为止的文字、不落库。建档后尚无提交就读档，开场已描写的实体按开场规则补回。
        NPC 决策图里从不调模型（台词由主持人之声一并写出），向量回忆只为声明 reads_memories 的策略而跑。
        CLI、测试、未来的 Web 前端都只和它打交道
+       物品请求共用原执行链路与反应 tick；尝试记录和请求进度随世界同事务提交。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -113,7 +114,7 @@ RECENT_KEEP = 3      # 最近几段正文：随会话运行态落库，交给叙
 ENDED = "第一幕已终。可以输入 /recap 回顾，或重新开始一局。"
 PARDON = "没太听明白，能换个说法吗？"   # 模型写的追问点了玩家不该知道的名字时，换成这句
 ASIDE_KEEP = 64      # 带 request_id 的不推进回合在本进程里记住最近这么多个（重试原样返回；它们不是世界事实，不落库）
-_ENGAGE = frozenset({Op.ATTACK, Op.GIVE, Op.USE, Op.TELL, Op.ASK})
+_ENGAGE = frozenset({Op.ATTACK, Op.GIVE, Op.USE, Op.TELL, Op.ASK, Op.REQUEST_ITEM})
 
 
 def _last(env: TurnEnvelope) -> int:
@@ -378,7 +379,7 @@ class GameSession:
                 or self.ending is not None):
             return self._aside(parsed, text, head, me, clock, sink, request_id)   # 后台的决策随之作废：它不写任何东西
         steps, planned, reaction = self._plan(parsed, me, head.clock)
-        slot = next((i for i, c in enumerate(steps) if c.op in (Op.TELL, Op.ASK, Op.WAIT)), 0)   # 原话归属的那一步
+        slot = next((i for i, c in enumerate(steps) if c.op in (Op.TELL, Op.ASK, Op.REQUEST_ITEM, Op.WAIT)), 0)   # 原话归属的那一步
         plan = [c.to_intent(self._intent_id(self.player, head.version), self.player, head.version,
                             parsed.utterance if i == slot else None) for i, c in enumerate(steps)]
         env = TurnEnvelope(request_id or "", payload, plan[0], planned, head.version, head.clock,
@@ -462,7 +463,7 @@ class GameSession:
         """已落库的请求还原成解析结果（续跑与重放的报告用）：类别由计划推出。"""
         it = env.intent
         kind = (MoveKind.GESTURE if it.op == Op.WAIT and it.utterance and env.reaction
-                else MoveKind.SAY if it.op in (Op.TELL, Op.ASK) and not env.followups else MoveKind.ACT)
+                else MoveKind.SAY if it.op in (Op.TELL, Op.ASK, Op.REQUEST_ITEM) and not env.followups else MoveKind.ACT)
         return Parsed(Candidate.of(it), it.utterance, source=env.source, repeat=env.planned_ticks, kind=kind,
                       followups=tuple(Candidate.of(f) for f in env.followups))
 

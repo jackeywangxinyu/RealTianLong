@@ -11,6 +11,7 @@
        HTTP 使用标准库；WebSessions 按随机 HttpOnly Cookie 隔离玩家，并用 SQLite 保存世界与网页记录。
        回合携带 request_id；按钮只上传 decision_id/choice_id，由服务器保存的 Parsed 执行；断线只停止传送、不打断结算。
        冻结菜单随存档恢复，旧请求先重放、旧菜单拒绝；SSE 与 JSON 两种传输供不同代理使用。
+       --allow-migration 显式接续旧规则存档，不补写过去未观察的事实。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -453,6 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     ap.add_argument("--data-dir", default=os.environ.get("TIANLONG_DATA_DIR", ".cache/web-saves"))
     ap.add_argument("--transport", choices=["sse", "json"], default="sse", help="不支持 SSE 的代理可用 json")
+    ap.add_argument("--allow-migration", action="store_true", help="显式以当前规则接续旧存档；不补写过去未知的信息")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING)
     voice = llm_from_env() if args.llm == "auto" else None
@@ -461,7 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     def factory(store: WorldStore, branch: str) -> GameSession:
         scenario = SCENARIOS[args.world](args.seed)
         return GameSession(scenario, store=store, branch_id=branch, llm=voice, fast_llm=fast,
-                           interpreter=interpreter_for(fast or voice, scenario))
+                           interpreter=interpreter_for(fast or voice, scenario), allow_migration=args.allow_migration)
 
     title = {"wuliang": "天龙八部 · 无量山", "warehouse": "仓库钥匙"}.get(args.world, args.world)
     server = make_server(WebSessions(factory, args.data_dir, title), args.host, args.port, args.transport)
