@@ -1,7 +1,8 @@
 """
 [INPUT]: 依赖 tianlong.language 的 command / parser，tianlong.cognition 的 BeliefStore，tianlong.scenarios 的 build_wuliang
 [OUTPUT]: 输入语态验收（I01–I05）：否定不执行、条件不立即执行、转述不当成玩家行动、复合与疑问不走快路径、肯定指令仍走快路径、
-          LLM 声称“照做”也压不过规则看见的否定、LLM 失败绝不回退到未确认的候选、非即时语态不推进世界版本与时钟
+          LLM 声称“照做”也压不过规则看见的否定、LLM 失败绝不回退到未确认的候选、LLM 回复不成形不崩也不推进、
+          非即时语态不推进世界版本与时钟
 [POS]: tests 的输入语义层；把“同一句话的了解、描述、计划、实际执行必须分开”写成可证伪断言
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -95,6 +96,17 @@ def test_llm_failure_never_falls_back_to_unconfirmed_candidate(duanyu):
     for text in ("如果龚光杰攻击我，我才还手", "龚光杰刚刚攻击了我", "我不攻击龚光杰"):
         p = IntentParser(FakeLLM(fail=True), prefer_llm=True, aliases=aliases).parse(text, store)
         assert p.candidate is None, text
+
+
+@pytest.mark.parametrize("reply", [
+    [1, 2],                                                                        # 不是对象
+    {"mode": "immediate", "actor": "player", "op": "fly", "manner": "normal"},     # 不存在的操作
+    {**_attack(), "target": ["gongguangjie"], "manner": "sideways", "clarification": ["?"]},   # 字段类型与取值都不对
+])
+def test_malformed_llm_reply_never_crashes_the_parser(duanyu, reply):
+    store, aliases = duanyu
+    p = IntentParser(FakeLLM(reply), aliases=aliases).parse("嗯，钟灵这姑娘挺有意思", store)
+    assert p.candidate is None and isinstance(p.clarification, str), "回复不成形：不崩、不推进，只给追问"
 
 
 def test_non_immediate_input_does_not_advance_world():

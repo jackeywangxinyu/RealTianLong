@@ -59,8 +59,8 @@ def load_dotenv(path: Path = Path(".env")) -> None:
 
 
 def interpreter_for(llm: LLMClient | None, scenario: Scenario) -> Interpreter:
-    """主持层解释器（快模型；没有模型时它自己退回规则解析）。"""
-    return Interpreter(llm, aliases=scenario.aliases)
+    """主持层解释器（快模型；没有模型时它自己退回规则解析）；场景的名字全集只用于拒绝回显玩家不认识的名字。"""
+    return Interpreter(llm, aliases=scenario.aliases, universe=(e.name for e in scenario.state.entities.values()))
 
 
 def main(argv: list[str] | None = None) -> int:
