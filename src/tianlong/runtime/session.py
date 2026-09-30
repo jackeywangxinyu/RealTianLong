@@ -83,6 +83,7 @@ from tianlong.persistence import (
 from tianlong.persistence.store import ChoiceUse
 from tianlong.runtime import gm
 from tianlong.runtime.authority import Settlement, WorldAuthority
+from tianlong.runtime.choice_history import ChoiceHistory
 from tianlong.runtime.choice_service import ChoiceService
 from tianlong.runtime.versions import check_save, current_versions
 from tianlong.scenarios import Ending, Scenario
@@ -275,12 +276,12 @@ class GameSession:
         return clock_label(self.authority.head().clock)
 
     def session_state(self) -> dict:
-        """会话运行态：随每次世界提交一起落库的那一份（调度标记 + 已描写实体 + 最近几段正文 + 提示进度）。"""
+        """会话运行态含选项尝试记录，与世界同事务提交；提交失败不会提前记一次成功或失败。"""
         return self._state(self.scheduler, self._described)
 
-    def _state(self, sched: Scheduler, described: set[str]) -> dict:
+    def _state(self, sched: Scheduler, described: set[str], history: ChoiceHistory | None = None) -> dict:
         return {"scheduler": sched.to_state(), "described": sorted(described), "recent": list(self._recent),
-                "hint": self._hint}
+                "hint": self._hint, "choice_history": (history or self.choice_history).to_data()}
 
     def _restore(self, state: Mapping | None) -> None:
         """会话运行态以落库的那一份为准：读档时，以及一次请求被同一请求的另一次投递越过之后。"""
@@ -289,6 +290,7 @@ class GameSession:
         self._described = set(state.get("described", ()))
         self._recent = [str(x) for x in state.get("recent", ())][-RECENT_KEEP:]
         self._hint = int(state.get("hint", 0))
+        self.choice_history = ChoiceHistory.from_data(state.get("choice_history"))
 
     def _opening_keys(self) -> list[str]:
         """开场讲的初始认知里应当描写外观的实体：新游戏的 intro() 描写它们，建档后尚无提交就读档时据此补回“已描写”。"""
@@ -555,6 +557,7 @@ class GameSession:
 
         def annotate(s: Settlement) -> tuple[TurnEnvelope | None, dict]:
             mine = tuple(o.percept for o in s.observations_of(self.player))
+            history = self.choice_history.note(self.beliefs(self.player), mine, Candidate.of(player_intent))
             fresh = tuple(k for k in lore_keys(self.player, mine, self.narrator.lore) if k not in self._described)
             n = len(env.versions) + 1
             plan = env
@@ -567,8 +570,8 @@ class GameSession:
             progressed = replace(plan, versions=(*env.versions, s.state.version), ticks=(*env.ticks, s.state.clock),
                                  percepts=_compact(env.percepts + mine), fresh=env.fresh + fresh, done=done)
             described = self._described | set(fresh)
-            after.update(env=progressed, described=described)
-            return (progressed if persist else None), self._state(sched, described)
+            after.update(env=progressed, described=described, history=history)
+            return (progressed if persist else None), self._state(sched, described, history)
 
         settlement = self.authority.settle(intents, annotate)
         if "env" not in after:
@@ -576,6 +579,7 @@ class GameSession:
                 raise VersionConflict(f"版本 {head.version} 的意图早已由别的写入者结算")
             raise RuntimeError(f"版本 {head.version} 的意图早已结算过：会话与存储不一致")
         self.scheduler, self._described = sched, after["described"]
+        self.choice_history = after["history"]
         clock.lap("settle")
         self.indexer.drain()
         clock.lap("index")

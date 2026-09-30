@@ -1,5 +1,5 @@
 """
-[INPUT]: 仅玩家 BeliefStore、玩家自己的目标、现有候选与语法契约；不读取 WorldState/NPC 私密目标
+[INPUT]: 仅玩家 BeliefStore、玩家自己的目标、持久尝试记录、现有候选与语法契约；不读取 WorldState/NPC 私密目标
 [OUTPUT]: build_choices()，以当前问题为先、枚举至多 24 个候选中的三项组合
 [POS]: 玩家决策层。覆盖威胁、待回答、伤毒、进展和探索；保留路线与方式；多样性来自打算而非动作分类。
        同分按语义 ID 排序，不按展示文字排序；只描述尝试，不承诺内核尚未裁定的结果。
@@ -20,6 +20,7 @@ from tianlong.core import FRIENDLY_SOCIAL, HOSTILE_SOCIAL, Fact, Kind, Manner, O
 from tianlong.core.grammar import signature_error
 from tianlong.core.profiles import Goal, GoalKind
 from tianlong.language.parser import MoveKind, Parsed
+from tianlong.runtime.choice_history import ChoiceHistory
 from tianlong.runtime.choice_model import ChoiceSpec
 
 log = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ def known_attr(me: BeliefStore, eid: str | None, key: str):
     belief = me.best(eid, "attr." + key)
     if belief is not None:
         if belief.holds:
-            return belief.prop.value
+            return None if belief.prop.value == "none" else belief.prop.value
         if isinstance(belief.prop.value, bool):
             return not belief.prop.value
     negatives = [b for b in me.sorted_beliefs() if b.prop.subject == eid and b.prop.predicate == "attr." + key
@@ -77,9 +78,11 @@ def _threats(me: BeliefStore, people: set[str], friends: set[str]) -> set[str]:
     return out
 
 
-def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()) -> tuple[ChoiceSpec, ...]:
+def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = (),
+                  history: ChoiceHistory | None = None) -> tuple[ChoiceSpec, ...]:
     if limit <= 0:
         return ()
+    history = history or ChoiceHistory()
     player, here = me.owner, believed_place(me, me.owner)
     people = {eid for eid, sk in me.entities.items() if sk.kind == Kind.PERSON and eid != player
               and here is not None and believed_place(me, eid) == here}
@@ -93,6 +96,11 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
     relevant = {ref for g in goals if g.active(me.last_tick) for ref in (g.item, g.person, g.recipient) if me.knows(ref)}
     goal_routes = {hop for g in goals if g.active(me.last_tick) and g.home and me.knows(g.home)
                    for hop in [route_to(me, g.home)] if hop}
+    blocked_routes = {a.candidate.obj for a in history.attempts.values()
+                      if a.candidate.op == Op.MOVE and a.reason == "door_locked"
+                      and known_attr(me, a.candidate.obj, "locked") is True}
+    needed_items = {a.candidate.target if a.candidate.op == Op.STUDY else a.candidate.obj
+                    for a in history.attempts.values() if a.reason == "not_holding"}
     pool: dict[str, _Proposal] = {}
 
     def name(eid: str | None) -> str:
@@ -107,6 +115,8 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
                            c.target, c.obj, c.topic) is not None:
             return
         if known_attr(me, player, "subdued") is True and c.op not in (Op.WAIT, Op.TELL, Op.ASK):
+            return
+        if history.blocked(me, c):
             return
         kind = MoveKind.SAY if c.op in (Op.TELL, Op.ASK) else MoveKind.ACT
         spec = ChoiceSpec.of(label, Parsed(c, utterance, kind=kind, repeat=repeat), c.target, evidence)
@@ -163,6 +173,8 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
         if c.op == Op.WAIT:
             add(c, "暂且等候，留意眼前的动静", 4, ("wait",), repeat=5)
         elif c.op == Op.MOVE:
+            if known_attr(me, obj, "locked") is True:
+                continue  # 当前可行的取钥匙、开锁与其他路线仍会从候选池进入。
             issue = f"threat:{sorted(threats)[0]}" if threats else None
             prefix = "悄悄" if c.manner == Manner.CAREFUL else ""
             verb = "退往" if threats else "走向"
@@ -179,12 +191,18 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
                          else f"给{whom}使用{name(obj)}，尝试解毒")
                 add(c, label, 110, ("treat", target, obj), f"care:{target}")
         elif c.op == Op.STUDY:
+            taught = me.best(target, "attr.teaches")
+            if taught is not None and taught.prop.value == "none":
+                continue
             teaches = known_attr(me, target, "teaches")
+            if not teaches and not any(w in name(target) for w in ("经", "秘籍", "书", "卷", "谱", "诀", "图")):
+                continue
             if teaches and known_attr(me, player, teaches) is True:
                 continue
-            previous = next((ep.event for ep in reversed(me.episodes)
+            previous = history.latest(c) or next((ep.event for ep in reversed(me.episodes)
                              if ep.event.actor == player and ep.event.kind == Op.STUDY.value and ep.event.target == target), None)
-            if previous and previous.reason in ("nothing_to_learn", "already_learned", "mastered"):
+            if previous and previous.reason in ("nothing_to_learn", "already_learned", "mastered") \
+                    and (history.latest(c) is None or history.unchanged(me, c)):
                 continue
             progress = previous is not None and previous.reason == "progress"
             score = 65 if progress else (42 if teaches else 20)
@@ -195,13 +213,21 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
             if sk.kind == Kind.PERSON:
                 if known_attr(me, target, "subdued") is True:
                     add(c, f"搜{name(target)}的身，查找随身之物", 12 + bonus, ("search-person", target))
-            elif target not in me.searched:
+            elif (target not in me.searched or (history.latest(c) and not history.unchanged(me, c))
+                  or history.surface_changes.get(target, -1) > me.searched.get(target, me.last_tick)):
+                renewed = target in me.searched
                 add(c, "仔细查看周围，寻找新的线索" if target == here else f"仔细查探{name(target)}",
-                    (52 if target == here and here not in me.surveyed else 38) + bonus, ("inspect", target))
+                    (74 if renewed else (52 if target == here and here not in me.surveyed else 38)) + bonus,
+                    ("inspect", target), f"new-clue:{target}" if renewed else None)
         elif c.op == Op.TAKE:
             score = 40 + bonus + (15 if any(known_attr(me, target, "cures") in statuses for statuses in health.values()) else 0)
+            prep = target in needed_items or any(b.prop.value in blocked_routes
+                                                for b in me.positives(target, Rel.MATCHES.value))
+            if prep:
+                score += 40
             verb = "悄悄取走" if c.manner == Manner.CAREFUL else "拿起"
-            add(c, f"{verb}{name(target)}", score - (1 if c.manner == Manner.CAREFUL else 0), ("acquire", target))
+            add(c, f"{verb}{name(target)}", score - (1 if c.manner == Manner.CAREFUL else 0), ("acquire", target),
+                f"prepare:{target}" if prep else None)
         elif c.op == Op.ASK and c.topic:
             subject = c.topic.prop.subject
             if believed_place(me, subject) is None:
@@ -215,7 +241,10 @@ def build_choices(me: BeliefStore, limit: int = 3, *, goals: Sequence[Goal] = ()
         elif c.op == Op.GIVE and any(g.kind == GoalKind.DELIVER and g.item == obj and g.recipient == target for g in goals):
             add(c, f"把{name(obj)}交给{name(target)}", 68, ("transfer", target, obj), f"deliver:{obj}")
         elif c.op == Op.UNLOCK and known_attr(me, target, "locked") is True:
-            add(c, f"尝试用{name(obj)}打开{name(target)}的锁", 60, ("unlock", target, obj), f"route:{target}")
+            matched = any(b.prop.value == target for b in me.positives(obj, Rel.MATCHES.value))
+            if matched or "钥匙" in name(obj):
+                add(c, f"尝试用{name(obj)}打开{name(target)}的锁", 90 if target in blocked_routes else 60,
+                    ("unlock", target, obj), f"route:{target}")
         elif c.op == Op.LOCK and threats and known_attr(me, target, "locked") is False:
             add(c, f"尝试用{name(obj)}锁上{name(target)}", 84, ("secure-route", target), f"threat:{sorted(threats)[0]}")
         elif c.op == Op.PUT and c.manner == Manner.CAREFUL and obj in relevant:

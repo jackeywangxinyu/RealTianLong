@@ -31,7 +31,8 @@ class ChoiceService:
         version = s.authority.head().version
         snapshot = s.store.decision(s.ref)
         if snapshot is None or snapshot.get("version") != version:
-            choices = build_choices(s.beliefs(s.player), goals=s.scenario.profiles[s.player].goals)
+            choices = build_choices(s.beliefs(s.player), goals=s.scenario.profiles[s.player].goals,
+                                    history=s.choice_history)
             snapshot = s.store.publish_decision(s.ref, {
                 "schema": CHOICE_SCHEMA, "id": make_id("decision", str(s.ref), version), "version": version,
                 "choices": [c.to_data() for c in choices], "consumed_request": None,
