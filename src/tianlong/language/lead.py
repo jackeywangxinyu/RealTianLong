@@ -1,10 +1,13 @@
 """
 [INPUT]: 依赖 core 的 Percept / Modality / Op / Outcome / Kind / derive_seed，language/templates 的 Names / REASONS / SOCIAL_VERBS / consequences
-[OUTPUT]: 对外提供 lead_line(percepts, names, viewer) -> str：本回合“你这一步的结果”写成的一两句人话（没有可说的返回空串）
+[OUTPUT]: 对外提供 lead_line(percepts, names, viewer) -> str：本回合“你这一步的结果”写成的一两句人话（没有可说的返回空串）、
+          restates(sentence, percepts, names, viewer) -> bool：模型的一句是不是在换个说法复述先声（同一动作的动词 + 同一对象，
+          或玩家原话/姿态原样再现）
 [POS]: language 的先声：主持人之声的第一句不等模型。结算一完成，就把玩家自己这一步做成没有（去了哪、拿到没有、
        一掌打中没有、说了什么）用确定的句子交给玩家——首字延迟只剩“解释 + 结算”，而第一眼看到的正是最要紧的信息；
        声音模型再从下一句接着写旁人的反应与氛围。只取玩家自己的行动感知（SELF），措辞按 (tick, 操作, 对象) 派生的种子
-       在几种说法里确定地轮换，失败必说原因、后果照实写出；等待不抢先（时辰与“时间悄悄过去”交给模型或模板）
+       在几种说法里确定地轮换，失败必说原因、后果照实写出；等待不抢先（时辰与“时间悄悄过去”交给模型或模板）。
+       模型被告知开头已写好，仍可能换个说法再讲一遍（“你屏住呼吸，从桌上拿起钥匙”）：restates() 供叙述者略过这样的句子
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -107,3 +110,37 @@ def lead_line(percepts: Sequence[Percept], names: Names, viewer: str) -> str:
         if len(out) >= MAX_SENTENCES:
             break
     return "".join(out)
+
+
+# ============================================================
+#  复述：模型换个说法把玩家这一步再讲一遍——同一动作的动词 + 同一对象，或原话/姿态原样再现
+# ============================================================
+
+_VERBS: dict[Op, tuple[str, ...]] = {
+    Op.MOVE: ("来到", "走到", "到了", "走进", "进了", "抵达", "踏进", "步入", "回到", "进入"),
+    Op.TAKE: ("拿起", "取过", "取下", "拿在", "抓起", "捡起", "拿过", "拾起", "握住", "接过", "拿到", "取了"),
+    Op.PUT: ("放在", "放下", "搁在", "放回"),
+    Op.GIVE: ("递给", "交给", "交到", "塞给", "递过"),
+    Op.UNLOCK: ("打开", "开了", "开锁", "锁开"),
+    Op.LOCK: ("锁上", "锁好"),
+    Op.ATTACK: ("出手", "拍去", "打去", "击向", "刺向", "攻向", "一掌", "一拳", "挥掌", "出掌", "扑向"),
+    Op.STUDY: ("研读", "翻看", "参详", "翻阅", "细读", "读了"),
+    Op.INSPECT: ("打量", "查看", "细看", "环顾", "看了一遍", "端详", "搜查", "搜了"),
+    Op.USE: ("服下", "用在", "敷在", "喂给"),
+}
+
+
+def restates(sentence: str, percepts: Sequence[Percept], names: Names, viewer: str) -> bool:
+    """这一句是不是在复述玩家自己本回合的行动：原话或姿态原样再现，或者同一动作的动词与同一对象（名字）同句出现。
+    查看当前地点而没点地名的（“你环顾四周，只见……”）不算——那一句多半在写所见，丢了可惜。"""
+    for p in percepts:
+        ev = p.event
+        if p.modality != Modality.SELF or ev is None or ev.actor != viewer or ev.kind == "noise":
+            continue
+        if ev.utterance and len(ev.utterance) >= 2 and ev.utterance in sentence:
+            return True
+        op = Op(ev.kind)
+        things = [n for n in (_name(names, ev.target, viewer), _name(names, ev.obj, viewer)) if n not in ("那里", "自己")]
+        if any(v in sentence for v in _VERBS.get(op, ())) and any(n in sentence for n in things):
+            return True
+    return False
