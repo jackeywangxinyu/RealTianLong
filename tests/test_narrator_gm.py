@@ -19,6 +19,7 @@ import time
 import pytest
 
 from tianlong.core import Fact, Intent, Manner, Op, Proposition, Rel, Social
+from tianlong.language.lead import lead_line
 from tianlong.language.llm import LLMUnavailable, ScriptedLLM
 from tianlong.language.narrator import MAX_CHARS, SOCIAL_PHRASES, Narrator, render_voice
 from tianlong.language.quotes import check_quotes
@@ -251,17 +252,32 @@ def test_npc_line_left_out_or_dropped_is_appended(view, stream):
     assert got == [G1, G2, G3] and r.status == RenderStatus.LLM, "讲到了就不补"
 
 
-def test_kernel_outcome_left_out_is_appended():
+def test_players_own_outcome_is_told_first_and_never_restated():
+    """先声：玩家自己这一步的结果不等模型、第一个交付；模型忘了讲也不必补，换个说法再讲一遍的那句悄悄略过，
+    复述里夹带了错的照样记账丢掉。"""
     view = _settle(("duanyu", Op.ATTACK, "gongguangjie", None, Manner.NORMAL))
-    failed = "你猛地向龚光杰出手，但没有成功（被对方挡了开去）"
-    assert failed in build_plan("duanyu", view[0], view[1], aliases=SC.aliases).lines
+    lead = lead_line(view[0], view[1], "duanyu")
+    assert lead.startswith("你") and "龚光杰" in lead and "挡了开去" in lead, "落空照实写出，而且写明原因"
     calm = "满堂目光都落在你身上，谁也没有作声。"
-    for stream in (calm, "你猛地向龚光杰出手，他侧身一让，你便被震得受了伤。" + calm):
+    for stream in (calm, "你一掌拍向龚光杰，却被他挡了开去。" + calm):
         r, got = _run(view, _script(stream), SceneBrief())
-        assert got == [calm, "\n" + failed + "。"], "玩家自己的出手落空没讲到：补上内核的那一行"
-        assert r.status == RenderStatus.GATED_FALLBACK and "omitted" in {v.kind for v in r.violations}
-    r, got = _run(view, _script("你一掌拍向龚光杰，却被他挡了开去。" + calm), SceneBrief())
-    assert r.status == RenderStatus.LLM and len(got) == 2
+        assert got == [lead, calm] and r.status == RenderStatus.LLM and r.dropped == 0
+    r, got = _run(view, _script("你猛地向龚光杰出手，他侧身一让，你便被震得受了伤。" + calm), SceneBrief())
+    assert got == [lead, calm] and r.dropped == 1, "伤落错了人：照样丢句记账"
+    prompt = _script(calm)
+    _run(view, prompt, SceneBrief())
+    sent = prompt.prompts[-1][1]
+    assert lead in sent and "不要复述" in sent, "模型知道开头已经写好"
+    assert "但没有成功（被对方挡了开去）" not in sent, "先声讲过的那一行不再列给模型"
+
+
+def test_lead_waits_for_nothing_and_template_mode_is_unchanged():
+    view = _settle(("duanyu", Op.ATTACK, "gongguangjie", None, Manner.NORMAL))
+    lead = lead_line(view[0], view[1], "duanyu")
+    r, got = _run(view, _script("满堂目光都落在你身上。", first_delay=0.3), SceneBrief())
+    assert got[0] == lead
+    r, got = _run(view, None, SceneBrief())
+    assert r.status == RenderStatus.TEMPLATE and lead not in r.text, "没有模型时的模板照旧"
 
 
 def test_fallback_template_lines_read_as_sentences(view):

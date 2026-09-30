@@ -1,6 +1,6 @@
 """
 [INPUT]: REQUEST_ITEM、实际内核、NPC 脚本决策、个人认知、SQLite 与特征编码
-[OUTPUT]: 请求/同意/真实交付/使用分离；拒绝、暂缓和恢复；回应绑定、耳语隔离、受益人批指针与裁剪、模型前向、yielded 接续、旧记录和版本拒绝验收
+[OUTPUT]: 请求/同意/真实交付/使用分离；请求成功/失败先声；拒绝、暂缓和恢复；回应绑定、耳语隔离、受益人批指针与裁剪、模型前向、yielded 接续、旧记录和版本拒绝验收
 [POS]: 请求型对话的完整闭环；不能用漂亮文字或 Social.AGREE 代替 GIVE/USE。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -161,6 +161,28 @@ def test_generic_agree_cannot_accept_an_unrelated_request():
                         PerceivedEvent("tell", "hall", "npc", "player", outcome=Outcome.SUCCESS, social=Social.AGREE))
     assert me.revise(unrelated)[0].obligations[0].state == "pending"
     assert codec.mind_from(codec.mind_to(me)) == me
+    s.index.client.close()
+
+
+def test_item_request_lead_works_with_a_narration_model_and_for_failed_requests():
+    from tianlong.language.lead import lead_line
+    voice = ScriptedLLM(lambda *_: "钟灵点了点头，表示愿意给出解药。")
+    sc = request_scene()
+    s = GameSession(sc, llm=voice, policies={"hidden": Idle()}, pipeline=False)
+    d, c = select(s, Op.REQUEST_ITEM)
+    delivered = []
+    report = s.choose(d, c, "lead-request", delivered.append)
+    assert delivered[0].startswith("你对钟灵道：")
+    assert "请把解药交给我" in delivered[0]
+    assert report.narration == "".join(delivered)
+    assert s.authority.head().target("pill", Rel.AT) == "npc"
+    assert s.authority.head().attr("player", "poisoned") is True
+    failed = Kernel().step(sc.state, [Intent("far", "player", Op.REQUEST_ITEM, "hidden", "pill",
+                                            based_on=sc.state.version, beneficiary="player")])
+    percepts = [o.percept for o in failed.observations if o.observer == "player"]
+    assert failed.events[0].outcome != Outcome.SUCCESS
+    line = lead_line(percepts, s.beliefs("player").entities, "player")
+    assert line.startswith("你想请求") and "解药" in line
     s.index.client.close()
 
 

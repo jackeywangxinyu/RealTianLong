@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖 tianlong.language.lead 的 lead_line，tianlong.runtime.session 的 GameSession，tianlong.scenarios 的 build_wuliang
-[OUTPUT]: 先声验收：玩家自己这一步写成确定的一两句人话——拿到了、到了哪、说了什么、失败说明原因、动手写出后果；
+[OUTPUT]: 先声验收：玩家自己这一步写成确定的一两句人话——拿到了、到了哪、说了什么、失败说明原因、动手写出后果；模型再慢，首字也不等它；
           只说玩家自己的行动，旁人的言行一概不抢（留给声音模型）；干等不抢先；同一回合同一句（确定性）
 [POS]: tests 的先声：证伪“第一句要等模型”“先声替 NPC 说话”“失败被写成成功”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -72,3 +72,16 @@ def test_same_percepts_same_lead(play):
     lead, percepts = turn("环顾四周")
     names = s.beliefs(s.player).entities
     assert lead and lead_line(percepts, names, s.player) == lead
+
+
+def test_first_text_does_not_wait_for_a_slow_model():
+    """接进主持人之声：模型慢吞吞（首字 1.5 秒），玩家照样在结算完就读到自己这一步的结果。"""
+    from tianlong.language.llm import ScriptedLLM
+
+    voice = ScriptedLLM(lambda p, s, sc: "兵器架旁的弟子们面面相觑。", first_delay=1.5)
+    s = GameSession(build_wuliang(7), llm=voice, fast_llm=ScriptedLLM(lambda p, s, sc: ""))
+    s.intro()
+    got: list[str] = []
+    r = s.turn("拿起兵器架上的长剑", on_text=got.append)
+    assert got and got[0].startswith("你") and "长剑" in got[0]
+    assert r.first_text_ms is not None and r.first_text_ms < 1000, r.first_text_ms

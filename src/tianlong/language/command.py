@@ -31,6 +31,7 @@ SOCIAL_WORDS: tuple[tuple[str, Social], ...] = (
     ("打招呼", _S.GREET), ("打个招呼", _S.GREET), ("招呼", _S.GREET), ("问好", _S.GREET), ("问候", _S.GREET),
     ("见礼", _S.GREET), ("行礼", _S.GREET), ("寒暄", _S.GREET), ("搭话", _S.GREET), ("搭讪", _S.GREET),
     ("攀谈", _S.GREET), ("说话", _S.GREET), ("聊聊", _S.GREET), ("聊天", _S.GREET), ("闲聊", _S.GREET),
+    ("聊聊天", _S.GREET), ("聊会儿天", _S.GREET), ("聊几句", _S.GREET), ("说说话", _S.GREET), ("说会儿话", _S.GREET),
     ("道谢", _S.THANK), ("谢谢", _S.THANK), ("多谢", _S.THANK), ("致谢", _S.THANK), ("感谢", _S.THANK),
     ("赔罪", _S.APOLOGIZE), ("赔礼", _S.APOLOGIZE), ("赔不是", _S.APOLOGIZE), ("道歉", _S.APOLOGIZE),
     ("认错", _S.APOLOGIZE), ("对不起", _S.APOLOGIZE),

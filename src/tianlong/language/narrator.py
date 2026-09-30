@@ -2,14 +2,17 @@
 [INPUT]: 依赖 core 的 Percept / Modality / Op / Social / is_night / derive_seed，language/templates 的 Names / render_percept，
          language/llm 的 LLMClient / LLMUnavailable，language/scene 的 VoiceLine / SceneBrief / TextSink，
          language/render 的 fact_lines / build_plan / check / restated_hearsay / sentence_ends / Violation / Rendered / RenderStatus，
-         language/deeds 的 check_deeds，language/quotes 的 check_quotes / voiced
+         language/deeds 的 check_deeds，language/quotes 的 check_quotes / voiced，language/lead 的 lead_line / restates
 [OUTPUT]: 对外提供 Narrator（narrate_scene() 主持人之声：流式生成、逐句过闸门、通过即交付；narrate_rendered() / narrate()
           以空 SceneBrief 委托之；secrets 是场景的秘密词表）、render_voice()（一句 NPC 言语的确定性模板）、SOCIAL_PHRASES / SOCIAL_LABELS、
           MAX_DROPS、MAX_CHARS、fact_lines()（再导出）、lore_keys()
 [POS]: language 的输出层（主持人之声）。输入只有玩家自己的感知与会话交来的 SceneBrief（要替 NPC 说出口的话、最近几回合正文、
        玩家原话、眼下的钩子），不是世界真相；台词本身算出处（说话者与听者可点名，原话与说法照搬不算违规）。
        模板先写成事实清单，清单里听见的言语换成带言语行为的台词（“龚光杰冷笑着向你叫阵：……”；只看见的耳语照旧），措辞按语义输入确定地轮换。
-       有模型时逐句流式生成：每句对“已交付的文字 + 这一句”跑 check()、逐句传闻 restated_hearsay()、人事闸门 check_deeds()
+       有模型时先交付先声（lead_line：玩家自己这一步的结果，确定的句子，照样过闸门）——首字不等模型；模型被告知开头已写好、
+       清单里不再列玩家自己的行动，它开头 ECHO_WINDOW 句里换个说法复述先声的（三字片段重合过半或 restates()）悄悄略过、
+       夹带了错的照样丢句记账；收尾补模板时先声讲过的行不再重复。
+       随后逐句流式生成：每句对“已交付的文字 + 这一句”跑 check()、逐句传闻 restated_hearsay()、人事闸门 check_deeds()
        与台词闸门 check_quotes()，再查钟点数字（含“19点20分”“七点二十分”）；通过即经 on_text 交付，违规即丢弃并记下；
        交付满 MAX_CHARS 字即停止读流。收尾：传闻有没有归属整段查；台词没说出口、玩家自己的行动与后果、冲着玩家来的事、
        听见的话一个参与者都没提的，补上模板行、状态记为 gated_fallback（违规 omitted）；一句都没通过、丢满 MAX_DROPS 句或
@@ -31,6 +34,7 @@ from dataclasses import dataclass, replace
 
 from tianlong.core import Modality, Op, Percept, Social, derive_seed, is_night
 from tianlong.language.deeds import check_deeds
+from tianlong.language.lead import lead_line, restates
 from tianlong.language.llm import LLMClient, LLMUnavailable
 from tianlong.language.quotes import check_quotes, voiced
 from tianlong.language.render import (
@@ -57,6 +61,8 @@ MAX_DROPS = 2              # 丢满这么多句就不再相信这段生成：停
 MAX_CHARS = 600            # 交付满这么多字就停止读流（提示词要 80~250 字）：啰嗦的模型也有个头
 RECENT_KEEP = 3            # 提示词里最近几回合的正文：只留最后几段
 RECENT_CHARS = 300         # 每段只留末尾这么多字
+ECHO = 0.5                 # 模型的一句与先声的三字片段重合过半：是在复述先声，悄悄略过（不算违规）
+ECHO_WINDOW = 2            # 只在模型开头这么多句里找复述：后文再提到同一件事是正常的接续
 
 # ============================================================
 #  主持人之声的系统提示：第二人称、有限长度、台词归属、不替玩家开口、停在钩子上
@@ -188,6 +194,7 @@ class _Row:
     voice: VoiceLine | None = None
     keys: tuple[str, ...] = ()     # 事实行的参与者（名与别称，观察者除外）：正文提到其一即算讲到了
     must: bool = False             # 必须讲到：玩家自己的行动与后果、冲着玩家来的事、听见的话
+    mine: bool = False             # 玩家自己的行动：先声已经讲过，收尾补模板时不再重复
 
 
 def _must(p: Percept, viewer: str) -> bool:
@@ -236,7 +243,8 @@ def _scene_lines(plan: RenderPlan, viewer: str, percepts: Sequence[Percept], nam
             covered.add(text)
             rows.append(_Row(render_voice(brief.lines[k], salt), voice=brief.lines[k]))
         elif (p := facts.get(text)) is not None:
-            rows.append(_Row(text, keys=_keys(p, viewer, names, aliases), must=_must(p, viewer)))
+            rows.append(_Row(text, keys=_keys(p, viewer, names, aliases), must=_must(p, viewer),
+                             mine=p.modality == Modality.SELF and p.event is not None and p.event.actor == viewer))
         else:
             rows.append(_Row(text))
     left = {k for ks in pending.values() for k in ks}
@@ -282,6 +290,11 @@ def _missing(rows: Sequence[_Row], text: str, plan: RenderPlan, brief: SceneBrie
     return out
 
 
+def _grams(text: str, n: int = 3) -> frozenset[str]:
+    t = re.sub(r"[^\w]", "", text)
+    return frozenset(t[i:i + n] for i in range(len(t) - n + 1))
+
+
 # ============================================================
 #  流式交付与逐句闸门
 # ============================================================
@@ -315,6 +328,19 @@ class _Gate:
         self.buf = ""
         self.dropped = 0
         self.violations: list[Violation] = []
+        self.lead = ""                          # 已交付的先声
+        self._lead_grams: frozenset[str] = frozenset()
+        self._echo: Callable[[str], bool] = lambda _: False
+        self._judged = 0                        # 先声之后模型交来的句数
+
+    def admit(self, lead: str, echo: Callable[[str], bool]) -> bool:
+        """先声：内核结果写成的确定句子，照样过一遍闸门（不计丢句）；通过即交付。此后模型开头 ECHO_WINDOW 句里复述它的
+        （三字片段重合过半，或 echo 判定是同一动作）悄悄略过，不算违规。"""
+        if not lead or self._found(lead, lead, ""):
+            return False
+        self.out.emit(lead)
+        self.lead, self._lead_grams, self._echo = lead, _grams(lead), echo
+        return True
 
     def feed(self, piece: str) -> bool:
         """吃进一段增量，交付其中完整的句子；返回 False 表示已丢满，不必再读。"""
@@ -346,18 +372,27 @@ class _Gate:
             return
         before = self.out.text
         piece = ("\n" if before and "\n" in raw[:len(raw) - len(raw.lstrip())] else "") + body
-        text = before + piece
-        found = [v for v in check(text, self.plan, self.known) if v.kind != "hearsay"]    # 传闻有没有归属：收尾整段查
-        found += restated_hearsay(piece, text, self.plan)                                  # 这一句替传闻作保：当场丢
-        found += check_deeds(text, self.plan, self.known)
-        found += check_quotes(text, self.brief, self.plan, self.known, command=self.command, since=len(before))
-        found += [Violation("clock", m.group(0)) for m in _CLOCK_ANY.finditer(piece)]
+        self._judged += 1
+        found = self._found(piece, before + piece, before)
+        if not found and self.lead and self._judged <= ECHO_WINDOW:      # 违规的照样记账；干净的复述悄悄略过
+            grams = _grams(body)
+            if (grams and len(grams & self._lead_grams) / len(grams) >= ECHO) or self._echo(body):
+                log.info("模型复述了先声，略过: %s", body)
+                return
         if found:
             self.dropped += 1
             self.violations += found
             log.info("叙述句未通过闸门，丢弃: %s %s", body, found)
             return
         self.out.emit(piece)
+
+    def _found(self, piece: str, text: str, before: str) -> list[Violation]:
+        found = [v for v in check(text, self.plan, self.known) if v.kind != "hearsay"]    # 传闻有没有归属：收尾整段查
+        found += restated_hearsay(piece, text, self.plan)                                  # 这一句替传闻作保：当场丢
+        found += check_deeds(text, self.plan, self.known)
+        found += check_quotes(text, self.brief, self.plan, self.known, command=self.command, since=len(before))
+        found += [Violation("clock", m.group(0)) for m in _CLOCK_ANY.finditer(piece)]
+        return found
 
 
 # ============================================================
@@ -411,10 +446,13 @@ class Narrator:
             out.emit(plain)
             return Rendered(out.text, RenderStatus.TEMPLATE)
 
-        # ---- 模型：逐句生成、逐句过闸门，通过即交付 ----
-        facts = [x for x in plan.lines if x not in covered]
-        prompt = self._prompt(brief, command, lapse, facts, looks, plan, known)
+        # ---- 先声：玩家自己这一步的结果不等模型，结算一完成就交付；模型从下一句接着写 ----
         gate = _Gate(plan, brief, known, command, out)
+        gate.admit(lead_line(percepts, names, viewer), lambda x: restates(x, percepts, names, viewer))
+        # ---- 模型：逐句生成、逐句过闸门，通过即交付（先声讲过的玩家自己的行动不再列给模型，免得它照着再讲一遍） ----
+        told = {r.text for r in rows if r.mine} if gate.lead else set()
+        facts = [x for x in plan.lines if x not in covered and x not in told]
+        prompt = self._prompt(brief, command, lapse, facts, looks, plan, known, gate.lead)
         failed = False
         pieces = self._pieces(prompt, self._system())
         try:
@@ -434,7 +472,7 @@ class Narrator:
         violations = list(gate.violations)
         if failed:
             status = RenderStatus.LLM_UNAVAILABLE
-        elif not out.text:
+        elif not out.text[len(gate.lead):].strip():            # 模型一句也没交付（先声不算）
             status = RenderStatus.GATED_FALLBACK
             violations = violations or [Violation("empty", "")]
         else:
@@ -451,8 +489,9 @@ class Narrator:
                 log.info("叙述漏掉了必讲之事，补上模板行: %s", [r.text for r in missing])
         elif out.text:
             said = voiced(out.text, plan, brief)
-            tail = ([] if _TIMED.search(out.text) else when) + [r.text for r in rows
-                                                                if r.voice is None or not _spoken(r, out.text, said)]
+            tail = ([] if _TIMED.search(out.text) else when) + [
+                r.text for r in rows
+                if (r.voice is None and not (gate.lead and r.mine)) or (r.voice is not None and not _spoken(r, out.text, said))]
             tail = tail if rows else [f"（{x}）" for x in looks]
             if tail:
                 out.emit("\n" + "\n".join(_prose(x) for x in tail))
@@ -478,7 +517,7 @@ class Narrator:
         return _GM + (f"\n世界：{self.setting}" if self.setting else "") + (f"\n文风：{self.style}" if self.style else "")
 
     def _prompt(self, brief: SceneBrief, command: str, lapse: str, facts: Sequence[str], looks: Sequence[str],
-                plan: RenderPlan, known: frozenset[str]) -> str:
+                plan: RenderPlan, known: frozenset[str], lead: str = "") -> str:
         parts: list[str] = []
         recent = [_in_words(p).strip() for p in brief.recent[-RECENT_KEEP:] if p.strip()]
         if recent:
@@ -505,6 +544,9 @@ class Narrator:
             parts.append("玩家初次看清的人与物（仅作外观描写的依据）：\n" + "\n".join(looks))
         if brief.stakes:
             parts.append(f"眼下的处境（写到这里，停在钩子上）：{brief.stakes}")
+        if lead:
+            parts.append(f"开头一句已经写好，玩家已经看到了：{lead}\n"
+                         "从下一句接着写：不要复述这一句，也不要再交代玩家这一步做成没有，直接写旁人的反应、言语与周遭。")
         return "\n\n".join(parts)
 
 
