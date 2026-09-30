@@ -36,8 +36,9 @@ class NpcState(TypedDict, total=False):
     candidates: list[Candidate]
     predictions: list[Prediction]
     choice: int
-    chosen: Candidate          # 交给内核的行动（候选或候选之外的闲话，附言语行为）
+    chosen: Candidate          # 交给内核的行动（候选或候选之外的言语，附言语行为）
     rationale: str
+    tag: str                   # 策略的结构化标签（Choice.tag）：编排据 CHATTER 给闲谈裁决话头
     utterance: str | None
     intent: Intent
 
@@ -125,15 +126,15 @@ def decide(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
         player=ctx.player,
     )
     choice = ctx.policy.choose(sit)
-    chosen = choice.chosen(state["candidates"])       # 越界或不合规的 free 在这里抛错
-    return {"choice": choice.index, "chosen": chosen, "rationale": choice.rationale}
+    chosen = choice.chosen(state["candidates"], sit.beliefs)    # 越界或不合规的 free（含说的不是自己相信的事）在这里抛错
+    return {"choice": choice.index, "chosen": chosen, "rationale": choice.rationale, "tag": choice.tag}
 
 
 def express(state: NpcState, runtime: Runtime[NpcContext]) -> NpcState:
     ctx = runtime.context
     cand = state["chosen"]
     if cand.op not in (Op.TELL, Op.ASK) or cand.topic is None:
-        return {"utterance": None}       # 闲话没有命题可说：措辞留给主持人之声（叙述时按说话者的认知与腔调写出）
+        return {"utterance": None}       # 闲话没有命题可说：措辞留给主持人之声（叙述时按说话者的认知与腔调写出）；带命题的答话照常措辞
     return {"utterance": ctx.speaker.utter(ctx.port.profile, cand, _names(ctx))}
 
 

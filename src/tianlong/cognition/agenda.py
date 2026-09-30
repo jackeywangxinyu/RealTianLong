@@ -2,16 +2,18 @@
 [INPUT]: 依赖 core 的 Fact / Kind / Modality / Op / Outcome / Percept / Rel / Social
 [OUTPUT]: 对外提供 Obligation（欠着别人的：被问到的问题 answer、被当面搭话 reply）、Said（对谁说过什么，含只有言语行为的闲话）、
           SocialCue（别人对我、或当着我的面做出的言语行为与姿态）、fold_agenda()、fold_social()、
-          MAX_OBLIGATIONS / MAX_SAID / MAX_CUES / REPLY_TTL / ATTITUDE_RANGE / SOCIAL_ATTITUDE
+          MAX_OBLIGATIONS / MAX_SAID / MAX_CUES / REPLY_TTL / ATTITUDE_RANGE / SOCIAL_ATTITUDE / SOFT_SOCIAL
 [POS]: cognition 的持久任务状态与社交状态：短期经历缓冲（episodes，容量 12）会被环顾、响动挤掉，“有人问过我”“我已经告诉过他”不能跟着消失。
        这里把它们从感知折叠成独立的、有界的记录：被人问到 → 记一笔待答；被人当面搭话（不带命题的言语）→ 记一笔待回话；
        自己把答案说给了他 → 这一笔勾销，并记下“说过”；回了话（或以拳脚作答）→ 待回话勾销；说“不知道/不肯说”→ 待答也勾销。
        “说过”只对说的那一刻的认知有效：自己对那个槽位的认知后来变了（钥匙追回来了、又被偷了），或对方就同一件事又问了一遍，
        这一笔“说过”随即作废——变了的消息是新消息，再问一遍就是还想听；待回话过了 REPLY_TTL 还没回，时机已过即作废。
-       社交状态（fold_social）：别人对我或当众的言语行为记为有界的 SocialCue；对每个人的态度 ∈ ATTITUDE_RANGE 由看见/听见的
-       言语行为与动手、救治、赠物确定性地增减——态度只存在于这个角色自己的心里；company 记着眼前每个人“自何时起一直在我身边”
-       （只来自环顾），先礼后兵与守卫“一次闯入只动一次手”都以它为准。
-       与信念一样只来自感知，不读真相；容量有界且溢出时丢最旧的一条（写明，不静默增长）
+       社交状态（fold_social）：别人对我或当众的言语行为记为有界的 SocialCue（溢出时先丢别人之间的闲谈，冲着我或当众的留得更久）；
+       对每个人的态度 ∈ ATTITUDE_RANGE 由看见/听见的言语行为与动手、救治、赠物确定性地增减——见礼只是客套，只把素不相识（0）暖成
+       点头之交（+1），再多也不加分、抹不掉积怨；态度只存在于这个角色自己的心里；company 记着眼前每个人“自何时起一直在我身边”
+       （只来自环顾），先礼后兵与守卫“一次闯入只动一次手”都以它为准；yielded 记着每个人最近一次冲着我或当众服软的时刻——
+       “饶过他”是记在心里的事，不随 8 条的线索缓冲滚掉。
+       与信念一样只来自感知，不读真相；容量有界且溢出时丢最旧的一条（线索先丢别人之间的闲谈；写明，不静默增长）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -33,6 +35,8 @@ SOCIAL_ATTITUDE: Mapping[Social, int] = {
     Social.THANK: 1, Social.PRAISE: 1, Social.APOLOGIZE: 1, Social.PLEAD: 1, Social.SUBMIT: 1, Social.COMFORT: 1,
     Social.GREET: 1,
 }
+COURTESY_CEILING = 1          # 见礼只是客套：只把素不相识（0）暖到点头之交（+1），再多的见礼不加分，也抹不掉积怨
+SOFT_SOCIAL = frozenset({Social.SUBMIT, Social.APOLOGIZE, Social.PLEAD})    # 服软：记进 yielded
 ATTACKED_ME, ATTACKED_ALLY, HELPED_ME = -2, -1, 2
 _SPEECH = frozenset({Op.TELL.value, Op.ASK.value})
 _SOCIAL_KINDS = frozenset({Op.TELL.value, Op.ASK.value, Op.WAIT.value})   # 言语与姿态
@@ -125,13 +129,17 @@ def _clamp(v: int) -> int:
     return max(lo, min(hi, v))
 
 
-def attitude_delta(owner: str, allies: Collection[str], p: Percept) -> tuple[str, int] | None:
-    """这条感知让我对谁的态度变了多少：只看冲着我（或我的自己人）来的、看得出是谁做的事。"""
+def attitude_delta(owner: str, allies: Collection[str], p: Percept,
+                   attitudes: Mapping[str, int] | None = None) -> tuple[str, int] | None:
+    """这条感知让我对谁的态度变了多少：只看冲着我（或我的自己人）来的、看得出是谁做的事。
+    attitudes：眼下的态度——见礼只在素不相识时加分（COURTESY_CEILING），刷不出好感。"""
     ev = p.event
     if ev is None or not ev.actor or ev.actor == owner or p.modality not in (Modality.SPEECH, Modality.SIGHT):
         return None
     if ev.kind in _SOCIAL_KINDS and ev.target == owner and ev.social is not None:
         d = SOCIAL_ATTITUDE.get(ev.social, 0)
+        if ev.social == Social.GREET and not 0 <= (attitudes or {}).get(ev.actor, 0) < COURTESY_CEILING:
+            d = 0
     elif ev.kind == Op.ATTACK.value and ev.target == owner:
         d = ATTACKED_ME
     elif ev.kind == Op.ATTACK.value and ev.target in allies:
@@ -157,20 +165,32 @@ def _company(owner: str, company: Mapping[str, int], p: Percept) -> Mapping[str,
     return {x: min(company.get(x, p.tick), p.tick) for x in present}
 
 
+def _bounded(owner: str, cues: tuple[SocialCue, ...]) -> tuple[SocialCue, ...]:
+    """超出 MAX_CUES：先丢最旧的一条别人之间的闲谈（没人据它行事），没有才丢最旧的一条。"""
+    while len(cues) > MAX_CUES:
+        i = next((k for k, c in enumerate(cues) if c.to not in (owner, None)), 0)
+        cues = cues[:i] + cues[i + 1:]
+    return cues
+
+
 def fold_social(owner: str, allies: Collection[str], cues: tuple[SocialCue, ...], attitudes: Mapping[str, int],
-                company: Mapping[str, int], p: Percept
-                ) -> tuple[tuple[SocialCue, ...], Mapping[str, int], Mapping[str, int]]:
+                company: Mapping[str, int], p: Percept, yielded: Mapping[str, int] | None = None
+                ) -> tuple[tuple[SocialCue, ...], Mapping[str, int], Mapping[str, int], Mapping[str, int]]:
     """线索：冲着我、或当众（姿态；别人之间听得见的说话）的言语行为，有言语行为或原话才记。
-    态度：按 attitude_delta 增减并截在 ATTITUDE_RANGE 内，归零即删（缺席 = 0）。"""
+    态度：按 attitude_delta 增减并截在 ATTITUDE_RANGE 内，归零即删（缺席 = 0）。
+    yielded：冲着我或当众服软（SOFT_SOCIAL）的人 → 最近一次的时刻，与线索同时记下，但不随线索缓冲滚掉。"""
     ev = p.event
+    yielded = yielded or {}
     if ev is not None and ev.actor and ev.actor != owner and ev.kind in _SOCIAL_KINDS \
             and p.modality in (Modality.SPEECH, Modality.SIGHT) and (ev.social is not None or ev.utterance) \
             and (ev.target in (owner, None) or p.modality == Modality.SPEECH):
-        cues = (*cues, SocialCue(ev.actor, Op(ev.kind), ev.social, p.tick, ev.utterance, ev.target))[-MAX_CUES:]
-    delta = attitude_delta(owner, allies, p)
+        cues = _bounded(owner, (*cues, SocialCue(ev.actor, Op(ev.kind), ev.social, p.tick, ev.utterance, ev.target)))
+        if ev.social in SOFT_SOCIAL and ev.target in (owner, None):
+            yielded = {**yielded, ev.actor: max(p.tick, yielded.get(ev.actor, p.tick))}
+    delta = attitude_delta(owner, allies, p, attitudes)
     if delta is not None:
         who, d = delta
         v = _clamp(attitudes.get(who, 0) + d)
         attitudes = {**{k: x for k, x in attitudes.items() if k != who}, **({who: v} if v else {})}
     moved = _company(owner, company, p)
-    return cues, attitudes, (company if moved is None else moved)
+    return cues, attitudes, (company if moved is None else moved), yielded
