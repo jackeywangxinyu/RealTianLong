@@ -2,7 +2,7 @@
 [INPUT]: 标准库 sqlite3 / json；persistence 的显式 codec 与 WorldStore 契约
 [OUTPUT]: SQLiteWorldStore：无需外部数据库的磁盘存档；web_state/save_web_state 保存网页记录
 [POS]: persistence 的 SQLite 后端。BEGIN IMMEDIATE 内检查版本与请求绑定，再原子写世界、认知、事件、outbox 和会话进度。
-       每次操作独立连接，可跨线程与进程；叙述只补写一次；没有 pickle 或可执行的存档内容。
+       决策菜单单独冻结，首 tick 同事务消费；每次操作独立连接，可跨线程与进程；叙述只补写一次；没有 pickle。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -26,6 +26,7 @@ from tianlong.persistence.store import (
     VersionConflict,
     WorldRef,
     check_request_progress,
+    consume_decision,
 )
 
 
@@ -34,6 +35,7 @@ def _json(value: Any) -> str:
 
 
 class SQLiteWorldStore:
+    """包括冻结菜单的原子发布与首 tick 消费，旧数据库新增 decisions 表即可兼容。"""
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,6 +57,7 @@ class SQLiteWorldStore:
                 CREATE TABLE IF NOT EXISTS requests (
                     w TEXT, b TEXT, id TEXT, data TEXT NOT NULL, narration TEXT, PRIMARY KEY(w,b,id));
                 CREATE TABLE IF NOT EXISTS web (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS decisions (w TEXT, b TEXT, data TEXT NOT NULL, PRIMARY KEY(w,b));
             """)
 
     @contextmanager
@@ -145,6 +148,30 @@ class SQLiteWorldStore:
         with self._connection() as db:
             return json.loads(self._world(db, ref)["versions"])
 
+    @staticmethod
+    def _decision(db: sqlite3.Connection, ref: WorldRef) -> dict[str, Any] | None:
+        row = db.execute("SELECT data FROM decisions WHERE w=? AND b=?", (ref.world_id, ref.branch_id)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def decision(self, ref: WorldRef) -> Mapping[str, Any] | None:
+        with self._connection() as db:
+            self._world(db, ref)
+            return self._decision(db, ref)
+
+    def publish_decision(self, ref: WorldRef, decision: Mapping[str, Any],
+                         expected_version: int) -> Mapping[str, Any]:
+        data = _json(dict(decision))
+        with self._connection(True) as db:
+            head = json.loads(self._world(db, ref)["state"])
+            if head["version"] != expected_version or decision["version"] != expected_version:
+                raise VersionConflict("发布选项时局势已变化")
+            prior = self._decision(db, ref)
+            if prior is not None and prior["version"] == expected_version:
+                return prior
+            db.execute("INSERT INTO decisions(w,b,data) VALUES (?,?,?) ON CONFLICT(w,b) DO UPDATE SET data=excluded.data",
+                       (ref.world_id, ref.branch_id, data))
+            return json.loads(data)
+
     def commit(self, batch: CommitBatch) -> None:
         ref = batch.ref
         with self._connection(True) as db:
@@ -157,6 +184,10 @@ class SQLiteWorldStore:
             if batch.request is not None:
                 prior = self._request(db, ref, batch.request.request_id)
                 check_request_progress(prior, batch.request, batch.state.version)
+                decision = consume_decision(self._decision(db, ref), batch.request, batch.expected_version)
+                if batch.request.choice is not None and len(batch.request.versions) == 1:
+                    db.execute("UPDATE decisions SET data=? WHERE w=? AND b=?",
+                               (_json(decision), ref.world_id, ref.branch_id))
                 db.execute("INSERT INTO requests(w,b,id,data) VALUES (?,?,?,?) "
                            "ON CONFLICT(w,b,id) DO UPDATE SET data=excluded.data",
                            (ref.world_id, ref.branch_id, batch.request.request_id, _json(codec.envelope_to(batch.request))))

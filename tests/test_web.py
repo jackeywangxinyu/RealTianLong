@@ -96,7 +96,7 @@ def test_turn_streams_sentences_then_done(served):
     assert done[0]["advanced"] is True and game.session.authority.head().clock > before
     # 推给浏览器的只有玩家该看的：没有 NPC 理由、真相，也没有叙述上下文
     assert set(done[0]) == {"clock", "place", "kind", "advanced", "narration", "first_text_ms", "ended", "ending",
-                            "epilogue", "suggest"}
+                            "epilogue", "suggest", "decision_id", "choices"}
     assert done[0]["suggest"] and all(isinstance(t, str) and t for t in done[0]["suggest"])
 
 
@@ -277,3 +277,29 @@ def test_disconnect_does_not_interrupt_recording_or_repeat_settlement(served):
     assert game.session.store.request(game.session.ref, "disconnect").narration
     done = json.loads(_request(port, "POST", "/api/turn", body, Accept="application/json")[2])
     assert done["narration"] and game.session.authority.head().version == 1
+
+
+def test_http_choices_are_frozen_replayed_and_do_not_trust_client_actions(served):
+    game, port = served
+    state = json.loads(_get(port, "/api/state")[2])
+    assert all(set(c) == {"id", "label"} for c in state["choices"])
+    assert json.loads(_get(port, "/api/state")[2])["choices"] == state["choices"]
+
+    class Bomb:
+        def interpret(self, *_):
+            raise AssertionError("按钮不能调用解释器")
+    game.session.interpreter = Bomb()
+    body = {"decision_id": state["decision_id"], "choice_id": state["choices"][0]["id"],
+            "request_id": "http-choice", "game_id": state["game_id"]}
+    assert _request(port, "POST", "/api/turn", {**body, "text": "攻击马五德"}, Accept="application/json")[0] == 400
+    assert _request(port, "POST", "/api/turn", {**body, "op": "attack"}, Accept="application/json")[0] == 400
+    assert game.session.authority.head().version == 0
+    code, _, raw = _request(port, "POST", "/api/turn", body, Accept="application/json")
+    assert code == 200
+    done = json.loads(raw)
+    version = game.session.authority.head().version
+    again = _request(port, "POST", "/api/turn", body, Accept="application/json")
+    assert again[0] == 200 and json.loads(again[2]) == done
+    assert game.session.authority.head().version == version
+    assert _request(port, "POST", "/api/turn", {**body, "request_id": "old-page"}, Accept="application/json")[0] == 409
+    assert game.state()["pending"] is None

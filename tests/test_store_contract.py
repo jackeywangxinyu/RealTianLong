@@ -26,6 +26,7 @@ from tianlong.persistence import (
     TurnEnvelope,
     VersionConflict,
 )
+from tianlong.persistence.store import ChoiceConflict, ChoiceUse
 from tianlong.runtime.authority import WorldAuthority
 from tianlong.scenarios import build_warehouse
 
@@ -200,3 +201,33 @@ def test_request_binding_is_checked_inside_the_commit(store):
     assert store.request(auth.ref, "rq").versions == (1, 2) and store.request(auth.ref, "rq").done
     refused("dup-4", progress("f", "h-take", envs["e"].versions))                 # 已完结：不再接受任何进度
     assert store.head(auth.ref).version == 2
+
+
+def test_decision_publication_and_first_tick_consumption_are_atomic(store):
+    _, auth = found(store)
+    snapshot = {"schema": 1, "id": "decision-0", "version": 0,
+                "choices": [{"id": "take-key", "label": "拿起钥匙"}], "consumed_request": None}
+    assert store.decision(auth.ref) is None
+    assert store.publish_decision(auth.ref, snapshot, 0) == snapshot
+    assert store.publish_decision(auth.ref, {**snapshot, "choices": []}, 0) == snapshot
+    it = Intent("choice-t0", "player", Op.TAKE, "key", based_on=0)
+
+    def annotate(choice_id):
+        def progress(s):
+            return TurnEnvelope("choice-r", "payload", it, 1, 0, 0, versions=(s.state.version,), done=True,
+                                choice=ChoiceUse("decision-0", choice_id), command="拿起钥匙"), {"choice-test": True}
+        return progress
+
+    with pytest.raises(ChoiceConflict):
+        auth.settle([it], annotate("fake-choice"))
+    assert auth.head().version == 0 and auth.head().target("key", Rel.AT) == "table"
+    assert store.decision(auth.ref) == snapshot and store.request(auth.ref, "choice-r") is None
+    assert store.session_state(auth.ref) is None and not store.events(auth.ref)
+    auth.settle([it], annotate("take-key"))
+    assert auth.head().version == 1 and auth.head().target("key", Rel.AT) == "player"
+    assert store.decision(auth.ref)["consumed_request"] == "choice-r"
+    assert store.request(auth.ref, "choice-r").choice == ChoiceUse("decision-0", "take-key")
+    assert store.request(auth.ref, "choice-r").command == "拿起钥匙"
+    assert store.session_state(auth.ref) == {"choice-test": True}
+    with pytest.raises(VersionConflict):
+        store.publish_decision(auth.ref, snapshot, 0)

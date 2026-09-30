@@ -3,6 +3,8 @@
 
 事实持久化。WorldStore 协议的唯一写路径是 commit()：乐观版本检查 + 请求绑定检查 + 世界新版本 + 事件 + 观察 + 变化了的认知 + 待索引经历（outbox）+ 请求进度（TurnEnvelope）+ 会话运行态，一次原子提交——“世界推进了”与“这个请求走到哪了”不会只落一半，同一请求的重复投递也不会各结算一次。叙述文字另走幂等的 record_render()（只补写一次），文字失败不回滚世界。LangGraph 检查点不能代替它；向量索引从它派生、可重建。
 
+冻结决策是派生数据：decision()/publish_decision() 不推进世界，发布只在 head 版本仍匹配时成功；同版本首次发布的完整动作与文案保持冻结。TurnEnvelope.choice 在首 tick 提交的同一事务中消费这份菜单，拒绝过期/不存在/已消费的选项，失败回滚连同世界与进度。内存、SQLite 与 Neo4j 共用 consume_decision()。
+
 成员清单
 store.py: WorldRef（world_id + branch_id）、TurnEnvelope（request_id + payload_hash 绑定的请求进度：玩家行动模板、多步计划的后续步骤 followups、是否追加反应 tick、计划 tick、已提交版本与时钟、玩家感知、初见描写键、完结标记、叙述）、CommitBatch（可选 request / session_state 随同一事务写入）、VersionConflict、RequestConflict（同 ID 异内容，或进度接不上已落库的那一份）、UnknownWorld、WorldStore 协议（新增 request()/session_state()/save_versions() 读与 record_render() 旁路写，create() 记下存档版本）、check_request_progress()（两个后端共用的请求绑定检查：首 tick 建立绑定，此后每次提交的进度必须恰好是已落库进度加本次版本，已完结或异内容即拒——放在提交的临界区 / 事务里，查询与结算之间没有空隙）
 memory_store.py: InMemoryWorldStore，测试/训练/离线默认后端，锁只保护"检查版本 + 检查请求绑定 + 写入"临界区；请求进度与会话运行态同一临界区写入，会话运行态按 JSON 往返存取（与 Neo4j 取回的形状一致）

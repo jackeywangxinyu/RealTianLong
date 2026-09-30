@@ -1,6 +1,6 @@
 """
 [INPUT]: 依赖标准库 http.server / json / threading / argparse / contextlib，runtime/session 的 GameSession / TurnReport，
-         runtime/suggest 的 suggestions，
+         runtime/choice_service 的冻结菜单与结构化按钮执行，
          runtime/cli 的 load_dotenv / interpreter_for，runtime/webpage 的 PAGE，language/llm 的 llm_from_env / fast_llm_from_env，
          cognition/navigation 的 believed_place，scenarios 的 SCENARIOS
 [OUTPUT]: 对外提供 WebGame（一局游戏的线程安全外壳：开场、回合、状态）、make_server()（本地 HTTP 服务）、
@@ -9,7 +9,8 @@
        页面就多一句；推送的只有玩家该看的文字（叙述、场外问答、落幕后的真相揭晓）与只凭玩家认知给出的行动建议，
        真相与 NPC 理由从不出这个进程。
        HTTP 使用标准库；WebSessions 按随机 HttpOnly Cookie 隔离玩家，并用 SQLite 保存世界与网页记录。
-       回合携带 request_id；断线只停止传送、不打断结算；SSE 与 JSON 两种传输供不同代理使用。
+       回合携带 request_id；按钮只上传 decision_id/choice_id，由服务器保存的 Parsed 执行；断线只停止传送、不打断结算。
+       冻结菜单随存档恢复，旧请求先重放、旧菜单拒绝；SSE 与 JSON 两种传输供不同代理使用。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -37,7 +38,6 @@ from tianlong.persistence.sqlite_store import SQLiteWorldStore
 from tianlong.persistence.store import RequestConflict, WorldStore
 from tianlong.runtime.cli import interpreter_for, load_dotenv
 from tianlong.runtime.session import GameSession, TurnReport
-from tianlong.runtime.suggest import suggestions
 from tianlong.runtime.webpage import PAGE
 from tianlong.scenarios import SCENARIOS
 
@@ -78,8 +78,7 @@ class WebGame:
             s = self.session
             self._checkpoint({"branch": s.ref.branch_id, "opening": self._opening, "epilogue": self._epilogue,
                               "history": self._history, "pending": self._pending,
-                              "runtime": {"scheduler": s.scheduler.to_state(), "described": sorted(s._described),
-                                          "recent": s._recent, "hint": s._hint}})
+                              "runtime": s.session_state()})
 
     def _warm(self) -> None:
         """开场在后台先写好：浏览器打开页面时（有模型时那是一次调用）多半已经就绪，不必干等。"""
@@ -119,8 +118,7 @@ class WebGame:
         return sk.name if sk else "某处"
 
     def _suggest(self) -> list[str]:
-        s = self.session
-        return [] if s.ending is not None else list(suggestions(s.beliefs(s.player)))
+        return [c["label"] for c in self.session.choices.current()["choices"]]
 
     def state(self) -> dict[str, Any]:
         """开场（只讲一次，刷新页面时原样再给）、时辰、以为自己在哪、是否已落幕。"""
@@ -132,9 +130,10 @@ class WebGame:
                 self._opening = "\n\n".join(p for p in parts if p)
             epilogue = self._closing()
             self._save()
+            decision = s.choices.current()
             return {"title": self.title, "clock": s.clock(), "place": self._place(), "opening": self._opening,
                     "game_id": s.ref.branch_id,
-                    "suggest": self._suggest(),
+                    **decision, "suggest": [c["label"] for c in decision["choices"]],
                     "history": [{"request_id": h["request_id"], "text": h["text"],
                                  "narration": h["done"]["narration"], "kind": h["done"]["kind"]} for h in self._history],
                     "pending": self._pending,
@@ -144,6 +143,14 @@ class WebGame:
 
     def turn(self, text: str, on_text: Callable[[str], None], request_id: str | None = None,
              game_id: str | None = None) -> dict[str, Any]:
+        return self._turn({"text": text}, on_text, request_id, game_id)
+
+    def choose(self, decision_id: str, choice_id: str, on_text: Callable[[str], None], request_id: str,
+               game_id: str) -> dict[str, Any]:
+        return self._turn({"decision_id": decision_id, "choice_id": choice_id}, on_text, request_id, game_id)
+
+    def _turn(self, action: dict[str, str], on_text: Callable[[str], None], request_id: str | None,
+              game_id: str | None) -> dict[str, Any]:
         """结算一回合：叙述经 on_text 逐句交付；返回回合收尾的元数据（不含真相）。"""
         with self._lock:
             s = self.session
@@ -152,21 +159,35 @@ class WebGame:
             request_id = request_id or secrets.token_urlsafe(18)
             for h in self._history:
                 if h["request_id"] == request_id:
-                    if h["text"] != text:
+                    if h.get("action", {"text": h["text"]}) != action:
                         raise RequestConflict("同一请求编号不能绑定不同输入")
                     on_text(h["done"]["narration"])
                     return h["done"]
-            if self._pending and self._pending != {"request_id": request_id, "text": text}:
+            if self._pending and (self._pending["request_id"] != request_id
+                                  or {k: self._pending.get(k) for k in action} != action):
                 raise RequestConflict("上一回合尚未完成，请先重试该回合")
-            self._pending = {"request_id": request_id, "text": text}
+            choice = "choice_id" in action
+            if choice:
+                prior = s.store.request(s.ref, request_id)
+                text = prior.command if prior else s.choices.resolve(action["decision_id"], action["choice_id"]).label
+            else:
+                text = action["text"]
+            self._pending = {"request_id": request_id, **action, **({"label": text} if choice else {})}
             self._save()
-            report: TurnReport = s.turn(text, request_id=request_id, on_text=on_text)
+            try:
+                report: TurnReport = (s.choose(action["decision_id"], action["choice_id"], request_id, on_text)
+                                      if choice else s.turn(text, request_id=request_id, on_text=on_text))
+            except RequestConflict:
+                self._pending = None
+                self._save()
+                raise
             ended = report.ending is not None
+            decision = s.choices.current()
             done = {"clock": s.clock(), "place": self._place(), "kind": report.kind.value, "advanced": report.advanced,
                     "narration": report.narration, "first_text_ms": report.first_text_ms,
                     "ended": ended, "ending": report.ending.title if ended else None, "epilogue": self._closing(),
-                    "suggest": self._suggest()}
-            self._history.append({"request_id": request_id, "text": text, "done": done})
+                    **decision, "suggest": [c["label"] for c in decision["choices"]]}
+            self._history.append({"request_id": request_id, "text": text, "action": action, "done": done})
             self._history = self._history[-HISTORY_KEEP:]
             self._pending = None
             self._save()
@@ -336,9 +357,10 @@ def _handler(games: WebGame | WebSessions, transport: str) -> type[BaseHTTPReque
                 game.restart()
                 self._json(200, {**game.state(), "transport": transport})
                 return
+            choice = "choice_id" in body or "decision_id" in body
             text = body.get("text")
             text = text.strip()[:MAX_INPUT] if isinstance(text, str) else ""
-            if not text:
+            if not choice and not text:
                 self._json(400, {"error": "empty"})
                 return
             request_id = body.get("request_id")
@@ -350,9 +372,20 @@ def _handler(games: WebGame | WebSessions, transport: str) -> type[BaseHTTPReque
             if game_id is not None and not isinstance(game_id, str):
                 self._json(400, {"error": "game_id"})
                 return
+            if choice and (set(body) - {"decision_id", "choice_id", "request_id", "game_id"}
+                        or not request_id or not game_id or any(
+                            not isinstance(body.get(k), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", body[k])
+                            for k in ("decision_id", "choice_id"))):
+                self._json(400, {"error": "请选择当前页面提供的选项"})
+                return
+
+            def execute(on_text: Callable[[str], None]) -> dict[str, Any]:
+                return (game.choose(body["decision_id"], body["choice_id"], on_text, request_id, game_id)
+                        if choice else game.turn(text, on_text, request_id, game_id))
+
             if transport == "json" or self.headers.get("Accept") == "application/json":
                 try:
-                    done = game.turn(text, lambda _: None, request_id, game_id)
+                    done = execute(lambda _: None)
                 except RequestConflict as e:
                     self._json(409, {"error": str(e)})
                     return
@@ -363,29 +396,36 @@ def _handler(games: WebGame | WebSessions, transport: str) -> type[BaseHTTPReque
                 with contextlib.suppress(BrokenPipeError, ConnectionResetError):
                     self._json(200, done)
                 return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self._headers()
-            self.send_header("X-Accel-Buffering", "no")
-            self.send_header("Connection", "close")
-            self.end_headers()
-
             disconnected = False
+            started = False
 
             def event(name: str, data: dict[str, Any]) -> None:
-                nonlocal disconnected
+                nonlocal disconnected, started
                 if disconnected:
                     return
                 payload = json.dumps(data, ensure_ascii=False)
                 try:
+                    if not started:
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                        self._headers()
+                        self.send_header("X-Accel-Buffering", "no")
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        started = True
                     self.wfile.write(f"event: {name}\ndata: {payload}\n\n".encode())
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError, TimeoutError):
                     disconnected = True
 
             try:
-                done = game.turn(text, lambda piece: event("text", {"t": piece}), request_id, game_id)
+                done = execute(lambda piece: event("text", {"t": piece}))
                 event("done", done)
+            except RequestConflict as e:
+                if not started:
+                    self._json(409, {"error": str(e)})
+                else:
+                    event("error", {"message": str(e), "conflict": True})
             except (BrokenPipeError, ConnectionResetError):
                 pass                                  # 玩家关了页面：回合照常结算落库，只是没人看
             except Exception as e:  # noqa: BLE001 —— 一回合出错不该拖垮整个服务

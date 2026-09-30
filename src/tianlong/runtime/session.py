@@ -8,7 +8,7 @@
          language/render 的 Rendered / RenderStatus / Violation，persistence 的 WorldStore / InMemoryWorldStore / WorldRef / TurnEnvelope /
          RequestConflict / VersionConflict，scenarios 的 Scenario / Ending，cognition 的 Candidate / believed_place，
          language/templates 的 render_fact，memory/view 的 MemoryView（NPC 的长期记忆摘要，增量汇总——水位含边界、按记录 ID 去重，与读档后重建逐项相同）
-[OUTPUT]: 对外提供 GameSession（可玩会话：turn() 一回合、intro()/epilogue() 开场与终章、belief_lines() 玩家自己的认知；
+[OUTPUT]: 对外提供 GameSession（turn() 自由输入与 choose() 冻结选项共用结算；intro()/epilogue() 开场与终章、belief_lines() 玩家自己的认知；
           读档接续并恢复调度标记、已描写实体、最近几段正文与提示进度；请求幂等、存档版本闸门）、
           TurnReport（一回合的全部产物：世界侧与文字侧分开记录，含这句话的类别、结局、首字耗时、分阶段耗时与叙述上下文）
 [POS]: runtime 的装配中心（主持层的回合循环）：一回合 = 解释玩家输入（后台同时算好本 tick 的 NPC 决策；元指令与“GM：”一眼认得，不算）→ 按类别推进：
@@ -80,8 +80,10 @@ from tianlong.persistence import (
     WorldRef,
     WorldStore,
 )
+from tianlong.persistence.store import ChoiceUse
 from tianlong.runtime import gm
 from tianlong.runtime.authority import Settlement, WorldAuthority
+from tianlong.runtime.choice_service import ChoiceService
 from tianlong.runtime.versions import check_save, current_versions
 from tianlong.scenarios import Ending, Scenario
 
@@ -256,6 +258,7 @@ class GameSession:
         self._pool: ThreadPoolExecutor | None = None
         self._ahead: _Ahead | None = None
         self.ending: Ending | None = self._ended()    # 读档时落幕与否同样由世界真相推出
+        self.choices = ChoiceService(self)
 
     # ------------------------------------------------------------
     #  读
@@ -343,6 +346,32 @@ class GameSession:
         ahead = self._look_ahead(head) if self.ending is None and quick is None else None
         parsed = quick or self._parse(text, me)
         clock.lap("interpret")
+        return self._execute(parsed, text, payload, head, me, clock, sink, request_id, ahead)
+
+    def choose(self, decision_id: str, choice_id: str, request_id: str,
+               on_text: TextSink | None = None) -> TurnReport:
+        """冻结 Parsed 与自由输入共用执行链路。先重放已提交请求，再检查菜单是否过期。"""
+        clock = _Stopwatch()
+        sink = _Sink(on_text, clock.start)
+        self._settle_background()
+        payload = digest("choice", decision_id, choice_id)
+        prior = self.store.request(self.ref, request_id)
+        if prior is not None:
+            bound = _bound(prior, payload)
+            return self._resume_request(bound, bound.command, clock, sink)
+        if request_id in self._asides:
+            raise RequestConflict("同一请求编号不能绑定不同输入")
+        spec = self.choices.resolve(decision_id, choice_id)
+        head = self.authority.head()
+        me = self.beliefs(self.player)
+        clock.lap("interpret")
+        return self._execute(spec.parsed, spec.label, payload, head, me, clock, sink, request_id,
+                             choice=ChoiceUse(decision_id, choice_id))
+
+    def _execute(self, parsed: Parsed, text: str, payload: str, head: WorldState, me: BeliefStore,
+                 clock: _Stopwatch, sink: _Sink, request_id: str | None, ahead: _Ahead | None = None,
+                 choice: ChoiceUse | None = None) -> TurnReport:
+        """自由文本与冻结按钮共用计划、反应 tick、权威提交和叙述；按钮不经解释器。"""
         if (parsed.kind in (MoveKind.ASK_GM, MoveKind.META) or parsed.candidate is None
                 or self.ending is not None):
             return self._aside(parsed, text, head, me, clock, sink, request_id)   # 后台的决策随之作废：它不写任何东西
@@ -351,7 +380,8 @@ class GameSession:
         plan = [c.to_intent(self._intent_id(self.player, head.version), self.player, head.version,
                             parsed.utterance if i == slot else None) for i, c in enumerate(steps)]
         env = TurnEnvelope(request_id or "", payload, plan[0], planned, head.version, head.clock,
-                           source=parsed.source, followups=tuple(plan[1:]), reaction=reaction)
+                           source=parsed.source, followups=tuple(plan[1:]), reaction=reaction,
+                           choice=choice, command=text)
         env, events, deliberations, settlement = self._advance(env, clock, request_id is not None, ahead)
         if not env.done:
             # 被越过：同一请求的另一次投递抢先推进了世界——以落库的那一份为准，本次不再多走

@@ -2,7 +2,7 @@
 [INPUT]: 无（纯静态内容）
 [OUTPUT]: 对外提供 PAGE（网页前端的整页 HTML：样式与脚本内联，无外部依赖）
 [POS]: runtime/web 的页面：宣纸色调的聊天式界面。叙述按 SSE 逐句浮现，NPC 台词（“……”）单独着色，
-       输入框上方是可点的行动建议（服务端只凭玩家认知给出），侧栏显示时辰与所在，提示/回顾/所知一键发出元指令，
+       输入框上方是冻结选项（点击只提交决策和选项 ID，文案不再解析），侧栏显示时辰与所在，提示/回顾/所知一键发出元指令，
        落幕后展示终章与真相揭晓；深色模式与手机宽度皆可用。
        页面只呈现服务端给的文字，不做任何判断
        刷新恢复服务端对话；请求带 UUID 与游戏编号，断线重试同一请求；兼容 SSE/JSON，待重试时禁用其他行动。
@@ -155,19 +155,19 @@ function paragraphs(text) { return text.split(/\n+/).filter(Boolean).map((p) => 
 function setState(s) {
   if (s.clock) $("clock").textContent = s.clock;
   if (s.place) $("place").textContent = s.place;
-  chips(s.suggest || []);
+  chips(s.choices || [], s.decision_id);
 }
-// 行动建议：只凭玩家自己的认知生成，点一下就照做；落幕或结算中不显示
-let lastChips = [];
-function chips(list) {
-  lastChips = list;
+// 冻结选项：只提交服务端选项 ID，展示文字不重新交给解释器；落幕或结算中不显示
+let lastChips = [], lastDecision = null;
+function chips(list, decisionId = lastDecision) {
+  lastChips = list; lastDecision = decisionId;
   const box = $("chips");
   box.innerHTML = "";
   if (ended) return;
-  for (const t of list) {
+  for (const c of list) {
     const b = document.createElement("button");
-    b.type = "button"; b.textContent = t;
-    b.addEventListener("click", () => play(t));
+    b.type = "button"; b.textContent = c.label;
+    b.addEventListener("click", () => play(c.label, null, { decision_id: decisionId, choice_id: c.id, label: c.label }));
     box.appendChild(b);
   }
 }
@@ -216,7 +216,7 @@ async function start() {
   input.placeholder = "说你想做的事，或想说的话……";
   if (s.ended) showEnding(s.ending, s.epilogue);
   lock(false);
-  if (pending) await play(pending.text, pending);
+  if (pending) await play(pending.label || pending.text, pending);
   else if (!ended) input.focus();
   } catch (e) {
     pending = null;
@@ -229,9 +229,9 @@ async function start() {
   }
 }
 
-async function play(text, retryRequest = null) {
+async function play(text, retryRequest = null, choice = null) {
   if (busy || (ended && !isAside(text)) || !text.trim() || (pending && !retryRequest)) return;
-  const request = retryRequest || { text, request_id: crypto.randomUUID(), game_id: gameId };
+  const request = retryRequest || { ...(choice || { text }), request_id: crypto.randomUUID(), game_id: gameId };
   pending = request; savePending();
   lock(true);
   $("chips").innerHTML = "";
@@ -251,13 +251,15 @@ async function play(text, retryRequest = null) {
     for (let attempt = 0; attempt < 2; attempt++) {
     try {
     acc = "";
+    const { label, ...wireRequest } = request;
     const resp = await fetch("/api/turn", { method: "POST", headers: { "Content-Type": "application/json",
                                             "Accept": transport === "json" ? "application/json" : "text/event-stream" },
-                                            body: JSON.stringify(request) });
+                                            body: JSON.stringify(wireRequest) });
     if (!resp.ok) {
       let message = "与主持人失去联系";
       try { message = (await resp.json()).error || message; } catch (e) {}
-      throw new Error(message);
+      const error = new Error(message); error.conflict = resp.status === 409 || resp.status === 400;
+      throw error;
     }
     if ((resp.headers.get("Content-Type") || "").includes("application/json")) {
       finish(await resp.json()); break;
@@ -276,21 +278,27 @@ async function play(text, retryRequest = null) {
         if (ev === "text") { acc += data.t; box.innerHTML = paragraphs(acc); log.scrollTop = log.scrollHeight; }
         else if (ev === "done") {
           finish(data);
-        } else if (ev === "error") { throw new Error(data.message || "出错了"); }
+        } else if (ev === "error") { const error = new Error(data.message || "出错了"); error.conflict = !!data.conflict; throw error; }
       }
     }
     if (!settled) throw new Error("这一回合的连接中断了");
     break;
     } catch (e) {
-      if (attempt === 1) throw e;
+      if (attempt === 1 || e.conflict) throw e;
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     }
   } catch (e) {
     const error = add("error", esc(e.message || "与主持人失去联系"));
     const retry = document.createElement("button");
-    retry.textContent = "重试上一回合";
-    retry.addEventListener("click", () => { error.remove(); box.remove(); play(text, request); });
+    if (e.conflict) {
+      pending = null; savePending();
+      retry.textContent = "读取当前局势";
+      retry.addEventListener("click", () => { error.remove(); box.remove(); start(); });
+    } else {
+      retry.textContent = "重试上一回合";
+      retry.addEventListener("click", () => { error.remove(); box.remove(); play(text, request); });
+    }
     error.appendChild(retry);
   } finally {
     box.classList.remove("cursor");

@@ -2,7 +2,7 @@
 [INPUT]: 依赖 core 的全部值对象，cognition 的 Belief / Episode / Obligation / Said / SocialCue，persistence/store 的 TurnEnvelope
 [OUTPUT]: 对外提供 core 值对象 ⇄ JSON 兼容 dict 的显式编解码函数（intent / change / event / percept / fact / sketch / belief / episode /
           obligation（待答与待回话，命题可缺）/ said（闲话无命题、带言语行为）/ cue 社交线索 / attitudes 态度 / envelope 请求进度 / world 全世界 / mind 完整认知 / memory 经历）；
-          旧记录缺新键时取缺省（言语行为为无、态度为空）
+          请求含冻结选项绑定与展示文字；旧记录缺新键时取缺省（无选项绑定、言语行为为无、态度为空）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -38,7 +38,7 @@ from tianlong.core import (
     WorldState,
 )
 from tianlong.core.memories import MemoryRecord
-from tianlong.persistence.store import TurnEnvelope
+from tianlong.persistence.store import ChoiceUse, TurnEnvelope
 
 J = dict[str, Any]
 
@@ -218,7 +218,9 @@ def envelope_to(e: TurnEnvelope) -> J:
             "planned_ticks": e.planned_ticks, "start_version": e.start_version, "start_clock": e.start_clock,
             "versions": list(e.versions), "ticks": list(e.ticks), "percepts": [percept_to(p) for p in e.percepts],
             "fresh": list(e.fresh), "done": e.done, "source": e.source,
-            "followups": [intent_to(i) for i in e.followups], "reaction": e.reaction}
+            "followups": [intent_to(i) for i in e.followups], "reaction": e.reaction,
+            "choice": {"decision_id": e.choice.decision_id, "choice_id": e.choice.choice_id} if e.choice else None,
+            "command": e.command}
 
 
 def envelope_from(d: J, narration: str | None = None) -> TurnEnvelope:
@@ -226,7 +228,9 @@ def envelope_from(d: J, narration: str | None = None) -> TurnEnvelope:
                         int(d["start_version"]), int(d["start_clock"]), tuple(int(v) for v in d["versions"]),
                         tuple(int(t) for t in d["ticks"]), tuple(percept_from(p) for p in d["percepts"]),
                         tuple(d["fresh"]), bool(d["done"]), d.get("source", "rules"), narration,
-                        tuple(intent_from(i) for i in d.get("followups", ())), bool(d.get("reaction", False)))
+                        tuple(intent_from(i) for i in d.get("followups", ())), bool(d.get("reaction", False)),
+                        ChoiceUse(d["choice"]["decision_id"], d["choice"]["choice_id"]) if d.get("choice") else None,
+                        d.get("command", ""))
 
 
 def world_to(s: WorldState) -> J:
