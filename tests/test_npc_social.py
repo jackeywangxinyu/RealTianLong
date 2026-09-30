@@ -1,13 +1,16 @@
 """
-[INPUT]: 依赖 tianlong.agents 的 ScriptedPolicy / Situation / Choice / reply_act，tianlong.cognition 的 BeliefStore / candidates /
-         agenda（SocialCue / Obligation / Said），tianlong.kernel 的 Kernel / scene_percept，tianlong.persistence 的 codec 与双后端夹具，
-         tianlong.runtime.authority 的 WorldAuthority，tianlong.scenarios 的 build_wuliang
+[INPUT]: 依赖 tianlong.agents 的 ScriptedPolicy / Situation / Choice / reply_act / hush_chatter / SPEAK / CHATTER，tianlong.cognition 的
+         BeliefStore / candidates / agenda（SocialCue / Obligation / Said / REPLY_TTL），tianlong.kernel 的 Kernel / scene_percept，
+         tianlong.persistence 的 codec 与双后端夹具，tianlong.runtime 的 WorldAuthority / GameSession，tianlong.scenarios 的 build_wuliang
 [OUTPUT]: NPC 社交层验收：当面的闲话生成社交线索与回话义务、下一 tick 按性情 × 态度 × 言语行为回话（火爆且积怨者动手）、
           不知道的结构化提问回一句“不知道”并勾销、寻仇先叫阵（嘴硬/想走/不应才动手，服软则冷静的人饶过、火爆的人照打）、
           话多的人见礼一次后按冷却说笑、两个 NPC 不会没完没了地互相回话、见义出声、态度按言语与动手/救治/赠物确定性增减并
           经编解码与两个后端往返、建档把自己人写进心里、混战里挤掉了“谁动的手”仍去搜出解药救治同伴、守卫一次闯入只动一次手；
-          一切闲话的 index 都指向 WAIT（只认下标的学习层看到的是等待）
+          一切闲话的 index 都指向 WAIT（只认下标的学习层看到的是等待）；
+          评审回归：候选话题之外的问题知道就照实答（free 只带自己相信的命题）且不堵后面的问题、饶过服软者不随线索缓冲滚掉、
+          气已出了的仇家照样回话、每处每 tick 至多一句闲谈（Stage 与编排器同样经 hush_chatter 裁决）、见礼刷不出好感
 [POS]: tests 的主持层 NPC 社交：证伪“NPC 只会回答某某在哪”“一见面就动手”“不知道就永远沉默”“把中毒的同伴丢在一边”“守卫把人点住不放”
+       “知道也不答”“饶过了又平白动手”“仇报完了就装聋”“满堂人一齐开口”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -18,11 +21,11 @@ from dataclasses import replace
 
 import pytest
 
-from tianlong.agents.policies import ScriptedPolicy, Situation
-from tianlong.agents.policy_kit import SPEAK, Choice
+from tianlong.agents.policies import ScriptedPolicy, Situation, hush_chatter
+from tianlong.agents.policy_kit import CHATTER, SPEAK, Choice
 from tianlong.agents.tactics import reply_act
 from tianlong.cognition import BeliefStore, Candidate, candidates
-from tianlong.cognition.agenda import Obligation, Said, SocialCue
+from tianlong.cognition.agenda import REPLY_TTL, Obligation, Said, SocialCue
 from tianlong.core import (
     Entity,
     Fact,
@@ -91,13 +94,18 @@ class Stage:
     def decide(self, agent: str) -> tuple[Choice, Candidate, Situation]:
         sit = self.situation(agent)
         choice = self.policy.choose(sit)
-        return choice, choice.chosen(sit.candidates), sit
+        return choice, choice.chosen(sit.candidates, sit.beliefs), sit
 
     def step(self, **acts: Candidate | tuple[Candidate, str]):
-        """acts：指定角色本 tick 的行动（可附原话/姿态）；没指定的 NPC 按脚本策略，主角原地等待。"""
+        """acts：指定角色本 tick 的行动（可附原话/姿态）；没指定的 NPC 按脚本策略，主角原地等待。
+        与编排器一样，每处每 tick 至多留一句闲谈（hush_chatter），其余按捺住、原地等待。"""
+        decided = {a: self.decide(a) for a, prof in sorted(self.profiles.items()) if a not in acts and not prof.is_player}
+        hushed = hush_chatter(self.now, {a: (self.stores[a].location_of(a), c.tag, cand)
+                                         for a, (c, cand, _) in decided.items()})
         intents = []
-        for a, prof in sorted(self.profiles.items()):
-            spec = acts.get(a) or (Candidate(Op.WAIT) if prof.is_player else self.decide(a)[1])
+        for a in sorted(self.profiles):
+            npc = Candidate(Op.WAIT) if a not in decided or a in hushed else decided[a][1]
+            spec = acts.get(a) or npc
             cand, words = spec if isinstance(spec, tuple) else (spec, None)
             self.log.append((self.now, a, cand))
             intents.append(cand.to_intent(make_id("int", a, self.state.version), a, self.state.version, words))
@@ -120,10 +128,10 @@ def _say(target: str, social: Social, words: str = "……", op: Op = Op.TELL, t
     return Candidate(op, target, topic=topic, social=social), words
 
 
-def _free(choice: Choice, sit: Situation, target: str, social: Social) -> None:
-    """闲话：候选之外、不带命题，index 指向 WAIT——只认下标的学习层看到的是等待。"""
+def _free(choice: Choice, sit: Situation, target: str, social: Social, tag: str = SPEAK) -> None:
+    """闲话：候选之外、不带命题，index 指向 WAIT——只认下标的学习层看到的是等待。自己找话说的标 CHATTER，其余标 SPEAK。"""
     assert choice.free == Candidate(Op.TELL, target, social=social), choice
-    assert sit.candidates[choice.index].op == Op.WAIT and choice.tag == SPEAK
+    assert sit.candidates[choice.index].op == Op.WAIT and choice.tag == tag
     assert choice.chosen(sit.candidates) == choice.free
 
 
@@ -300,7 +308,7 @@ def test_hot_tempered_npc_may_strike_a_submissive_target_anyway():
 def test_chatty_npc_greets_once_then_remarks_with_a_cooldown():
     st = Stage(_world(), _cast(npc=Profile("npc", "弟子", "x", chatty=1.0), maid=Profile("maid", "宾客", "x")))
     choice, _, sit = st.decide("npc")
-    _free(choice, sit, "hero", Social.GREET)
+    _free(choice, sit, "hero", Social.GREET, CHATTER)
     for _ in range(13):
         st.step()
     talk = [(t, c.social) for t, a, c in st.log if a == "npc" and c.op == Op.TELL]
@@ -383,6 +391,7 @@ def test_social_state_round_trips_through_the_codec():
     st.step(hero=(Candidate(Op.WAIT, social=Social.SUBMIT), "磕头"))
     npc = st.stores["npc"]
     assert npc.cues and npc.said and npc.attitudes and npc.company and npc.allies == ("pal",)
+    assert npc.yielded == {"hero": T0 + 1}
     wire = lambda x: json.loads(json.dumps(x, ensure_ascii=False))  # noqa: E731
     assert all(codec.cue_from(wire(codec.cue_to(c))) == c for c in npc.cues)
     assert all(codec.said_from(wire(codec.said_to(s))) == s for s in npc.said)
@@ -410,6 +419,7 @@ def test_social_state_persists_on_both_backends(store):  # noqa: F811
     guard = guard.revise_all([Percept(head.clock, Modality.SPEECH, insult, (), (), (), "player"),
                               Percept(head.clock, Modality.SIGHT, kneel), look])[0]
     assert guard.cues and guard.attitude("player") == -2 and guard.obligations[0].kind == "reply"
+    assert guard.yielded == {"player": head.clock}, "当众作揖服软：记进 yielded"
     store.commit(CommitBatch(auth.ref, head.version, head.stamp(head.version + 1, head.clock + 1), (), (),
                              {"guard": guard}, ()))
     assert store.beliefs(auth.ref, "guard") == guard
@@ -511,3 +521,171 @@ def test_decision_graph_passes_the_player_and_checkpoints_the_social_act():
     snap = orch.npc_graph.get_state({"configurable": {"thread_id": Orchestrator.thread_id(port)}})
     assert snap.values["chosen"].social is Social.GREET, "检查点读回来的言语行为仍是 Social，而不是被拦下的字符串"
     assert auth.settle([d.intent]).events[0].outcome == Outcome.SUCCESS
+
+
+# ============================================================
+#  评审回归：答话不在候选里、服软被挤出线索、气已出了就不理人、闲谈扎堆、见礼刷好感
+# ============================================================
+
+ASK_CUP = Fact(Proposition.rel("cup", Rel.AT, None), True)
+CUP_IN_HALL = Fact(Proposition.rel("cup", Rel.AT, "hall"), True)
+
+
+def test_known_answer_outside_the_candidate_topics_is_told_and_later_questions_still_get_answers():
+    """没有目标的人，候选话题里没有茶碗：知道就照实答（free 带上自己相信的命题，index 仍指向 WAIT），也不堵住后面的问题。"""
+    st = Stage(_world(), _cast())
+    st.step(hero=_say("npc", Social.EXPLAIN, "茶碗在哪？", Op.ASK, ASK_CUP))
+    choice, cand, sit = st.decide("npc")
+    assert not any(c.op == Op.TELL and c.topic == CUP_IN_HALL for c in sit.candidates), "前提：这句答话不在候选里"
+    assert cand == Candidate(Op.TELL, "hero", topic=CUP_IN_HALL) and choice.free == cand and choice.tag == SPEAK
+    assert sit.candidates[choice.index].op == Op.WAIT, "只认下标的学习层照旧看到等待"
+    st.step(hero=_say("npc", Social.EXPLAIN, "马五德在哪？", Op.ASK, Fact(Proposition.rel("maid", Rel.AT, None), True)))
+    st.step()
+    npc = st.stores["npc"]
+    assert not npc.obligations, "两个问题都答了"
+    told = {s.fact for s in npc.said if s.listener == "hero"}
+    assert {CUP_IN_HALL, Fact(Proposition.rel("maid", Rel.AT, "hall"), True)} <= told
+    heard = [ep.event.topic for ep in st.stores["hero"].episodes if ep.modality == Modality.SPEECH]
+    assert CUP_IN_HALL in heard, "答话是真正说出口的言语：问话的人听到了这个说法"
+
+
+def test_free_answer_is_tried_only_while_the_question_is_fresh():
+    """只认下标的消费者把 free 答话当作等待（话没说出口，问题也没勾销）：只在 REPLY_TTL 内尝试，示范者不会一直干等。"""
+    st = Stage(_world(), _cast())
+    st.step(hero=_say("npc", Social.EXPLAIN, "茶碗在哪？", Op.ASK, ASK_CUP))
+    tries = 0
+    for _ in range(REPLY_TTL + 3):
+        choice, _, sit = st.decide("npc")
+        tries += choice.free is not None
+        st.step(npc=sit.candidates[choice.index])
+    assert tries == REPLY_TTL
+
+
+def test_free_line_may_carry_only_a_claim_the_speaker_believes():
+    sit = Stage(_world(), _cast()).situation("npc")
+    b = sit.beliefs
+    ok = Choice(0, "如实相告", SPEAK, free=Candidate(Op.TELL, "hero", topic=CUP_IN_HALL))
+    assert ok.chosen(sit.candidates, b) == ok.free
+    for bad in (Candidate(Op.TELL, "hero", topic=Fact(Proposition.rel("cup", Rel.AT, "yard"), True)),   # 自己不信的
+                Candidate(Op.TELL, "hero", topic=Fact(CUP_IN_HALL.prop, False)),                       # 否定的说法
+                Candidate(Op.TELL, "hero", topic=ASK_CUP),                                             # 没有答案
+                Candidate(Op.ASK, "hero", topic=ASK_JADE)):                                            # 问话永不带命题
+        with pytest.raises(ValueError):
+            Choice(0, "", SPEAK, free=bad).chosen(sit.candidates, b)
+    with pytest.raises(ValueError):
+        ok.chosen(sit.candidates)        # 没有说话者的认知可对照：不放行
+
+
+@pytest.mark.parametrize("flush", ["bystander_talk", "public_gestures"])
+def test_a_spared_target_stays_spared_when_the_cue_buffer_rolls_over(flush):
+    """饶过服软的人是记在心里的事：闲谈（别人之间）或他自己的一串姿态把线索缓冲挤满，也不会平白动手。"""
+    st = Stage(_world(), _cast(npc=_foe(temper=-0.5)))
+    st.step(hero=(Candidate(Op.WAIT, social=Social.SUBMIT), "跪地求饶"))
+    for _ in range(3):
+        st.step()
+    assert (Op.TELL, "hero", Social.TAUNT) in st.acts_of("npc"), "服了软：挖苦一句便罢手"
+    for i in range(6):
+        st.step(hero=_say("maid", Social.PRAISE, f"第{i}句") if flush == "bystander_talk"
+                else (Candidate(Op.WAIT), f"端起茶碗喝了第{i}口"))
+        st.step(hero=(Candidate(Op.WAIT), f"又喝了第{i}口") if flush == "public_gestures" else Candidate(Op.WAIT))
+    assert flush == "bystander_talk" or not any(c.social == Social.SUBMIT for c in st.stores["npc"].cues), \
+        "前提：服软的那条线索已被挤出缓冲"
+    assert (Op.ATTACK, "hero", None) not in st.acts_of("npc") and not st.state.attr("hero", "wounded")
+    assert st.stores["npc"].yielded == {"hero": T0}, "谁在何时服过软：按人记下，不随线索缓冲滚掉"
+
+
+def test_bystander_talk_is_evicted_before_cues_aimed_at_me():
+    st = Stage(_world(), _cast())
+    st.step(hero=_say("npc", Social.APOLOGIZE, "得罪了"), npc=Candidate(Op.WAIT))
+    for i in range(10):
+        st.step(hero=_say("maid", Social.REMARK, f"第{i}句"), npc=Candidate(Op.WAIT), maid=Candidate(Op.WAIT))
+    cues = st.stores["npc"].cues
+    assert len(cues) == 8 and cues[0].social == Social.APOLOGIZE and cues[-1].utterance == "第9句"
+
+
+def test_foe_whose_grudge_is_settled_still_answers():
+    """寻仇已了（仇人已受伤）：先礼后兵不再接话，回话照旧——被骂回嘴，被骂急了的火爆脾气照样动手。"""
+    st = Stage(_world(hero={"wounded": True}), _cast(npc=_foe()))
+    st.step(hero=_say("npc", Social.INSULT, "蠢材"))
+    choice, _, sit = st.decide("npc")
+    _free(choice, sit, "hero", Social.THREATEN)
+    st.step()
+    assert not st.stores["npc"].obligations, "回了话，义务勾销"
+    st.step(hero=_say("npc", Social.GREET, "兄台好"))
+    choice, _, sit = st.decide("npc")
+    _free(choice, sit, "hero", Social.REMARK)       # 仇家的见礼：不冷不热地应一句，不回礼
+    st = Stage(_world(hero={"wounded": True}), _cast(npc=_foe(temper=1.0)))
+    st.step(hero=_say("npc", Social.INSULT, "蠢材"))
+    assert st.stores["npc"].attitude("hero") <= -2
+    _, cand, _ = st.decide("npc")
+    assert cand == Candidate(Op.ATTACK, "hero"), "火爆且积怨已深：被骂即动手"
+
+
+def test_chatty_npcs_take_turns_instead_of_talking_at_once():
+    """两个话多的人同处一室：每 tick 至多一句闲谈（确定性地选一人），别人刚开过口也不接着插嘴——但两人都轮得到。"""
+    cast = _cast(npc=Profile("npc", "弟子", "x", chatty=1.0), maid=Profile("maid", "宾客", "x", chatty=1.0))
+    runs = []
+    for _ in range(2):
+        st = Stage(_world(), cast)
+        for _ in range(15):
+            st.step()
+        runs.append([(t, a, c.social) for t, a, c in st.log if a != "hero" and c.op == Op.TELL])
+    talk = runs[0]
+    assert runs[0] == runs[1], "闸门确定"
+    ticks = [t for t, _, _ in talk]
+    assert len(ticks) == len(set(ticks)), f"每 tick 至多一句：{talk}"
+    assert all(b - a > 1 for a, b in zip(ticks, ticks[1:], strict=False)), f"不一串接一串：{talk}"
+    assert {a for _, a, _ in talk} == {"npc", "maid"} and [s for _, _, s in talk].count(Social.GREET) == 2
+
+
+def test_chatter_yields_the_floor_to_a_prompted_line():
+    st = Stage(_world(), _cast(npc=_foe(), maid=Profile("maid", "宾客", "x", chatty=1.0)))
+    st.step()
+    assert st.acts_of("npc") == [(Op.TELL, "hero", Social.CHALLENGE)]
+    assert st.acts_of("maid") == [(Op.WAIT, None, None)], "有人叫阵：旁人不在这时找话寒暄"
+
+
+def test_hush_chatter_keeps_one_line_per_place_regardless_of_order():
+    chat = lambda who: Candidate(Op.TELL, who, social=Social.REMARK)  # noqa: E731
+    decided = {"a": ("hall", CHATTER, chat("p")), "b": ("hall", CHATTER, chat("p")), "c": ("hall", CHATTER, chat("p")),
+               "d": ("yard", CHATTER, chat("p")), "e": ("yard", "", Candidate(Op.WAIT))}
+    hushed = hush_chatter(T0, decided)
+    assert len(hushed & {"a", "b", "c"}) == 2 and "d" not in hushed and "e" not in hushed
+    assert hush_chatter(T0, dict(reversed(list(decided.items())))) == hushed, "与扇出顺序无关"
+    decided["e"] = ("yard", SPEAK, Candidate(Op.TELL, "p", social=Social.CHALLENGE))
+    assert "d" in hush_chatter(T0, decided), "同处有人正经开口：闲谈让出话头"
+
+
+def test_repeated_greetings_get_small_talk_and_do_not_farm_goodwill():
+    st = Stage(_world(), _cast())
+    for _ in range(3):
+        st.step(hero=_say("npc", Social.GREET, "兄台好"))
+        st.step()
+    replies = [s for op, _, s in st.acts_of("npc") if op == Op.TELL]
+    assert replies == [Social.GREET, Social.REMARK, Social.REMARK], "见礼只回一次，此后寒暄"
+    assert st.stores["npc"].attitude("hero") == 1, "见礼只把生分暖成点头之交"
+    st = Stage(_world(), _cast())
+    st.step(hero=_say("npc", Social.INSULT), npc=Candidate(Op.WAIT))
+    for _ in range(2):
+        st.step(hero=_say("npc", Social.GREET), npc=Candidate(Op.WAIT))
+    assert st.stores["npc"].attitude("hero") == -2, "见礼抹不掉积怨：要赔罪才行"
+
+
+def test_wuliang_opening_has_at_most_one_spontaneous_remark_per_tick():
+    """实测：开场第二个 tick 左子穆、马五德一齐见礼，龚光杰同时讥讽——三句话挤在一起。"""
+    pytest.importorskip("langgraph")
+    pytest.importorskip("qdrant_client")
+    from tianlong.runtime.session import GameSession
+    from tianlong.scenarios import build_wuliang
+    chat = {Social.GREET, Social.REMARK, Social.JOKE}
+    for seed in (1, 7):
+        s = GameSession(build_wuliang(seed))
+        s.intro()
+        events = [e for _ in range(12) for e in s.turn("等待").events]
+        lines = [e for e in events if e.actor != "duanyu" and e.op in (Op.TELL, Op.ASK)]
+        for tick, place in sorted({(e.tick, e.place or "") for e in lines}):
+            now = [e for e in lines if e.tick == tick and (e.place or "") == place]
+            said = [(e.actor, e.intent.social) for e in now]
+            small = [e for e in now if e.intent.target == "duanyu" and e.intent.topic is None and e.intent.social in chat]
+            assert len(small) <= 1, (seed, tick, said)
+            assert not small or len(now) == 1, f"有人正经开口时不寒暄：{seed, tick, said}"

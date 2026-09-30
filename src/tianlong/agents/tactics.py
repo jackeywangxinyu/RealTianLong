@@ -1,15 +1,17 @@
 """
 [INPUT]: 依赖 agents/policy_kit 的 PolicyKit / Situation / Choice / STALE，cognition/navigation 的 believed_place，
-         core 的 Op / Kind / Manner / Social / HOSTILE_SOCIAL / derive_seed，core/profiles 的 Goal / GoalKind；
+         cognition/agenda 的 SOFT_SOCIAL，core 的 Op / Kind / Manner / Social / HOSTILE_SOCIAL / derive_seed，
+         core/profiles 的 Goal / GoalKind；
          下落不明时借 PolicyKit._explore 凭个人勘察记录去找，开口借 PolicyKit._say / _last_spoke
 [OUTPUT]: 对外提供 MartialTactics（江湖行为积木：自救、还手、救治盟友、寻仇（先礼后兵）、守地（一次闯入只动一次手）、灭口、护人、
-          见义出声）、reply_act()（按性情 × 态度 × 对方言语行为选回话的言语行为）、HOT / CALM / SOFT_SOCIAL / DEFIANT_SOCIAL /
-          PARLEY_GRACE / PARLEY_LIMIT
+          见义出声）、reply_act()（按性情 × 态度 × 对方言语行为选回话的言语行为）、HOT / CALM / DEFIANT_SOCIAL /
+          PARLEY_GRACE / PARLEY_LIMIT，并再导出 cognition/agenda 的 SOFT_SOCIAL
 [POS]: agents 的武斗与人情层。每个方法都是“若满足条件则在候选集中选一项（或说一句只有言语行为的话），否则返回 None”，
        由 ScriptedPolicy 按优先级串联。判断全部来自信念与社交状态：谁受伤中毒、谁动过手、解药在谁身上、谁对我说过什么、
        我对谁怀着怎样的态度、谁自何时起在我眼前，都是角色自己看见、听见或经历过的——没看见就不知道。
        开口只是修辞（Choice.free，index 指向 WAIT）：学习层只认下标，看到的是等待；为此“叫阵之后多久动手”另有照面时长兜底，
-       话没说出口（被当作等待）也不会让寻仇永远停在嘴上
+       话没说出口（被当作等待）也不会让寻仇永远停在嘴上。“他服过软、且饶他”以认知里持久的 yielded 为准，
+       不从 8 条的线索缓冲里重新推断——旁人闲谈把那条线索挤掉，也不会平白动手
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -18,13 +20,13 @@ from __future__ import annotations
 import random
 
 from tianlong.agents.policy_kit import STALE, Choice, PolicyKit, Situation
+from tianlong.cognition.agenda import SOFT_SOCIAL
 from tianlong.cognition.navigation import believed_place
 from tianlong.core import HOSTILE_SOCIAL, Kind, Manner, Modality, Op, Social, derive_seed
 from tianlong.core.profiles import Goal, GoalKind
 
 HOT = 0.3            # 脾气 ≥ 此值：受不得激
 CALM = -0.3          # 脾气 ≤ 此值：能忍
-SOFT_SOCIAL = frozenset({Social.SUBMIT, Social.APOLOGIZE, Social.PLEAD})     # 服软
 DEFIANT_SOCIAL = HOSTILE_SOCIAL | {Social.REFUSE}                           # 嘴硬
 PARLEY_GRACE = 2     # 叫阵之后对方几个 tick 不应，便动手
 PARLEY_LIMIT = 3     # 照面这么久还没叫成阵（话被当作等待、或一直腾不出空），也不再多等
@@ -37,8 +39,9 @@ WARN_EVERY = 5       # 守卫喝令离开的间隔
 
 
 def reply_act(incoming: Social | None, *, temper: float = 0.0, attitude: int = 0, hostile: bool = False,
-              question: bool = False, chatty: float = 0.0) -> Social:
-    """确定性的回话表。hostile：我对此人怀着寻仇的目标；question：对方问的是一句不带命题的话。"""
+              question: bool = False, chatty: float = 0.0, greeted: bool = False) -> Social:
+    """确定性的回话表。hostile：我对此人怀着寻仇的目标；question：对方问的是一句不带命题的话；
+    greeted：我已向此人见过礼——再被招呼就寒暄一句，不再郑重回礼。"""
     hot, calm = temper >= HOT, temper <= CALM
     cold = hostile or attitude <= -2
     if incoming in HOSTILE_SOCIAL:
@@ -63,7 +66,8 @@ def reply_act(incoming: Social | None, *, temper: float = 0.0, attitude: int = 0
             incoming, Social.REFUSE if question and hot else Social.REMARK)  # type: ignore[arg-type]
     warm = {
         Social.THANK: Social.AGREE, Social.PRAISE: Social.JOKE if chatty >= 0.5 else Social.AGREE,
-        Social.GREET: Social.GREET, Social.COMFORT: Social.AGREE, Social.FAREWELL: Social.FAREWELL,
+        Social.GREET: (Social.JOKE if chatty >= 0.5 else Social.REMARK) if greeted else Social.GREET,
+        Social.COMFORT: Social.AGREE, Social.FAREWELL: Social.FAREWELL,
         Social.JOKE: Social.JOKE if chatty >= 0.5 else Social.REMARK, Social.AGREE: Social.REMARK,
         Social.REFUSE: Social.COMMAND if hot else Social.REMARK, Social.EXPLAIN: Social.AGREE,
     }
@@ -156,7 +160,8 @@ class MartialTactics(PolicyKit):
     def _parley(self, sit: Situation, foe: str) -> tuple[bool, Choice | None]:
         """先礼后兵：(是否动手, 不动手时说的话或 None)。
         头一回照面先叫阵；对方嘴硬、想走、或叫阵后 PARLEY_GRACE 个 tick 不应才动手；服软则火爆的人按确定性的机会照打不误，
-        其余挖苦一句便罢手（态度坏到 -2 以下另当别论）。叫阵只叫一次：再照面（他跑过一回）就不必多言。"""
+        其余挖苦一句便罢手（态度坏到 -2 以下另当别论）。叫阵只叫一次：再照面（他跑过一回）就不必多言。
+        “服过软”取认知里持久的 yielded（与线索里残存的服软取较新者）：线索缓冲滚掉了那一条，饶过的人照旧饶过。"""
         b, me, prof = sit.beliefs, sit.agent, sit.profile
         name = self._name(b, foe)
         if self._status(b, me, "subdued") or b.attitude(foe) <= -2:
@@ -169,14 +174,13 @@ class MartialTactics(PolicyKit):
             return True, None                                   # 嘴硬
         if any(c.social == Social.FAREWELL for c in said) or self._tried_to_leave(sit, foe, start):
             return True, None                                   # 想走
-        soft = [c for c in said if c.social in SOFT_SOCIAL]
-        if soft:
-            last = soft[-1]
-            roll = random.Random(derive_seed("parley", me, foe, last.tick)).random()
+        soft = max([c.tick for c in said if c.social in SOFT_SOCIAL] + [b.yielded.get(foe, -1)])
+        if soft >= start:
+            roll = random.Random(derive_seed("parley", me, foe, soft)).random()
             if prof.temper >= HOT and roll < prof.temper:
                 return True, None                               # 火爆脾气：服软也不饶
             mocked = self._last_spoke(sit, foe, (Social.TAUNT,))
-            if mocked is None or mocked < last.tick:
+            if mocked is None or mocked < soft:
                 return False, self._say(sit, foe, Social.TAUNT, f"{name}服了软，挖苦他几句")
             return False, None                                  # 且饶他这一回
         if challenged is None:
