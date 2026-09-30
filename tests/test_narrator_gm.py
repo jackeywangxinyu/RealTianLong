@@ -1,10 +1,11 @@
 """
-[INPUT]: 依赖 tianlong.language 的 narrator / render / scene / llm（ScriptedLLM），tianlong.runtime.authority（真实内核产出的玩家感知），
+[INPUT]: 依赖 tianlong.language 的 narrator / render / quotes / scene / llm（ScriptedLLM），tianlong.runtime.authority（真实内核产出的玩家感知），
          tianlong.scenarios 的 build_wuliang
 [OUTPUT]: 主持人之声验收：流式逐句过闸门且按序、尽早交付；点名清单外实体的句子被丢而其余照常流出；替玩家开口（引语与念头）、
           NPC 台词点名许可之外的人、凭空多出的说话者、台词里的状态升级各被拦下；丢满两句或一句未过即补模板；模型不可用（含中途失败）
           保留已交付的并补模板；模板把 NPC 言语写成带言语行为的台词；提示词带最近正文与台词要素且没有钟点数字；首句交付早于整段完成；
-          分句器处理引号、省略号与流的边界；合法的道谢、挑衅与如实的位置说法不被误伤
+          分句器处理引号（含错配的收引号）、省略号、较长的后置归属与流的边界；合法的道谢、挑衅与如实的位置说法不被误伤；
+          漏掉的台词与内核结果补上模板行、传闻说成事实在流出前就丢、只看见的耳语不算开口、场景秘密被拦、写够长即停、回退的模板行以句号收尾
 [POS]: tests 的主持层叙述；证伪“流式叙述会把没过闸门的句子交给玩家”“主持人替玩家说话”“NPC 说出他不该知道的名字”
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -17,10 +18,11 @@ import time
 
 import pytest
 
-from tianlong.core import Intent, Manner, Op, Social
+from tianlong.core import Fact, Intent, Manner, Op, Proposition, Rel, Social
 from tianlong.language.llm import LLMUnavailable, ScriptedLLM
-from tianlong.language.narrator import SOCIAL_PHRASES, Narrator, render_voice
-from tianlong.language.render import RenderStatus, build_plan, check, check_quotes, sentence_ends
+from tianlong.language.narrator import MAX_CHARS, SOCIAL_PHRASES, Narrator, render_voice
+from tianlong.language.quotes import check_quotes
+from tianlong.language.render import RenderStatus, build_plan, check, sentence_ends
 from tianlong.language.scene import SceneBrief, VoiceLine
 from tianlong.persistence import InMemoryWorldStore
 from tianlong.runtime.authority import WorldAuthority
@@ -80,6 +82,11 @@ def _template(view, brief=BRIEF, **kw) -> str:
     return _narrator().narrate_scene("duanyu", percepts, names, brief=brief, show_scene=True, known=KNOWN, **kw).text
 
 
+def _prose(text: str) -> str:
+    """回退给玩家的模板行读起来是句子：没有句末标点或收引号的补“。”。"""
+    return "\n".join(x if x.endswith(("。", "！", "？", "”", "」")) else x + "。" for x in text.splitlines())
+
+
 # ============================================================
 #  模板：NPC 的言语写成带言语行为的台词
 # ============================================================
@@ -115,9 +122,9 @@ def test_streaming_delivers_passing_sentences_in_order(view):
 
 
 def test_sentence_naming_unlisted_entity_is_dropped_and_rest_streams(view):
-    r, got = _run(view, _script(G1 + B_ENTITY + G3, chunk=5))
-    assert got == [G1, G3]
-    assert r.status == RenderStatus.LLM and {v.kind for v in r.violations} == {"entity"}
+    r, got = _run(view, _script(G1 + B_ENTITY + G2, chunk=5))
+    assert got == [G1, G2]
+    assert r.status == RenderStatus.LLM and {v.kind for v in r.violations} == {"entity"} and r.dropped == 1
 
 
 def test_puppeting_quote_is_dropped(view):
@@ -131,8 +138,8 @@ def test_puppeting_quote_is_dropped(view):
 def test_npc_quote_naming_outside_may_name_is_dropped(view):
     assert check(B_NAME, build_plan("duanyu", view[0], view[1], True, aliases=SC.aliases), KNOWN) == (), \
         "钟灵就在殿上，叙述闸门放行——拦下它的是台词闸门"
-    r, got = _run(view, _script(G1 + B_NAME + G3))
-    assert got == [G1, G3]
+    r, got = _run(view, _script(G1 + B_NAME + G2))
+    assert got == [G1, G2]
     assert [v for v in r.violations if v.kind == "quote_entity"][0].detail == "龚光杰:钟灵"
 
 
@@ -140,14 +147,14 @@ def test_two_drops_fall_back_to_template_after_streamed_prose(view):
     r, got = _run(view, _script(G1 + B_ENTITY + B_PUPPET + G3))
     assert r.status == RenderStatus.GATED_FALLBACK
     assert got[0] == G1 and G3 not in r.text, "丢满两句即停，不再读流"
-    tail = _template(view)
-    assert r.text == G1 + "\n" + tail, "已交付过正文的，换行后只补清单与台词"
+    tail = _prose(_template(view))
+    assert r.text == G1 + "\n" + tail, "已交付过正文的，换行后只补清单与台词（读起来是句子）"
     assert {v.kind for v in r.violations} == {"entity", "puppet"}
 
 
 def test_nothing_accepted_falls_back_to_full_template(view):
     r, got = _run(view, _script(B_ENTITY))
-    assert r.status == RenderStatus.GATED_FALLBACK and r.text == _template(view) and got == [r.text]
+    assert r.status == RenderStatus.GATED_FALLBACK and r.text == _prose(_template(view)) and got == [r.text]
     r, _ = _run(view, _script("   "))
     assert r.status == RenderStatus.GATED_FALLBACK and [v.kind for v in r.violations] == ["empty"]
 
@@ -156,7 +163,7 @@ def test_llm_unavailable_falls_back_to_template(view):
     def boom(prompt, system, schema):
         raise LLMUnavailable("offline")
     r, got = _run(view, ScriptedLLM(boom))
-    assert r.status == RenderStatus.LLM_UNAVAILABLE and r.text == _template(view) and got == [r.text]
+    assert r.status == RenderStatus.LLM_UNAVAILABLE and r.text == _prose(_template(view)) and got == [r.text]
 
 
 class _Flaky:
@@ -172,7 +179,7 @@ class _Flaky:
 def test_llm_failing_mid_stream_keeps_delivered_and_appends_template(view):
     r, got = _run(view, _Flaky())
     assert r.status == RenderStatus.LLM_UNAVAILABLE
-    assert got[0] == G1 and r.text == G1 + "\n" + _template(view), "半句话不交付"
+    assert got[0] == G1 and r.text == G1 + "\n" + _prose(_template(view)), "半句话不交付"
 
 
 class _GenerateOnly:
@@ -186,8 +193,8 @@ class _GenerateOnly:
 
 
 def test_generate_only_client_is_gated_sentence_by_sentence(view):
-    r, got = _run(view, _GenerateOnly(G1 + B_ENTITY + G3))
-    assert got == [G1, G3] and r.status == RenderStatus.LLM
+    r, got = _run(view, _GenerateOnly(G1 + B_ENTITY + G2))
+    assert got == [G1, G2] and r.status == RenderStatus.LLM
 
 
 def test_voice_lines_are_sourced_even_without_a_matching_percept(view):
@@ -205,9 +212,121 @@ def test_voice_lines_are_sourced_even_without_a_matching_percept(view):
     assert plain.splitlines()[-1] == render_voice(comfort), "清单里对不上的台词补在最后"
 
 
-def test_clock_label_in_prose_is_dropped(view):
-    r, got = _run(view, _script(G1 + "此时已是第1日 18:27。" + G3))
-    assert got == [G1, G3] and {v.kind for v in r.violations} == {"clock"}
+@pytest.mark.parametrize("clock", ["此时已是第1日 18:27。", "眼看已近19点20分。", "此刻已是晚上七点二十分。", "不觉已是戌时七点整。"])
+def test_clock_label_in_prose_is_dropped(view, clock):
+    r, got = _run(view, _script(G1 + clock + G2))
+    assert got == [G1, G2] and {v.kind for v in r.violations} == {"clock"}
+
+
+def test_everyday_words_with_dian_are_not_clocks(view):
+    text = "你心里有一点点发怵，差一点笑出声来，一点半点也不敢怠慢。"
+    r, got = _run(view, _script(G1 + text + G2))
+    assert got == [G1, text, G2] and r.violations == ()
+
+
+def test_stream_stops_once_the_passage_is_long_enough(view):
+    r, got = _run(view, _script(G2 + "大殿里又静了下来。" * 160, chunk=20))
+    assert r.status == RenderStatus.LLM and MAX_CHARS <= len(r.text) < MAX_CHARS + 20, "啰嗦的模型也有个头"
+
+
+# ============================================================
+#  覆盖：台词与内核结果没讲到，补上模板行，状态照实记下
+# ============================================================
+
+
+def _settle(*intents, auth=None):
+    """在无量山上（默认全新的一局）结算一个 tick，返回段誉的感知与名称表。"""
+    auth = auth or WorldAuthority.found(InMemoryWorldStore(), SC)
+    v = auth.head().version
+    s = auth.settle([Intent(f"gm{next(_ids)}", *x[:5], x[5] if len(x) > 5 else None, v, *x[6:]) for x in intents])
+    return [o.percept for o in s.observations_of("duanyu")], auth.store.beliefs(auth.ref, "duanyu").entities
+
+
+@pytest.mark.parametrize("stream", [G1 + G3, G1 + "龚光杰霍地站起，冷笑道：“你笑什么？钟灵那丫头也护不了你！”" + G3])
+def test_npc_line_left_out_or_dropped_is_appended(view, stream):
+    r, got = _run(view, _script(stream))
+    assert got[:2] == [G1, G3] and got[-1] == "\n" + render_voice(GONG), "漏掉（或被丢）的台词补在最后"
+    assert r.status == RenderStatus.GATED_FALLBACK and "omitted" in {v.kind for v in r.violations}
+    r, got = _run(view, _script(G1 + G2 + G3))
+    assert got == [G1, G2, G3] and r.status == RenderStatus.LLM, "讲到了就不补"
+
+
+def test_kernel_outcome_left_out_is_appended():
+    view = _settle(("duanyu", Op.ATTACK, "gongguangjie", None, Manner.NORMAL))
+    failed = "你猛地向龚光杰出手，但没有成功（被对方挡了开去）"
+    assert failed in build_plan("duanyu", view[0], view[1], aliases=SC.aliases).lines
+    calm = "满堂目光都落在你身上，谁也没有作声。"
+    for stream in (calm, "你猛地向龚光杰出手，他侧身一让，你便被震得受了伤。" + calm):
+        r, got = _run(view, _script(stream), SceneBrief())
+        assert got == [calm, "\n" + failed + "。"], "玩家自己的出手落空没讲到：补上内核的那一行"
+        assert r.status == RenderStatus.GATED_FALLBACK and "omitted" in {v.kind for v in r.violations}
+    r, got = _run(view, _script("你一掌拍向龚光杰，却被他挡了开去。" + calm), SceneBrief())
+    assert r.status == RenderStatus.LLM and len(got) == 2
+
+
+def test_fallback_template_lines_read_as_sentences(view):
+    r, _ = _run(view, _script(B_ENTITY))
+    rows = r.text.splitlines()
+    assert rows[0] == render_voice(GONG), "以收引号收尾的台词不再补标点"
+    assert rows[1].startswith("你看到：") and rows[1].endswith("长剑在兵器架上。"), "清单行补上句号"
+    assert _template(view).splitlines()[1].endswith("长剑在兵器架上"), "没有模型时的模板照旧"
+
+
+def test_fallback_tail_skips_voiced_lines_and_tells_the_time_in_words(view):
+    r, got = _run(view, _script(G1 + G2 + B_ENTITY + B_PUPPET))
+    assert r.status == RenderStatus.GATED_FALLBACK and r.text.count("比划比划") == 1, "已经说出口的台词不再重复"
+    r, got = _run(view, _script(G1 + B_ENTITY + B_PUPPET), lapse="第1日 19:00")
+    assert "（不觉已是入夜戌时）" in r.text and not CLOCK.search(r.text), "补上的时辰也用文字"
+    r, got = _run(view, _script("不觉天色已晚，已是入夜戌时。" + B_ENTITY + B_PUPPET), lapse="第1日 19:00")
+    assert "不觉已是" not in r.text, "正文交代过时辰就不再补"
+
+
+@pytest.fixture(scope="module")
+def rumor():
+    """马五德告诉段誉“干光豪在剑湖宫后院”（其实干光豪就在大殿）：段誉只闻其说。"""
+    told = Fact(Proposition.rel("ganguanghao", Rel.AT, "houyuan"))
+    view = _settle(("mawude", Op.TELL, "duanyu", None, Manner.NORMAL, told, None, Social.EXPLAIN))
+    line = VoiceLine("mawude", "马五德", "你", Op.TELL.value, Social.EXPLAIN, "干光豪在剑湖宫后院", None,
+                     may_name=frozenset({"马五德", "段誉", "干光豪", "剑湖宫后院", "后院"}))
+    return view, SceneBrief(lines=(line,))
+
+
+@pytest.mark.parametrize("fact", ["干光豪此刻正在后院。", "马五德朝后院努了努嘴。干光豪此刻就在后院。"])
+def test_hearsay_stated_as_fact_is_dropped_before_it_is_shown(rumor, fact):
+    view, brief = rumor
+    after = "你心头一动，望向通往后院的回廊。"
+    r, got = _run(view, _script(fact + after), brief)
+    assert not any("此刻正在后院" in g or "此刻就在后院" in g for g in got), "传闻说成事实：流出去之前就丢"
+    assert after in got and "hearsay" in {v.kind for v in r.violations}
+    assert got[-1].startswith("\n马五德") and "干光豪在剑湖宫后院" in got[-1], "补上带归属的那句话"
+
+
+def test_attributed_hearsay_still_streams(rumor):
+    view, brief = rumor
+    said = "马五德捋须道：“干光豪在剑湖宫后院。”"
+    r, got = _run(view, _script(said + "你心头一动，干光豪去后院做什么？"), brief)
+    assert got[0] == said and len(got) == 2 and r.status == RenderStatus.LLM
+
+
+def test_unheard_whisper_gets_no_words_and_keeps_its_own_line():
+    auth = WorldAuthority.found(InMemoryWorldStore(), SC)
+    whisper = ("gongguangjie", Op.TELL, "ganguanghao", None, Manner.CAREFUL, None, "待会儿看我收拾这书呆子", Social.REMARK)
+    percepts, seen = _settle(whisper, auth=auth)
+    plan = build_plan("duanyu", percepts, seen, aliases=SC.aliases)
+    assert "龚光杰" not in plan.speakers, "只看见在耳语、没听见内容的人不算开口"
+    found = check_quotes("龚光杰凑到干光豪耳边，低声道：“今夜就收拾这书呆子。”", SceneBrief(), plan, KNOWN)
+    assert ("voice", "龚光杰") in {(v.kind, v.detail) for v in found}, "没听见的话不许替他编出来"
+    heard, names = _settle(("gongguangjie", Op.TELL, "duanyu", None, Manner.NORMAL, None, TAUNT, Social.CHALLENGE), auth=auth)
+    text = _narrator().narrate_scene("duanyu", [*percepts, *heard], names, brief=BRIEF, known=KNOWN).text
+    assert "低声说了些什么" in text and text.count(TAUNT) == 1, "耳语那一行留着，台词只取代听见的那句"
+
+
+def test_scenario_secrets_are_not_spilled_by_the_narrator(view):
+    lovers = "干光豪与葛光佩暗暗交换了一个眼色，似已约好入夜后一同私奔，去投神农帮。"
+    got: list[str] = []
+    narrator = Narrator(_script(G2 + lovers + G3), SC.setting, SC.lore, SC.style, SC.aliases, SC.secrets)
+    r = narrator.narrate_scene("duanyu", view[0], view[1], brief=BRIEF, show_scene=True, known=KNOWN, on_text=got.append)
+    assert got == [G2, G3] and {v.kind for v in r.violations} == {"secret"}
 
 
 # ============================================================
@@ -274,9 +393,18 @@ def test_first_sentence_is_delivered_before_the_stream_ends(view):
     ("龚光杰道：“下场来！”满堂目光都落在你身上。", [11, 22]),
     ("满堂哗然……“好！”", [6, 10]),
     ("他问：“真的？！”\n你一怔", [9]),
+    ("龚光杰道：“下场来！\"钟灵一笑。满堂哗然。", [11, 16, 21]),               # 全角开、半角收：照样收
+    ("“告辞！”你一边拱手一边连声赔笑道。满堂哗然。", [18, 23]),              # 引语之后较长的归属小句
 ])
 def test_sentence_ends(text, ends):
     assert sentence_ends(text) == ends
+
+
+def test_mismatched_closing_quote_does_not_swallow_the_rest(view):
+    text = "龚光杰冷笑道：“你笑什么？有胆便下场来！\"钟灵在梁上咯咯一笑。满堂目光都落在你身上。"
+    r, got = _run(view, _script(text, chunk=5))
+    assert got == ["龚光杰冷笑道：“你笑什么？有胆便下场来！\"", "钟灵在梁上咯咯一笑。", "满堂目光都落在你身上。"]
+    assert r.status == RenderStatus.LLM and r.violations == ()
 
 
 def test_sentence_ends_waits_for_lookahead_in_a_stream():
@@ -319,6 +447,12 @@ THANKS = VoiceLine("zhongling", "钟灵", "你", Op.TELL.value, Social.THANK, No
     ("你身旁的钟灵笑道：“多谢你啦。”", (THANKS,)),
     ("是去是留，由你决定。", (GONG,)),
     ("你打算如何应对？此事须你自己拿定主意。", (GONG,)),
+    ("龚光杰霍地站起。“你笑什么？”", (GONG,)),                        # 句首引语沿用上一句的主语：正是说话的人
+    ("龚光杰拍了拍你的肩膀，笑道：“你笑什么？”", (GONG,)),               # 宾语位置的“你”不是说话者
+    ("龚光杰冷笑着说你笑什么。", (GONG,)),                             # 转述：说话者自己的话照样放行
+    ("你心中想必有些发怵。", (GONG,)),                                 # “想必”是揣测，不是替玩家起念头
+    ("说时迟，那时快，龚光杰已抢到你面前。", (GONG,)),                  # 成语里的“说”不是转述
+    ("龚光杰二话不说，拔剑出鞘。", (GONG,)),
 ])
 def test_legitimate_npc_dialogue_passes(plan, text, lines):
     brief = SceneBrief(lines=lines)
@@ -337,6 +471,24 @@ def test_legitimate_npc_dialogue_passes(plan, text, lines):
     ("他冷笑道：“左子穆也保不住你。”", "quote_entity", "?:左子穆"),
     ("龚光杰冷笑道：“你已中了毒。”", "quote_status", "龚光杰:poisoned:中了毒"),
     ("龚光杰喝道：马五德也救不了你。", "quote_entity", "龚光杰:马五德"),
+    # 句首引语紧跟在谁的动作之后，就是谁说的：没开口的人不许凭空多一句
+    ("左子穆脸色一沉。“光杰，退下！”", "voice", "左子穆"),
+    ("干光豪看了葛光佩一眼。“今晚子时，老地方。”", "voice", "干光豪"),
+    ("马五德打了个哈哈。“两位且慢动手。”", "voice", "马五德"),
+    # 替玩家开口：状语之后的“你”、较长的后置归属、转述，与更多起念头的说法
+    ("情急之下你脱口而出：“龚兄息怒，小弟绝无此意！”", "puppet", "龚兄息怒，小弟绝无此意！"),
+    ("此刻你忙道：“龚兄息怒，小弟这就告辞！”", "puppet", "龚兄息怒，小弟这就告辞！"),
+    ("慌乱中你连声道：“得罪了！”", "puppet", "得罪了！"),
+    ("“龚兄息怒，小弟这就告辞！”你一边拱手一边连声赔笑道。", "puppet", "龚兄息怒，小弟这就告辞！"),
+    ("你赔笑说小弟这就告辞。", "puppet", "小弟这就告辞"),
+    ("你连忙拱手向龚光杰赔罪，说自己只是一时失笑，绝无冒犯之意。", "puppet", "自己只是一时失笑，绝无冒犯之意"),
+    ("你在心中暗暗打定了主意，今日绝不下场。", "puppet", "你在心中暗暗打定了主意"),
+    ("你心里想着，这龚光杰好生无礼。", "puppet", "你心里想"),
+    ("你横下心来，转身便走。", "puppet", "你横下心"),
+    # 无引号的转述同样是台词：没开口的人不许说，开口的人不许越界点名
+    ("干光豪低声说今夜要带葛光佩走。", "voice", "干光豪"),
+    ("龚光杰冷笑着说你怀里那卷易经也救不了你。", "quote_entity", "龚光杰:易经"),
+    ("龚光杰冷笑着说钟灵那小丫头也护不了你。", "quote_entity", "龚光杰:钟灵"),
 ])
 def test_quote_gate_rejects(plan, text, kind, detail):
     found = check_quotes(text, SceneBrief(lines=(GONG, LING)), plan, KNOWN)
