@@ -244,7 +244,7 @@ class GameSession:
         self.parser = IntentParser(fast_llm or llm, aliases=scenario.aliases)
         self.interpreter = interpreter or Interpreter(fast_llm or llm, aliases=scenario.aliases, fallback=self.parser)
         self.pipeline = pipeline
-        self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style, scenario.aliases)
+        self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style, scenario.aliases, scenario.secrets)
         self._universe = frozenset(e.name for e in scenario.state.entities.values())  # 闸门拒绝用的名字全集
         self._friends = gm.companions(scenario.profiles[self.player])   # 有人对他们动手即打断等待
         self.speaker: Speaker = TemplateSpeaker()     # 决策图里从不调模型：NPC 的台词由主持人之声一并写出

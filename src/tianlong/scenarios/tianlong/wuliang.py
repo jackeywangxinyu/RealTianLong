@@ -2,7 +2,7 @@
 [INPUT]: 依赖 core 的实体/关系/时间/命题/感知类型，core/profiles 的 Goal / GoalKind / Profile，kernel/perception 的 make_percept / scene_percept，
          scenarios/base 的 Scenario / Ending，scenarios/tianlong/lore 的 SETTING / STYLE / LORE / ALIASES / HINTS / GUIDE / EPILOGUE_RIVER
 [OUTPUT]: 对外提供 build_wuliang()：天龙八部·无量山小范围世界（含每个角色的腔调/谈资/话多/脾气、段誉的目标、逐级提示与结局），
-          EAST / WEST / SHENNONG / LOVERS 名册（东宗、西宗、神农帮、私奔的一对）与 ENDINGS
+          EAST / WEST / SHENNONG / LOVERS 名册（东宗、西宗、神农帮、私奔的一对）、ENDINGS 与 SECRETS（秘密的说法，只交给叙述闸门）
 [POS]: scenarios/tianlong 的第一幕。以金庸《天龙八部》世纪新修版开篇为蓝本，但不写剧本——只摆好世界、角色目标与各自所知，
        剧情由规则内核与角色认知自然涌现：比剑之后龚光杰寻衅、钟灵放貂护人、左子穆护短（西宗掌门袖手旁观）、
        入夜后干葛私奔投奔神农帮、途中撞见外人便灭口、崖底玉璧月夜显影、琅嬛福地里的两卷帛书、山腹隧道通往澜沧江畔（第一幕终）。
@@ -39,6 +39,8 @@ WEST = ("xinshuangqing", "geguangpei")              # 无量剑西宗：掌门�
 SECT = EAST + WEST
 SHENNONG = ("sikongxuan", "shennong")               # 神农帮：帮主与把守山道的帮众
 LOVERS = ("ganguanghao", "geguangpei")              # 东西两宗私下相好的一对，入夜投奔神农帮
+# 秘密的说法：叙述闸门据此拦住熟读原著的模型替玩家剧透（只在清单与台词里有出处时才许说）
+SECRETS = ("私奔", "私订终身", "暗通款曲", "通了声气", r"投[奔靠]?.{0,2}神农帮")
 
 
 def _entities() -> list[Entity]:
@@ -246,4 +248,4 @@ def build_wuliang(seed: int = 7) -> Scenario:
     priors["sikongxuan"] = (past(camp + (Fact(Proposition.rel("shennong", Rel.AT, "shandao")),)), now_seen("sikongxuan"))
     priors["shennong"] = (past(camp + (Fact(Proposition.rel("sikongxuan", Rel.AT, "camp")),)), now_seen("shennong"))
     return Scenario("wuliang", state, _profiles(), priors, setting=SETTING, lore=LORE, aliases=ALIASES, hints=HINTS,
-                    style=STYLE, guide=GUIDE, endings=ENDINGS)
+                    style=STYLE, guide=GUIDE, endings=ENDINGS, secrets=SECRETS)
