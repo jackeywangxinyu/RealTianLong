@@ -45,6 +45,7 @@ from tianlong.core import (  # noqa: E402
 )
 from tianlong.core.profiles import Goal, GoalKind, Profile  # noqa: E402
 from tianlong.kernel.perception import make_percept, scene_percept  # noqa: E402
+from tianlong.language.interpret import Interpreter  # noqa: E402
 from tianlong.language.llm import LLMUnavailable, ScriptedLLM  # noqa: E402
 from tianlong.language.narrator import Narrator  # noqa: E402
 from tianlong.language.parser import MoveKind, Parsed  # noqa: E402
@@ -377,13 +378,14 @@ def test_aside_retried_with_the_same_request_id_returns_the_same_result():
     assert s.store.session_state(s.ref)["hint"] == 2 and s.store.request(s.ref, "h1") is None, "不推进的回合照旧不落库"
 
 
-def _interpreting(answers: dict[str, dict]) -> GameSession:
-    """真解释器 + 脚本快模型：按玩家原文回一份 JSON（缺的字段取默认）。"""
+def _interpreting(answers: dict[str, dict], bare: bool = False) -> GameSession:
+    """真解释器 + 脚本快模型：按玩家原文回一份 JSON（缺的字段取默认）。
+    bare：解释器不拿场景的名字全集与别称（它自己的回显闸门认不出陌生名字），只剩会话的名字闸门兜底。"""
     base = {"kind": "unclear", "mode": "immediate", "actor": "player", "steps": [], "listener": None, "speech": "tell",
             "line": "", "social": "none", "topic_subject": None, "topic_value": None, "topic_holds": True,
             "missing": "", "reply": ""}
     fast = ScriptedLLM(lambda p, s, sc: json.dumps({**base, **answers[p.rsplit("玩家输入：", 1)[1]]}, ensure_ascii=False))
-    return session(fast_llm=fast)
+    return session(fast_llm=fast, interpreter=Interpreter(fast) if bare else None)
 
 
 def test_model_written_clarifications_pass_the_name_gate_but_the_players_own_words_do_not_count():
@@ -393,8 +395,11 @@ def test_model_written_clarifications_pass_the_name_gate_but_the_players_own_wor
                        "我从怀里掏出秘籍": {"kind": "act", "steps": study, "missing": "秘籍"}})
     head = s.authority.head().version
     r = s.turn("我想找个清静地方练功")
+    assert not r.advanced and "秘籍" not in r.narration, "解释器自己先把点了陌生名字的追问换掉"
+    bare = _interpreting({"我想找个清静地方练功": {"reply": "你是想去营地翻那本秘籍吗？"}}, bare=True)
+    r = bare.turn("我想找个清静地方练功")
     assert not r.advanced and "秘籍" not in r.narration and r.render.status == RenderStatus.GATED_FALLBACK
-    assert Violation("entity", "秘籍") in r.render.violations
+    assert Violation("entity", "秘籍") in r.render.violations, "解释器漏过的，会话的名字闸门兜住"
     r = s.turn("我翻出怀里那本书来读")
     assert not r.advanced and "秘籍" not in r.narration, "模型编的名字不回显"
     r = s.turn("我从怀里掏出秘籍")

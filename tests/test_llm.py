@@ -37,7 +37,15 @@ from tianlong.language.llm import (
 )
 from tianlong.language.render import RenderStatus
 
-from .test_narrator_gm import G1, G2, TAUNT, _run, _template, view  # noqa: F401  （复用龚光杰叫阵的感知夹具）
+from .test_narrator_gm import (  # noqa: F401  （复用龚光杰叫阵的感知夹具）
+    G1,
+    G2,
+    TAUNT,
+    _prose,
+    _run,
+    _template,
+    view,
+)
 
 KEY = "AIza-test-secret-key-0123456789"
 
@@ -355,7 +363,7 @@ def test_narrator_keeps_whole_sentences_and_appends_the_template(gemini, view, t
     gemini.script[:] = [sse(piece(G1), piece(G2[:6]), tail)]
     r, got = _run(view, _client())
     assert r.status == RenderStatus.LLM_UNAVAILABLE
-    assert got[0] == G1 and r.text == G1 + "\n" + _template(view)
+    assert got[0] == G1 and r.text == G1 + "\n" + _prose(_template(view))
     assert TAUNT in r.text
 
 
