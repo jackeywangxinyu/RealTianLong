@@ -1,11 +1,13 @@
 """
 [INPUT]: 依赖 tianlong.language 的 interpret / parser / llm（ScriptedLLM），tianlong.cognition 的 BeliefStore，tianlong.kernel 的 Kernel，
-         tianlong.scenarios 的 build_wuliang
+         tianlong.scenarios 的 build_wuliang；会话级回归按需导入 tianlong.runtime.session（缺 LangGraph/Qdrant 跳过）
 [OUTPUT]: 主持层解释器验收：GM 前缀、元指令与场外问题不调模型；高精度整句命令走 0 次模型调用的快路径，单字关键词一律交给模型；
           模型解释出的说话（言语行为、去掉包装的原话、自由发问）、姿态、溜出大殿、拿剑再刺的多步计划逐项校验后成立；
           编造的物品（掏出北冥神功）、陌生 id、不在手里的东西被拒且不推进；多步计划在第一个不成立的步骤处截断；
           规则看见的否定与非即时语态压过模型；提示词只含玩家认识的实体（至多 40 个）与最近两段正文；
-          模型失败与模板模式退回规则解析，规则层修掉的误判（打招呼/打量不是动手、救命/挡脸不是施用、走出大殿、陌生秘籍、原话包装）
+          模型失败与模板模式退回规则解析，规则层修掉的误判（打招呼/打量不是动手、救命/挡脸不是施用、走出大殿、陌生秘籍、原话包装）；
+          评审回归：回显只用玩家写过的名字、姿态只留看得见的、原话只收玩家打出来的字、言语里的兵刃、非十进制数字、
+          模型失败只问一次、多步路线与“已在此地”、问号结尾的命令、说法不是掏东西、假设与转述压过模型、磕头按可拜的陈设分流
 [POS]: tests 的主持层输入语义；把“模型听得懂任何话，但变不出玩家没有的东西、越不过玩家的认知”写成可证伪断言
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -22,7 +24,7 @@ from tianlong.core import EntitySketch, Fact, Kind, Manner, Modality, Op, Percep
 from tianlong.kernel import Kernel
 from tianlong.language.interpret import MAX_TABLE, Interpreter
 from tianlong.language.llm import LLMUnavailable, ScriptedLLM
-from tianlong.language.parser import MoveKind
+from tianlong.language.parser import IntentParser, MoveKind, wait_length, wield_problem
 from tianlong.scenarios import build_wuliang
 
 from .conftest import make_intent
@@ -126,7 +128,6 @@ def test_asking_an_npc_is_not_an_ooc_question(world, duanyu):
     ("拿起长剑", Op.TAKE, "sword", None),
     ("向龚光杰出手", Op.ATTACK, "gongguangjie", None),
     ("查看兵器架", Op.INSPECT, "swordrack", None),
-    ("磕头", Op.INSPECT, "hall", None),
     ("问马五爷钟姑娘在哪", Op.ASK, "mawude", None),
     ("告诉钟灵长剑在兵器架", Op.TELL, "zhongling", None),
 ])
@@ -142,7 +143,9 @@ def test_fast_path_details(world, duanyu):
     it = _interp(world)
     night = it.interpret("等到天黑", duanyu)
     assert night.until == "night" and it.interpret("等一会", duanyu).repeat == 10
-    assert it.interpret("磕头", duanyu).candidate.social == Social.SUBMIT, "磕头是服软"
+    kowtow = it.interpret("磕头", duanyu)
+    assert (kowtow.kind, kowtow.candidate.op, kowtow.candidate.social) == (MoveKind.GESTURE, Op.WAIT, Social.SUBMIT), \
+        "大殿里没有可拜的陈设：磕头是当众服软的姿态"
     ask = it.interpret("问马五爷钟姑娘在哪", duanyu)
     assert ask.candidate.topic == Fact(Proposition.rel("zhongling", Rel.AT, None), True)
     assert ask.utterance == "钟姑娘在哪？", "原话只引问出口的那句，不是指令包装"
@@ -485,3 +488,235 @@ def test_words_to_nobody_are_a_public_remark(world, duanyu):
     assert p.kind == MoveKind.GESTURE and p.candidate.op == Op.WAIT and p.utterance == "说道：“谁来评评这个理？”"
     g = _interp(world, _llm(kind="gesture", line="祭出倚天剑", missing="倚天剑")).interpret("我祭出倚天剑", duanyu)
     assert g.candidate is None and g.clarification == "你身上并没有倚天剑。"
+
+
+# ============================================================
+#  评审回归：回显、姿态、原话、言语里的兵刃、多步路线、问号、磕头
+# ============================================================
+
+
+def _room(*things: EntitySketch) -> BeliefStore:
+    """玩家独处的小屋，一扇木门通院子；things 都放在屋里。"""
+    base = (EntitySketch("room", Kind.PLACE, "小屋"), EntitySketch("yard", Kind.PLACE, "院子"),
+            EntitySketch("p", Kind.PERSON, "我自己"), EntitySketch("d1", Kind.DOOR, "木门"))
+    facts = (Fact(Proposition.rel("p", Rel.AT, "room")), Fact(Proposition.rel("d1", Rel.CONNECTS, "room")),
+             Fact(Proposition.rel("d1", Rel.CONNECTS, "yard")), *(Fact(Proposition.rel(t.id, Rel.AT, "room")) for t in things))
+    return BeliefStore("p").revise(Percept(0, Modality.SIGHT, None, facts, (), (*base, *things)))[0]
+
+
+def _session():
+    pytest.importorskip("langgraph")
+    pytest.importorskip("qdrant_client")
+    from tianlong.runtime.session import GameSession
+
+    return GameSession(build_wuliang())
+
+
+@pytest.mark.parametrize("fields, text, said", [
+    ({"kind": "act", "steps": [_step("study")], "missing": "北冥神功"}, "我翻出怀里那本秘籍来读", "你身上并没有那样东西。"),
+    ({"kind": "act", "steps": [_step("take")], "missing": "闪电貂"}, "我去抓钟灵养的那只小兽", "你不知道那是什么。"),
+    ({"kind": "act", "steps": [_step("move")], "missing": "琅嬛福地"}, "我要去找那个仙境", "你不知道该怎么去那里。"),
+    ({"kind": "say", "missing": "司空玄"}, "问问那位老前辈", "你不知道说的是谁。"),
+    ({"kind": "gesture", "line": "翻开秘籍", "missing": "北冥神功"}, "我翻出怀里那本秘籍", "你身上并没有那样东西。"),
+    ({"kind": "unclear", "missing": "scroll_bm"}, "我翻出怀里那本秘籍", "你身上并没有那样东西。"),
+])
+def test_model_named_premises_are_refused_without_echoing_the_name(world, duanyu, fields, text, said):
+    p = _interp(world, _llm(**fields)).interpret(text, duanyu)
+    assert p.candidate is None and p.clarification == said, "编造的前提照样拦下，但只回显玩家自己写过的名字"
+
+
+@pytest.mark.parametrize("reply, universe, shown", [
+    ("你是想去琅嬛福地找神仙姐姐吗？", (), False),         # 场景别称（琅嬛、神仙姐姐）
+    ("你是想找司空玄问话吗？", ("司空玄",), False),          # 本名：会话交来的名字全集
+    ("你是想拿 scroll_bm 吗？", (), False),                   # id 从来不给玩家看
+    ("你是想找钟灵说话吗？", ("司空玄", "钟灵"), True),       # 玩家认识的名字照常
+])
+def test_model_reply_naming_what_the_player_does_not_know_is_not_echoed(world, duanyu, reply, universe, shown):
+    p = Interpreter(_llm(kind="unclear", reply=reply), world.aliases, universe=universe).interpret("我想找个清静地方", duanyu)
+    assert p.candidate is None and p.clarification == (reply if shown else "没太听明白，能换个说法吗？")
+    typed = Interpreter(_llm(kind="unclear", reply="你是想找司空玄吗？"), world.aliases, universe=("司空玄",))
+    assert typed.interpret("我想找司空玄", duanyu).clarification == "你是想找司空玄吗？", "玩家自己写出的名字可以回显"
+
+
+@pytest.mark.parametrize("text, pose", [
+    ("我哈哈大笑，一剑刺穿了龚光杰", "哈哈大笑"),                    # 结果：只看得见第一个分句
+    ("我拱手，龚光杰被我点了穴道动弹不得", "拱手"),
+    ("我拱手龚光杰被我点了穴道动弹不得", "拱手"),                    # 没有标点也拦：状态词与别人作主语
+    ("我坐下施展凌波微步", "坐下"),                                  # 施展没学过的武功
+    ("打量一下钟灵", "打量一下钟灵"),                                # 别人作宾语照常
+    ("向龚光杰磕头", "向龚光杰磕头"),
+    ("我坐下来喝了口茶", "坐下来喝了口茶"),
+    ("抬头看看梁上的钟灵", "抬头看看梁上的钟灵"),
+    ("给他磕头", "给他磕头"),
+    ("向龚光杰拱手道：在下失笑，并无恶意", "向龚光杰拱手道：“在下失笑，并无恶意”"),   # 玩家自己的话跟着姿态留下
+])
+def test_template_pose_keeps_only_what_can_be_witnessed(world, duanyu, text, pose):
+    p = _interp(world).interpret(text, duanyu)
+    assert p.kind == MoveKind.GESTURE and p.candidate.op == Op.WAIT and p.utterance == pose
+
+
+@pytest.mark.parametrize("text, said", [
+    ("我坐下研读北冥神功", "你身上并没有北冥神功。"),               # 夹带的研读落空，不让“坐下”吞掉
+    ("我跪下捡起北冥神功帛卷", "你并没见到这样东西。"),
+])
+def test_template_pose_does_not_swallow_a_failed_claim(world, duanyu, text, said):
+    p = _interp(world).interpret(text, duanyu)
+    assert p.candidate is None and p.clarification == said
+
+
+@pytest.mark.parametrize("line, social, text, pose, said", [
+    ("冷笑一声，一掌拍出，龚光杰口吐鲜血，倒地不起", "taunt", "我冷笑一声，一掌拍出", "冷笑一声", None),
+    ("一掌拍向龚光杰", "taunt", "我冲龚光杰比划了一下", "冷笑", None),       # 没有姿态词：按言语行为给中性姿态
+    ("一掌把龚光杰打得口吐鲜血", "threaten", "我吓唬龚光杰", None, "那可不是摆个姿势就能办到的。"),
+    ("一掌拍出，龚光杰倒地不起", "threaten", "我一掌把龚光杰打得倒地不起", None, "那可不是摆个姿势就能办到的。"),
+    ("盘膝打坐", "none", "我盘膝打坐", "盘膝打坐", None),                          # 单字“打”不是动手
+    ("拱手道：久仰北冥神功", "greet", "我向众人拱手", "拱手", None),          # 模型替玩家编的话不留
+    ("对着无量玉璧磕头", "submit", "我对着那块大石头磕头", None, "你不知道那是什么。"),   # 模型补出的陌生名字
+    ("举起长剑", "threaten", "我举剑示威", None, "你身上并没有长剑。"),     # 不在手里的东西
+])
+def test_model_pose_is_gated_like_the_template_one(world, duanyu, line, social, text, pose, said):
+    p = _interp(world, _llm(kind="gesture", line=line, social=social)).interpret(text, duanyu)
+    assert (p.utterance, p.clarification) == (pose, said)
+    assert p.candidate is None or (p.kind == MoveKind.GESTURE and (p.candidate.social or "none") == social)
+
+
+def test_session_never_commits_a_pose_that_claims_an_outcome():
+    s = _session()
+    r = s.turn("我哈哈大笑，一剑刺穿了龚光杰")
+    mine = [e for e in r.events if e.actor == "duanyu" and e.op == Op.WAIT and e.intent.utterance]
+    assert [e.intent.utterance for e in mine] == ["哈哈大笑"] and "刺穿" not in r.narration
+
+
+@pytest.mark.parametrize("fields, text, line", [
+    ({"line": "钟姑娘，你那只闪电貂呢？北冥神功是不是藏在无量玉璧后面？", "speech": "ask"}, "问钟灵她的宠物和那本秘籍的事",
+     "她的宠物和那本秘籍的事？"),                                                       # 模型替玩家编的话：改从原文取
+    ({"line": "我们赶紧离开这里吧"}, "对钟灵说：咱们快走", "咱们快走"),
+    ({"line": "咱们快走"}, "对钟灵说咱们快走", "咱们快走"),                             # 模型指认了原文：照收
+    ({"line": ""}, "跟钟灵聊聊天", None),                                               # 没说具体的话
+    ({"line": "别怕，有我呢", "social": "comfort"}, "拍拍钟灵的肩膀安慰她", None),       # 听者只是定语：不截半句当原话
+])
+def test_say_line_is_only_what_the_player_typed(world, duanyu, fields, text, line):
+    p = _interp(world, _llm(kind="say", listener="zhongling", **{"speech": "tell", "social": "greet", **fields})).interpret(
+        text, duanyu)
+    assert p.kind == MoveKind.SAY and p.candidate.target == "zhongling" and p.utterance == line
+
+
+@pytest.mark.parametrize("text, topic", [
+    ("跟钟灵聊聊天", None),                                                  # 模型替玩家编了一句“长剑在后院”
+    ("跟钟灵说长剑在后院", Fact(Proposition.rel("sword", Rel.AT, "houyuan"), True)),
+])
+def test_say_topic_needs_both_entities_named_by_the_player(world, duanyu, text, topic):
+    llm = _llm(kind="say", listener="zhongling", speech="tell", topic_subject="sword", topic_value="houyuan")
+    assert _interp(world, llm).interpret(text, duanyu).candidate.topic == topic
+    assert _interp(world).interpret("跟钟灵聊聊天", duanyu).utterance is None, "模板模式同样不把“天”当原话"
+
+
+@pytest.mark.parametrize("fields, text, said", [
+    ({"listener": "gongguangjie", "line": "滚开"}, "我拔出长剑指着龚光杰喝道：滚开", "你身上并没有长剑。"),
+    ({"listener": "gongguangjie", "line": "退下"}, "我亮出大理段氏的金牌，对龚光杰喝道：退下", "你身上并没有金牌。"),
+    ({"listener": None, "line": "退下", "social": "command"}, "我亮出大理段氏的金牌，喝令众人：退下", "你身上并没有金牌。"),
+    ({"listener": "gongguangjie", "speech": "ask", "line": "你敢拔出长剑吗"}, "问龚光杰：你敢拔出长剑吗", None),
+    ({"listener": "zhongling", "line": "把你的貂拿出来看看"}, "告诉钟灵快掏出你的闪电貂", None),
+])
+def test_speech_does_not_wield_what_is_not_in_hand(world, duanyu, fields, text, said):
+    p = _interp(world, _llm(kind="say", **fields)).interpret(text, duanyu)
+    assert p.clarification == said and (p.candidate is None) == (said is not None)
+    if said is None:
+        assert p.kind == MoveKind.SAY, "说出口的“拔出/掏出”只是话，不是声称手里有"
+    rule = _interp(world).interpret("我拔出长剑对龚光杰说：滚开", duanyu)
+    assert rule.candidate is None and rule.clarification == "你身上并没有长剑。", "模板模式同样要真在手里"
+
+
+def test_non_decimal_digits_never_crash_a_wait(world, duanyu):
+    assert wait_length("等²分钟") == (1, None) and wait_length("等①分钟") == (1, None)
+    assert wait_length("等５分钟")[0] == 5 and wait_length("等5分钟后说3句")[0] == 5, "只认紧挨“分”的数"
+    assert _interp(world).interpret("等①分钟", duanyu).candidate.op == Op.WAIT
+    p = _interp(world, _llm(kind="act", steps=[_step("wait")])).interpret("原地等上³⁰分钟吧", duanyu)
+    assert p.candidate.op == Op.WAIT and p.repeat == 1
+
+
+@pytest.mark.parametrize("reply", [None, "[1, 2]"])
+def test_model_failure_never_asks_the_model_twice(world, duanyu, reply):
+    def answer(prompt, system, schema):
+        if reply is None:
+            raise LLMUnavailable("timeout")
+        return reply
+
+    llm = ScriptedLLM(answer)
+    it = Interpreter(llm, world.aliases, fallback=IntentParser(llm, aliases=world.aliases))   # 会话的装配方式
+    p = it.interpret("嗯，钟灵这姑娘挺有意思", duanyu)
+    assert p.candidate is None and len(llm.prompts) == 1, "模型失败只退回规则，不再多等一轮超时"
+
+
+def test_multi_step_moves_route_from_where_the_previous_step_ends(world):
+    back = _walk(world, ("houyuan", "d_corridor"), ("houshan", "d_backgate"), ("houyuan", "d_backgate"),
+                 ("hall", "d_corridor"))
+    llm = _llm(kind="act", steps=[_step("move", "houyuan", "d_corridor"), _step("move", "houshan", "d_backgate")])
+    p = _interp(world, llm).interpret("先去后院，再去后山", back)
+    assert (p.candidate.target, [(c.op, c.target, c.obj) for c in p.followups]) == (
+        "houyuan", [(Op.MOVE, "houshan", "d_backgate")])
+    there_and_back = _interp(world, _llm(kind="act", steps=[_step("move", "houyuan"), _step("move", "hall")]))
+    q = there_and_back.interpret("去后院再回大殿", back)
+    assert [(c.op, c.target, c.obj) for c in q.followups] == [(Op.MOVE, "hall", "d_corridor")]
+
+
+def test_a_move_to_where_you_stand_only_leaves_when_you_said_so():
+    store = _room()
+    stay = Interpreter(_llm(kind="act", steps=[_step("move", "room")])).interpret("走进小屋里面", store)
+    assert stay.candidate is None and stay.clarification == "你已经在小屋了。", "不替人从唯一的门走出去"
+    out = Interpreter(_llm(kind="act", steps=[_step("move", "room")])).interpret("离开小屋", store)
+    assert (out.candidate.op, out.candidate.target, out.candidate.obj) == (Op.MOVE, "yard", "d1")
+
+
+@pytest.mark.parametrize("text", ["攻击龚光杰？", "向龚光杰出手？", "搜龚光杰?", "去后院？"])
+def test_a_command_ending_in_a_question_mark_goes_to_the_model(world, duanyu, text):
+    llm = _llm(kind="act", mode="question", steps=[_step("attack", "gongguangjie")])
+    p = _interp(world, llm).interpret(text, duanyu)
+    assert p.candidate is None and len(llm.prompts) == 1, "犹豫的问句不在快路径上直接动手"
+    assert _interp(world, _llm(kind="unclear")).interpret("问马五爷钟姑娘在哪？", duanyu).source == "rules", "问话照走快路径"
+
+
+def test_intangibles_are_not_conjured_items(world, duanyu):
+    assert wield_problem("我拿出勇气，大步走到龚光杰面前", duanyu) is None
+    assert wield_problem("我亮出身份喝令龚光杰退下", duanyu) is None
+    assert wield_problem("我从怀里掏出点心", duanyu) == "你身上并没有点心。", "真的东西照样要在身上"
+    p = _interp(world, _llm(kind="gesture", line="拿出勇气向龚光杰拱手", social="greet")).interpret(
+        "我拿出勇气，向龚光杰拱手", duanyu)
+    assert p.kind == MoveKind.GESTURE and p.utterance == "拿出勇气向龚光杰拱手"
+
+
+@pytest.mark.parametrize("text, steps", [
+    ("如果龚光杰攻击我，我就还手", [_step("attack", "gongguangjie")]),
+    ("钟灵去拿长剑", [_step("take", "sword")]),
+    ("龚光杰刚刚攻击了马五德", [_step("attack", "gongguangjie")]),
+])
+def test_rule_verdicts_on_hypotheticals_and_reports_beat_the_model(world, duanyu, text, steps):
+    p = _interp(world, _llm(kind="act", steps=steps)).interpret(text, duanyu)     # 模型声称“即时 + 玩家”
+    assert p.candidate is None and p.clarification
+    move = _interp(world, _llm(kind="act", steps=[_step("move", "houyuan")]))
+    for soft in ("我决定去后院", "等一会儿再去后院", "钟灵和我一起去后院"):
+        assert move.interpret(soft, duanyu).candidate.op == Op.MOVE, f"{soft}：软标记、先后、玩家也在主语里，仍听模型的"
+
+
+@pytest.mark.parametrize("things, op", [
+    ((EntitySketch("idol", Kind.SURFACE, "玉像"),), Op.INSPECT),
+    ((EntitySketch("mat", Kind.SURFACE, "蒲团"),), Op.INSPECT),
+    ((EntitySketch("table", Kind.SURFACE, "木桌"),), Op.WAIT),
+    ((), Op.WAIT),
+])
+def test_kowtow_is_a_search_only_before_something_to_bow_to(things, op):
+    llm = _llm(kind="unclear")
+    p = Interpreter(llm).interpret("磕头", _room(*things))
+    assert (p.candidate.op, p.candidate.social) == (op, Social.SUBMIT) and llm.prompts == []
+    if op == Op.INSPECT:
+        assert p.kind == MoveKind.ACT and p.candidate.target == "room", "原著路线：在玉像、蒲团前伏地细看"
+    else:
+        assert p.kind == MoveKind.GESTURE and p.utterance == "磕头", "否则是当众服软的姿态"
+
+
+def test_kowtowing_in_the_hall_is_a_submission_the_challenger_registers():
+    s = _session()
+    events = [e for cmd in ("磕头", "等待", "等待") for e in s.turn(cmd).events]
+    cues = [(c.frm, c.social) for c in s.beliefs("gongguangjie").cues]
+    assert ("duanyu", Social.SUBMIT) in cues, "龚光杰看见段誉当众磕头服软"
+    assert not [e for e in events if e.actor == "gongguangjie" and e.op == Op.ATTACK], "服软之后不再动手"

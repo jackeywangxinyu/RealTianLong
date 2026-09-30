@@ -242,7 +242,8 @@ class GameSession:
         self._restore(session_state)
         self.llm = llm
         self.parser = IntentParser(fast_llm or llm, aliases=scenario.aliases)
-        self.interpreter = interpreter or Interpreter(fast_llm or llm, aliases=scenario.aliases, fallback=self.parser)
+        self.interpreter = interpreter or Interpreter(fast_llm or llm, aliases=scenario.aliases, fallback=self.parser,
+                                                      universe=(e.name for e in scenario.state.entities.values()))
         self.pipeline = pipeline
         self.narrator = Narrator(llm, scenario.setting, scenario.lore, scenario.style, scenario.aliases, scenario.secrets)
         self._universe = frozenset(e.name for e in scenario.state.entities.values())  # 闸门拒绝用的名字全集

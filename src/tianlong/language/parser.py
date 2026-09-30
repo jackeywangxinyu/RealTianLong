@@ -1,16 +1,19 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate / routes_between，core 的 Op / Manner / Kind / Rel / Fact / Proposition / Social /
          signature_error，language/command 的 ACTION_WORDS / SOCIAL_WORDS / GESTURE_WORDS / action_hits / analyze / clarify /
-         ParsedCommand / Mention，language/llm 的 LLMClient / LLMUnavailable / parse_json
+         ParsedCommand / Mention，language/pose 的 pose_of / witness，language/llm 的 LLMClient / LLMUnavailable / parse_json
 [OUTPUT]: 对外提供 MoveKind、Parsed（含语态结构、等待时长、这句话的类别、多步行动与问主持人的原话）、
           IntentParser（语态闸门 → 规则解析 → 受约束的 LLM 语义解析）、rule_parse()、normalize()，
-          以及解释器复用的规则机件 mentions() / held_items() / exits() / leave_here() / invalid() / manner_of() /
-          speech_manner() / wait_length() / speech_line() / unwrap_line() / pose_of() / wield_problem()
+          以及解释器复用的规则机件 mentions() / held_items() / exits() / leave_here() / leaving() / invalid() / manner_of() /
+          speech_manner() / wait_length() / speech_line() / unwrap_line() / unsaid() / pose_of() / wield_problem()
 [POS]: language 的输入解析；把玩家自由文本变成结构化候选行动。先由 command.analyze() 判定语态：只有单一、肯定、即时的指令
        才走规则解析；否定、条件、转述、复合、疑问交给 LLM（它也必须声明语态与主体），仍不确定就追问、不推进时间。
-       LLM 失败时绝不回退到未经语义确认的候选。可引用的实体只来自玩家自己的认知图；解析结果仍要回到 kernel 结算。
+       LLM 失败或回复不成形时绝不回退到未经语义确认的候选。可引用的实体只来自玩家自己的认知图；解析结果仍要回到 kernel 结算。
        规则层修掉的误判：“打招呼/打量”不是动手，“大喊救命/用易经挡住脸”不是施用，“走出大殿”不是走进大殿，
-       点名了不认识的秘籍就不悄悄改读手里那本，原话只引说出口的那句（没有可解析的命题就是闲话，不再反问“告诉谁什么”）
+       点名了不认识的秘籍就不悄悄改读手里那本，原话只引说出口的那句（没有可解析的命题就是闲话，不再反问“告诉谁什么”），
+       姿态过 pose.witness()（夹带的拿取/研读落空就照实说落空，不让姿态把它吞掉），言语在原话之外“拔出长剑”同样要真在手里，
+       “拿出勇气/亮出身份”不是掏东西；磕头只在此地有神像、蒲团一类可拜的陈设时才是伏地细看，其余是当众服软的姿态；
+       normalize()/exits()/leave_here() 可指定出发地（多步计划从上一步的终点算起）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -38,6 +41,7 @@ from tianlong.language.command import (
     clarify,
 )
 from tianlong.language.llm import LLMClient, LLMUnavailable, parse_json
+from tianlong.language.pose import pose_of, witness
 
 log = logging.getLogger(__name__)
 
@@ -90,16 +94,22 @@ _ASKS = {
 }
 _HELP = "没听懂。直接说想做的事或想说的话就好，比如：环顾四周 / 问身边的人话 / 去某处 / 等一会儿"   # 不点具体地名，不剧透
 _GENERIC = frozenset((*_ASKS.values(), _HELP))
+_CLAIMING = frozenset({Op.TAKE, Op.PUT, Op.GIVE, Op.STUDY, Op.USE, Op.UNLOCK, Op.LOCK})   # 落空时说得出缺了什么的操作
 _SOCIAL = dict(SOCIAL_WORDS)
 _GESTURE = dict(GESTURE_WORDS)
 _KOWTOW = ("磕头", "叩首", "跪拜")
+_SHRINES = ("像", "蒲团", "拜垫", "垫", "龛", "牌位", "灵位", "香案", "供桌", "神台", "祭坛", "佛")   # 可以对着磕头的陈设
 _SEARCH = ("搜", "检查", "找找", "search")     # 对人：搜身；其余查看词对人只是打量（姿态），不是搜身
 _STRONG_USE = ("服下", "服用", "喂", "敷", "use")  # “用/救”单字定不了施用：“大喊救命”“用易经挡住脸”
 _EXIT = ("离开", "走出", "溜出", "逃出", "退出", "出去")
+_LEAVING = (*_EXIT, "冲出", "跑出", "奔出", "闯出", "逃离")   # 说了要离开此地（解释器据此才替人挑出路）
 _GOTO = ("去", "前往", "到", "回")              # 明说要去某处：剩下的字才当作不认识的地名
 _WHERE = ("在哪", "哪里", "哪儿", "何处", "下落", "什么地方", "去哪", "去了哪")
 _AT_LINK = re.compile(r"^(?:就|正|还|也|已经|现在|已)?(不|没有|没)?(?:在|放在|藏在|留在|落在)$")
 _WIELD = ("掏出", "拔出", "亮出", "拿出", "取出", "摸出", "抽出")   # 声称手里有：必须真在身上
+# “拿出勇气”“亮出身份”是说法，不是从身上掏出一样东西
+_INTANGIBLE = ("勇气", "胆量", "胆子", "身份", "本事", "本领", "看家本领", "真本事", "气势", "架势", "威风", "诚意", "诚心",
+               "真心", "决心", "骨气", "耐心", "气概", "风度", "笑容", "笑脸", "全力", "浑身解数", "派头", "态度", "魄力", "精神")
 _PUNCT = frozenset("，,。．.；;！!？?、：:\"'“”‘’「」『』（）() 　…~～")
 # 数“还剩什么没被认出来”时忽略的虚字与泛称（“研读那本书”= 手里那本；“研读北冥神功”剩下的是一个不认识的名字）
 _FILLERS = tuple(sorted((
@@ -159,9 +169,9 @@ def held_items(store: BeliefStore) -> list[str]:
     return [i for i, sk in sorted(store.entities.items()) if sk.kind == Kind.ITEM and store.location_of(i) == me]
 
 
-def exits(store: BeliefStore) -> list[tuple[str, str]]:
-    """玩家认为能从此地走出去的路：(门, 门那头的地点)；确知单向走不通的不算。"""
-    here = store.location_of(store.owner)
+def exits(store: BeliefStore, here: str | None = None) -> list[tuple[str, str]]:
+    """玩家认为能从此地（或指定的出发地）走出去的路：(门, 门那头的地点)；确知单向走不通的不算。"""
+    here = store.location_of(store.owner) if here is None else here
     out: list[tuple[str, str]] = []
     if here is None:
         return out
@@ -197,12 +207,18 @@ def speech_manner(t: str) -> Manner:
     return Manner.CAREFUL if any(w in t for w in _WHISPER) else Manner.NORMAL
 
 
+def leaving(t: str) -> bool:
+    """这句话说了要离开此地（“溜出大殿”“冲出去”）：只有这时才替人挑一条出路。"""
+    return any(w in t for w in _LEAVING)
+
+
 def wait_length(t: str) -> tuple[int, str | None]:
     if any(w in t for w in _UNTIL_NIGHT):
         return 1, "night"
-    digits = "".join(ch for ch in t if ch.isdigit())
-    if digits and "分" in t:
-        return max(1, int(digits)), None
+    # 只认紧挨“分”的十进制数字（\d 即 Unicode 十进制数字，int() 都认得）；“²”“①”不是，退回按说法估
+    hit = re.search(r"(\d+)\s*分", t)
+    if hit is not None:
+        return max(1, int(hit.group(1))), None
     return next((m for word, m in _DURATIONS if word in t), 1), None
 
 
@@ -259,7 +275,7 @@ def _as_line(s: str, ask: bool) -> str | None:
 def speech_line(text: str, store: BeliefStore, listener: str | None, aliases: Aliases | None = None,
                 ask: bool = False) -> str | None:
     """玩家真正说出口的那句：有引号取引号里的；否则取听者之后、剥掉“说/道/打个招呼”之类包装的文字。
-    只有客套没有话（“跟钟灵打个招呼”）就是 None——不拿指令原文冒充原话。"""
+    只有客套没有话（“跟钟灵打个招呼”）、听者只是定语（“拍拍钟灵的肩膀安慰她”）就是 None——不拿指令原文冒充原话。"""
     t = text.strip()
     quoted = _first_quote(t)
     if quoted is not None:
@@ -267,6 +283,8 @@ def speech_line(text: str, store: BeliefStore, listener: str | None, aliases: Al
     at = next((m for m in mentions(t.lower(), store, aliases) if m.eid == listener), None)
     if at is not None:
         rest = t[at.pos + at.length:]
+        if rest.startswith("的"):
+            return None
     else:
         rest = re.sub(r"^我?(?:对|跟|和|向|同|给)?(?:问|告诉)?(?:她们|他们|那人|对方|她|他)?", "", t)
     rest = _strip_leads(rest)
@@ -290,14 +308,16 @@ def unwrap_line(line: str, names: Sequence[str] = (), ask: bool = False) -> str 
     return None if core in _NO_WORDS or core in _SOCIAL else _as_line(rest, ask)
 
 
-def pose_of(text: str, names: Sequence[str] = ()) -> str:
-    """姿态 = 不带主语的动作短语（“坐下来喝了口茶”）：去掉开头的“我/你/自己的名字”与句末标点，至多 40 字。"""
-    s = text.strip()
-    for lead in (*sorted(names, key=len, reverse=True), "我们", "我", "你"):
-        if lead and s.startswith(lead):
-            s = s[len(lead):]
-            break
-    return s.strip().rstrip("".join(_PUNCT))[:40]
+def unsaid(text: str, line: str | None = None) -> str:
+    """原话之外、玩家自己动手的那截输入：第一个言语动词（问/告诉/说/赔罪……）或引语冒号、引号之前，再去掉原话本身。
+    “我拔出长剑喝道：滚开”里声称拔剑的是这一截；“问龚光杰：你敢拔出长剑吗”“告诉钟灵快掏出你的貂”里拔剑、掏貂只是说出口的话。"""
+    t = text.strip()
+    quote = re.search(r"[：:“「『\"]", t)
+    cuts = [quote.start()] if quote else []
+    cuts += [a for a, _, op in action_hits(t) if op in (Op.TELL, Op.ASK)][:1]
+    head = t[:min(cuts)] if cuts else t
+    core = line.rstrip("".join(_PUNCT)) if line else ""
+    return head.replace(core, "") if core else head
 
 
 _NAME_STOP = "，,。！!？?来去了着向对朝往给在上里 "
@@ -332,6 +352,9 @@ def wield_problem(text: str, store: BeliefStore, aliases: Aliases | None = None)
             j = i + len(w)
             while j < len(t) and t[j] in "了一把本卷只柄支根":
                 j += 1
+            if t[j:].lstrip("点些儿").startswith(_INTANGIBLE):
+                i = t.find(w, i + 1)      # “拿出勇气”“亮出身份”：是说法，不是掏出一样东西
+                continue
             m = ms.get(j)
             if m is not None:
                 sk = store.sketch(m.eid)
@@ -366,6 +389,11 @@ def rule_parse(text: str, store: BeliefStore, aliases: Aliases | None = None) ->
         return _unclear(clarify(command), command)
     attempts = [_parse_as(op, text, t, store, ms, hits, aliases) for op in ops]
     chosen = next((p for p in attempts if p.candidate is not None), None)
+    if chosen is not None and chosen.kind == MoveKind.GESTURE:
+        # “我跪下捡起北冥神功帛卷”：拿取/研读落空就照实说落空，不让“跪下”把它吞成一个姿态
+        failed = (p for o, p in zip(ops, attempts, strict=True)
+                  if o in _CLAIMING and p.candidate is None and p.clarification not in _GENERIC)
+        chosen = next(failed, chosen)
     if chosen is None:
         chosen = next((p for p in attempts if p.clarification not in _GENERIC), attempts[0])
     return replace(chosen, command=command)
@@ -389,7 +417,10 @@ def _gesture(text: str, social: Social | None, store: BeliefStore, aliases: Alia
     problem = wield_problem(pose, store, aliases)
     if problem is not None:
         return _unclear(problem, source=source)
-    return Parsed(Candidate(Op.WAIT, social=social), pose, source=source, kind=MoveKind.GESTURE)
+    kept, why = witness(pose, social, store, mentions(pose.lower(), store, aliases), aliases, said=text)
+    if kept is None:
+        return _unclear(why or _HELP, source=source)
+    return Parsed(Candidate(Op.WAIT, social=social), kept, source=source, kind=MoveKind.GESTURE)
 
 
 def _parse_as(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention],
@@ -434,9 +465,9 @@ def _parse_as(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention],
     elif op == Op.INSPECT:
         person = pick(Kind.PERSON, exclude=(me,))
         if any(w in _KOWTOW for w in words):
-            if person is not None:
-                return _gesture(text, Social.SUBMIT, store, aliases)   # 向人磕头：服软的姿态，不是搜身
-            target, social = here, Social.SUBMIT                       # 原著路线：在玉像前磕头，才看清蒲团
+            if person is not None or not _shrine_here(store, here, aliases):
+                return _gesture(text, Social.SUBMIT, store, aliases)   # 向人磕头、当众磕头：服软的姿态，不是搜查
+            target, social = here, Social.SUBMIT                       # 原著路线：在玉像、蒲团前磕头，伏在地上才看清蒲团
         elif any(w in _SEARCH for w in words):
             target = pick(Kind.PLACE, Kind.SURFACE, Kind.PERSON, exclude=(me,)) or here
         else:
@@ -483,9 +514,17 @@ def _name(store: BeliefStore, eid: str | None) -> str:
     return sk.name if sk else "那里"
 
 
-def leave_here(store: BeliefStore, manner: Manner = Manner.NORMAL) -> Parsed:
-    """离开此地：只知道一条出路就走它；有几条就问走哪条（列出玩家知道的路）。"""
-    ways = exits(store)
+def _shrine_here(store: BeliefStore, here: str | None, aliases: Aliases | None) -> bool:
+    """玩家以为此地有可以对着磕头的陈设（神像、蒲团、牌位……）：兵器架前磕头只是服软，不是伏地细看。"""
+    return here is not None and any(
+        sk.kind == Kind.SURFACE and store.location_of(eid) == here
+        and any(w in n for n in (sk.name, *(aliases or {}).get(eid, ())) for w in _SHRINES)
+        for eid, sk in store.entities.items())
+
+
+def leave_here(store: BeliefStore, manner: Manner = Manner.NORMAL, here: str | None = None) -> Parsed:
+    """离开此地（或指定的出发地）：只知道一条出路就走它；有几条就问走哪条（列出玩家知道的路）。"""
+    ways = exits(store, here)
     if len(ways) == 1:
         door, dest = ways[0]
         return Parsed(Candidate(Op.MOVE, dest, door, manner), source="rules")
@@ -519,7 +558,7 @@ def _parse_move(t: str, store: BeliefStore, ms: list[Mention], words: tuple[str,
 def _parse_speech(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mention], words: tuple[str, ...],
                   aliases: Aliases | None) -> Parsed:
     """言语：有听者就是 TELL/ASK（命题只在说清“某某在某处/在哪”时才有），原话只引说出口的那句；
-    没有听者的言语行为（“大喊救命”）是当众的姿态。"""
+    没有听者的言语行为（“大喊救命”）是当众的姿态。原话之外的“我拔出长剑”同样要真在手里。"""
     me = store.owner
     social = next((_SOCIAL[w] for w in words if w in _SOCIAL), None)
     listener = _first(ms, (Kind.PERSON,), exclude=(me,))
@@ -531,6 +570,9 @@ def _parse_speech(op: Op, text: str, t: str, store: BeliefStore, ms: list[Mentio
     if invalid(cand, store):
         return _unclear(_ASKS[op])
     line = speech_line(text, store, listener.eid, aliases, ask=op == Op.ASK)
+    problem = wield_problem(unsaid(text, line), store, aliases)
+    if problem is not None:
+        return _unclear(problem)
     return Parsed(cand, line, source="rules", kind=MoveKind.SAY)
 
 
@@ -549,14 +591,14 @@ def _topic(op: Op, t: str, ms: list[Mention], listener: Mention) -> Fact | None:
     return Fact(Proposition.rel(subject.eid, Rel.AT, value.eid), link.group(1) is None)
 
 
-def normalize(c: Candidate, store: BeliefStore) -> Candidate:
+def normalize(c: Candidate, store: BeliefStore, here: str | None = None) -> Candidate:
     """MOVE 绑定一条玩家自己知道的路：“朝那扇门走” = 经这扇门去门那边的地点；“去某地” = 经玩家认为连通的门
     （认为没锁的优先）；点名的门玩家并不认为通往那里，就换一条认为连通的。目的地就是脚下（“走进大殿”而人已在大殿）
     不算移动：经某扇门离开此地的，改成去门那头；否则目的地留空。玩家不知道怎么去，路线就留空——语法检查会追问，
-    内核不会替他从真实地图里挑一条暗道。"""
+    内核不会替他从真实地图里挑一条暗道。here 缺省为玩家以为自己所在之处；多步计划传入上一步的终点。"""
     if c.op != Op.MOVE:
         return c
-    here = store.location_of(store.owner)
+    here = store.location_of(store.owner) if here is None else here
     sk = store.sketch(c.target or "")
     if sk is not None and sk.kind == Kind.DOOR:
         others = [b.prop.value for b in store.positives(sk.id, Rel.CONNECTS.value) if b.prop.value != here]
@@ -566,7 +608,7 @@ def normalize(c: Candidate, store: BeliefStore) -> Candidate:
     if c.target is not None and c.target == here:
         door = store.sketch(c.obj or "")
         if door is not None and door.kind == Kind.DOOR:
-            return normalize(Candidate(Op.MOVE, door.id, None, c.manner, None, c.social), store)
+            return normalize(Candidate(Op.MOVE, door.id, None, c.manner, None, c.social), store, here)
         return Candidate(Op.MOVE, None, None, c.manner, None, c.social)
     if c.target is not None and here is not None:
         routes = routes_between(store, here, c.target)
@@ -653,22 +695,26 @@ class IntentParser:
         ids = sorted(store.entities)
         prompt = f"你是 {store.owner}。你认识的实体：\n{_table(store)}\n\n玩家输入：{text}"
         data = parse_json(self.llm.generate(prompt, system=_SYSTEM, schema=_schema(ids), temperature=0.0))
+        if not isinstance(data, dict):
+            return None                         # 回复不成形：同模型失败，只回退经语态确认的规则解析
         mode = data.get("mode", SpeechMode.UNCLEAR.value)
-        if data.get("op") in (None, "unknown") or mode != SpeechMode.IMMEDIATE.value or data.get("actor") != "player":
+        op = next((o for o in Op if o.value == data.get("op")), None)
+        if op is None or mode != SpeechMode.IMMEDIATE.value or data.get("actor") != "player":
             fallback = clarify(command) if command is not None and not command.immediate else "请说得具体一些。"
-            return _unclear(data.get("clarification") or fallback, command, "llm")
+            note = data.get("clarification")
+            return _unclear(note.strip() if isinstance(note, str) and note.strip() else fallback, command, "llm")
         known = set(ids)
 
         def ref(key: str) -> str | None:
-            v = data.get(key) or None
-            return v if v in known else None
+            v = data.get(key)
+            return v if isinstance(v, str) and v in known else None
 
         topic = None
         subject = ref("topic_subject")
         if subject:
             topic = Fact(Proposition.rel(subject, Rel.AT, ref("topic_value")), bool(data.get("topic_holds", True)))
-        cand = normalize(Candidate(Op(data["op"]), ref("target"), ref("obj"), Manner(data.get("manner", "normal")), topic),
-                         store)
+        manner = next((m for m in Manner if m.value == data.get("manner")), Manner.NORMAL)
+        cand = normalize(Candidate(op, ref("target"), ref("obj"), manner, topic), store)
         if command is not None and cand.op in command.negated:
             # 规则层看见了对这个行动的否定：模型说“照做”也不行
             return _unclear(clarify(command), command, "llm")
