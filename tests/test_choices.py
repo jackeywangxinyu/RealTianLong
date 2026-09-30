@@ -12,8 +12,8 @@ pytest.importorskip("langgraph")
 pytest.importorskip("qdrant_client")
 
 from tianlong.cognition.candidates import Candidate  # noqa: E402
-from tianlong.core import Manner, Op, Rel  # noqa: E402
-from tianlong.language.parser import Parsed  # noqa: E402
+from tianlong.core import Manner, Op, Rel, Social  # noqa: E402
+from tianlong.language.parser import MoveKind, Parsed  # noqa: E402
 from tianlong.persistence import RequestConflict, SQLiteWorldStore  # noqa: E402
 from tianlong.persistence.store import ChoiceConflict  # noqa: E402
 from tianlong.runtime.choice_model import ChoiceSpec, parsed_from, parsed_to  # noqa: E402
@@ -84,7 +84,8 @@ def test_first_commit_and_choice_consumption_recover_together(tmp_path, when):
     store = SQLiteWorldStore(path)
     s = GameSession(build_wuliang(7), store=store, pipeline=False)
     s.intro()
-    d = s.choices.current()
+    d = _freeze(s, ChoiceSpec.of("向龚光杰解释", Parsed(Candidate(Op.TELL, "gongguangjie", social=Social.EXPLAIN),
+                                                   "并无冒犯之意。", kind=MoveKind.SAY)))
     original = store.commit
     failed = False
 

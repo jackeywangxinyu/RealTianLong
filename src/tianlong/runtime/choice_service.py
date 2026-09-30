@@ -31,7 +31,7 @@ class ChoiceService:
         version = s.authority.head().version
         snapshot = s.store.decision(s.ref)
         if snapshot is None or snapshot.get("version") != version:
-            choices = build_choices(s.beliefs(s.player))
+            choices = build_choices(s.beliefs(s.player), goals=s.scenario.profiles[s.player].goals)
             snapshot = s.store.publish_decision(s.ref, {
                 "schema": CHOICE_SCHEMA, "id": make_id("decision", str(s.ref), version), "version": version,
                 "choices": [c.to_data() for c in choices], "consumed_request": None,
@@ -51,4 +51,3 @@ class ChoiceService:
             if choice["id"] == choice_id:
                 return ChoiceSpec.from_data(choice)
         raise ChoiceConflict("这项选择不属于当前局势，请刷新后重新选择")
-
