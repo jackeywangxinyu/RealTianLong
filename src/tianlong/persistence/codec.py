@@ -4,7 +4,7 @@
           obligation（待答与待回话，命题可缺）/ said（闲话无命题、带言语行为）/ cue 社交线索 / attitudes 态度 / envelope 请求进度 / world 全世界 / mind 完整认知 / memory 经历）；
           请求含冻结选项绑定与展示文字；旧记录缺新键时取缺省（无选项绑定、言语行为为无、态度为空）
 [POS]: persistence 的序列化边界；逐字段手写而非反射或 pickle——数据库里的内容不能决定构造哪个类，这是安全边界也是版本边界
-       物品请求的受益人、回应编号与义务状态显式往返；旧记录缺这些键时按无请求解码。
+       物品请求的受益人、回应编号与义务状态显式往返；yielded 随完整认知保存，不随重启丢失；旧记录缺新键取缺省。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -260,7 +260,7 @@ def mind_to(s: BeliefStore) -> J:
             "surveyed": dict(s.surveyed), "searched": dict(s.searched),
             "obligations": [obligation_to(o) for o in s.obligations], "said": [said_to(x) for x in s.said],
             "cues": [cue_to(c) for c in s.cues], "attitudes": dict(s.attitudes),
-            "company": dict(s.company), "allies": list(s.allies)}
+            "company": dict(s.company), "allies": list(s.allies), "yielded": dict(s.yielded)}
 
 
 def mind_from(d: J) -> BeliefStore:
@@ -270,7 +270,7 @@ def mind_from(d: J) -> BeliefStore:
                        tuple(episode_from(e) for e in d["episodes"]), d["trust"], d["last_tick"],
                        d["surveyed"], d["searched"], tuple(obligation_from(o) for o in d["obligations"]),
                        tuple(said_from(s) for s in d["said"]), tuple(cue_from(c) for c in d["cues"]),
-                       d["attitudes"], d["company"], tuple(d["allies"]))
+                       d["attitudes"], d["company"], tuple(d["allies"]), d.get("yielded", {}))
 
 
 def memory_to(m: MemoryRecord) -> J:

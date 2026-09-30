@@ -1,11 +1,13 @@
 """
 [INPUT]: 依赖 cognition 的 BeliefStore / Candidate / navigation，core 的 Fact / Kind / Manner / Modality / Op / Proposition / Rel，
          core/profiles 的 Profile，agents/predictors 的 Prediction，memory/view 的 MemoryView
-[OUTPUT]: 对外提供 Situation（可带主角 player）/ Choice（含结构化标签 tag、言语行为 social、候选之外的闲话 free 与 chosen()）/ Policy 协议、
+[OUTPUT]: 对外提供 Situation（可带主角 player）/ Choice（含结构化标签 tag、言语行为 social、候选之外的言语 free 与 chosen()）/ Policy 协议、
           PolicyKit（规则策略共享的“在候选集中挑选”、沿自己的地图带路（认为锁着的门先试着开、打不开就不去撞）、凭个人勘察记录探索、
-          开口积木 _say()（候选之外的闲话，index 指向 WAIT）与 _last_spoke()（最近一次对谁开口）、信念查询积木）、
-          WAIT_REASONS、SPEAK、RECENT、STALE
-[POS]: agents 的决策契约与策略工具箱：策略只能在候选集中选（Choice.index），唯一的例外是不带命题的闲话（Choice.free）；一切判断来自信念与近期经历。
+          开口积木 _say()（候选之外的闲话）/ _tell()（候选之外、带自己相信的命题的答话），index 都指向 WAIT，
+          与 _last_spoke()（最近一次对谁开口）、信念查询积木）、WAIT_REASONS、SPEAK、CHATTER、RECENT、STALE
+[POS]: agents 的决策契约与策略工具箱：策略只能在候选集中选（Choice.index），唯一的例外是 Choice.free——对某人开口：
+       不带命题的闲话，或一句 TELL 答话，其命题取自说话者自己认为为真的信念（chosen() 对照其认知核验，ASK 永不带命题）；
+       一切判断来自信念与近期经历。
        探索只凭自己的地图与勘察记录（BeliefStore.surveyed/searched），从不读真相里的最短路或藏匿处。
        ScriptedPolicy 与 MartialTactics 都建立在这些积木之上，保证脚本行为与 RL 面对的是同一套候选与同一份认知
        GIVE 的 request_ref 附在原候选下标上；闲话的 AGREE 不代替物理递交。
@@ -30,7 +32,8 @@ STALE = 20          # 多久没看过的地方值得再去看一眼（分钟）
 LOCK_DOUBT = 0.3    # 对“门锁着”的把握低于此（记忆已旧）就再去推一推
 # 示范者等待的结构化原因：模仿学习据此区分合理等待与卡住
 WAIT_REASONS = ("idle", "goal_inactive", "goal_done", "stuck_unknown", "no_candidate", "expert_no_action")
-SPEAK = "speak"     # 开口（回话、叫阵、搭话）的标签：index 指向 WAIT，只认下标的学习层把它当作等待
+SPEAK = "speak"     # 开口（回话、答话、叫阵、喝止）的标签：index 指向 WAIT，只认下标的学习层把它当作等待
+CHATTER = "chatter" # 没人搭话、自己找话说（见礼、说笑）的标签：同样指向 WAIT；编排据此每处每 tick 只留一句
 
 
 @dataclass(frozen=True)
@@ -51,19 +54,26 @@ class Situation:
 class Choice:
     index: int        # 候选集下标：策略永远只能在候选集中选
     rationale: str
-    tag: str = ""     # 结构化标签：等待时为 WAIT_REASONS 之一，探索时为 "explore"，开口时为 SPEAK
+    tag: str = ""     # 结构化标签：等待时为 WAIT_REASONS 之一，探索时为 "explore"，开口时为 SPEAK，自己找话说时为 CHATTER
     social: Social | None = None        # 给所选候选附上言语行为（“答话”“叫阵”）：修辞，不改变行动本身
-    free: Candidate | None = None       # 候选集之外唯一允许的行动：不带命题的 TELL/ASK（闲话、回话、叫阵）——
-                                        # 只有原话与言语行为、不传递任何事实，故不必占用策略的动作编号（候选规则版本不变）；
-                                        # 此时 index 须指向 WAIT 候选：只认 index 的消费者（学习层的数据生成、示范）把它当作等待
+    free: Candidate | None = None       # 候选集之外唯一允许的行动：对某人说的 TELL/ASK——
+                                        # 不带命题的闲话（回话、叫阵、搭话：只有原话与言语行为）；或一句 TELL 答话，
+                                        # 命题须是说话者自己认为为真的信念（被问到候选话题之外的事也照实答）；ASK 永不带命题。
+                                        # 不占策略的动作编号（候选规则版本不变）：index 须指向 WAIT 候选，
+                                        # 只认 index 的消费者（学习层的数据生成、示范）把它当作等待
     request_ref: str | None = None       # 实际 GIVE 对应的已听见请求，保持原候选下标
 
-    def chosen(self, cands: Sequence[Candidate]) -> Candidate:
-        """最终交给内核的行动：free 优先，否则取候选并附上言语行为。free 只接受不带命题的言语，违者抛 ValueError。"""
+    def chosen(self, cands: Sequence[Candidate], beliefs: BeliefStore | None = None) -> Candidate:
+        """最终交给内核的行动：free 优先，否则取候选并附上言语行为。
+        free 带命题时须给出说话者的认知 beliefs 以核验“说的是自己相信的事”；不合规的 free 一律抛 ValueError。"""
         if self.free is not None:
-            if self.free.op not in (Op.TELL, Op.ASK) or self.free.topic is not None or self.free.target is None:
-                raise ValueError(f"free 只接受不带命题、对某人说的 TELL/ASK：{self.free}")
-            return self.free
+            f = self.free
+            if f.op not in (Op.TELL, Op.ASK) or f.target is None:
+                raise ValueError(f"free 只接受对某人说的 TELL/ASK：{f}")
+            if f.topic is not None and not (f.op == Op.TELL and f.topic.holds and f.topic.prop.value is not None
+                                            and beliefs is not None and beliefs.holds(f.topic.prop)):
+                raise ValueError(f"free 只能带说话者自己认为为真的命题，且只用于 TELL：{f}")
+            return f
         if not 0 <= self.index < len(cands):
             raise ValueError(f"策略越界选择了候选 {self.index}")
         cand = cands[self.index]
@@ -97,9 +107,15 @@ class PolicyKit:
     def _wait_index(sit: Situation) -> int:
         return next((i for i, c in enumerate(sit.candidates) if c.op == Op.WAIT), 0)
 
-    def _say(self, sit: Situation, target: str, social: Social, why: str) -> Choice:
+    def _say(self, sit: Situation, target: str, social: Social, why: str, tag: str = SPEAK) -> Choice:
         """对 target 说一句只有言语行为的话（回话、叫阵、搭话）：措辞留给主持人之声，事实一概不传。"""
-        return Choice(self._wait_index(sit), why, SPEAK, free=Candidate(Op.TELL, target, social=social))
+        return Choice(self._wait_index(sit), why, tag, free=Candidate(Op.TELL, target, social=social))
+
+    def _tell(self, sit: Situation, target: str, fact: Fact, why: str) -> Choice | None:
+        """候选里没有这句话时，对 target 照实说出自己相信的 fact（被问到了才用）：自己不信的一概不说。"""
+        if not (fact.holds and sit.beliefs.holds(fact.prop)):
+            return None
+        return Choice(self._wait_index(sit), why, SPEAK, free=Candidate(Op.TELL, target, topic=fact))
 
     @staticmethod
     def _last_spoke(sit: Situation, listener: str | None = None,

@@ -1,18 +1,24 @@
 """
 [INPUT]: 依赖 core 的 Percept / Modality / Op / Social / is_night / derive_seed，language/templates 的 Names / render_percept，
          language/llm 的 LLMClient / LLMUnavailable，language/scene 的 VoiceLine / SceneBrief / TextSink，
-         language/render 的 fact_lines / build_plan / check / check_quotes / sentence_ends / Violation / Rendered / RenderStatus
+         language/render 的 fact_lines / build_plan / check / restated_hearsay / sentence_ends / Violation / Rendered / RenderStatus，
+         language/deeds 的 check_deeds，language/quotes 的 check_quotes / voiced
 [OUTPUT]: 对外提供 Narrator（narrate_scene() 主持人之声：流式生成、逐句过闸门、通过即交付；narrate_rendered() / narrate()
-          以空 SceneBrief 委托之）、render_voice()（一句 NPC 言语的确定性模板）、SOCIAL_PHRASES / SOCIAL_LABELS、
-          MAX_DROPS、fact_lines()（再导出）、lore_keys()
+          以空 SceneBrief 委托之；secrets 是场景的秘密词表）、render_voice()（一句 NPC 言语的确定性模板）、SOCIAL_PHRASES / SOCIAL_LABELS、
+          MAX_DROPS、MAX_CHARS、fact_lines()（再导出）、lore_keys()
 [POS]: language 的输出层（主持人之声）。输入只有玩家自己的感知与会话交来的 SceneBrief（要替 NPC 说出口的话、最近几回合正文、
        玩家原话、眼下的钩子），不是世界真相；台词本身算出处（说话者与听者可点名，原话与说法照搬不算违规）。
-       模板先写成事实清单，清单里的言语换成带言语行为的台词（“龚光杰冷笑着向你叫阵：……”），措辞按语义输入确定地轮换。
-       有模型时逐句流式生成：每句对“已交付的文字 + 这一句”跑 check()（传闻归属留到收尾整段查）与台词闸门 check_quotes()，
-       再查钟点数字；通过即经 on_text 交付，违规即丢弃并记下；一句都没通过或丢满 MAX_DROPS 句，补上模板（已交付过正文的，
-       换行后只补清单与台词）。模型中途失败：已交付的留着，补上模板。Rendered.text 恒等于 on_text 收到的全部文字首尾相接。
+       模板先写成事实清单，清单里听见的言语换成带言语行为的台词（“龚光杰冷笑着向你叫阵：……”；只看见的耳语照旧），措辞按语义输入确定地轮换。
+       有模型时逐句流式生成：每句对“已交付的文字 + 这一句”跑 check()、逐句传闻 restated_hearsay()、人事闸门 check_deeds()
+       与台词闸门 check_quotes()，再查钟点数字（含“19点20分”“七点二十分”）；通过即经 on_text 交付，违规即丢弃并记下；
+       交付满 MAX_CHARS 字即停止读流。收尾：传闻有没有归属整段查；台词没说出口、玩家自己的行动与后果、冲着玩家来的事、
+       听见的话一个参与者都没提的，补上模板行、状态记为 gated_fallback（违规 omitted）；一句都没通过、丢满 MAX_DROPS 句或
+       传闻没有归属，补上模板（已交付过正文的，换行后只补清单与还没说出口的台词，正文交代过时辰就不再补）。
+       模型中途失败：已交付的留着，补上模板。补上的模板行读起来是句子（缺句末标点的补“。”，时辰用文字）；没有模型时的模板照旧。
+       Rendered.text 恒等于 on_text 收到的全部文字首尾相接，Rendered.dropped 是丢掉的句数。
        提示词只是请求，闸门才是验收：第二人称、80~250 字、台词写成“某某道：“……””、不替玩家开口、停在钩子上、不写钟点；
-       最近正文只留最后三段、每段末尾约 300 字，钟点换成时辰文字；世界前提与文风来自场景
+       最近正文只留最后三段、每段末尾约 300 字，钟点换成时辰文字；世界前提与文风来自场景。
+       REQUEST_ITEM 作为真实言语归属与补行，不能把答应渲染为 GIVE 或 USE 的实际结果。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -21,19 +27,23 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from tianlong.core import Modality, Op, Percept, Social, derive_seed, is_night
+from tianlong.language.deeds import check_deeds
 from tianlong.language.llm import LLMClient, LLMUnavailable
+from tianlong.language.quotes import check_quotes, voiced
 from tianlong.language.render import (
+    QUOTE_CLOSE,
+    SENTENCE_ENDS,
     Rendered,
     RenderPlan,
     RenderStatus,
     Violation,
     build_plan,
     check,
-    check_quotes,
     fact_lines,
+    restated_hearsay,
     sentence_ends,
 )
 from tianlong.language.scene import SceneBrief, TextSink, VoiceLine
@@ -44,6 +54,7 @@ log = logging.getLogger(__name__)
 __all__ = ["MAX_DROPS", "SOCIAL_LABELS", "SOCIAL_PHRASES", "Narrator", "fact_lines", "lore_keys", "render_voice"]
 
 MAX_DROPS = 2              # 丢满这么多句就不再相信这段生成：停止读流，补上模板
+MAX_CHARS = 600            # 交付满这么多字就停止读流（提示词要 80~250 字）：啰嗦的模型也有个头
 RECENT_KEEP = 3            # 提示词里最近几回合的正文：只留最后几段
 RECENT_CHARS = 300         # 每段只留末尾这么多字
 
@@ -92,13 +103,18 @@ SOCIAL_PHRASES: dict[Social, tuple[str, ...]] = {
     Social.REMARK: ("随口对{to}说", "自顾自地嘀咕"),
     Social.SUBMIT: ("向{to}低头服软", "朝{to}连连作揖"),
 }
-_OP_PHRASES: dict[str, tuple[str, ...]] = {Op.TELL.value: ("对{to}说", "对{to}道"), Op.ASK.value: ("问{to}", "向{to}问道")}
+_OP_PHRASES: dict[str, tuple[str, ...]] = {Op.TELL.value: ("对{to}说", "对{to}道"), Op.ASK.value: ("问{to}", "向{to}问道"),
+                                       Op.REQUEST_ITEM.value: ("请求{to}", "向{to}请求")}
 
-# 钟点：提示词里换成时辰文字，正文里出现即丢句
+# 钟点：提示词里换成时辰文字，正文里出现即丢句（“第1日”“19:00”“19点20分”“晚上七点二十分”；“一点半点”不算）
 _CLOCK = re.compile(r"第\s*(\d+)\s*[日天]\s*(\d{1,2})\s*[:：]\s*(\d{2})")
-_CLOCK_ANY = re.compile(r"第\s*\d+\s*[日天]|\d{1,2}\s*[:：]\s*\d{2}")
+_NUM = "零一二两三四五六七八九十"
+_CLOCK_ANY = re.compile(rf"第\s*\d+\s*[日天]|\d{{1,2}}\s*[:：]\s*\d{{2}}|\d{{1,2}}\s*[点时](?:\s*\d{{1,2}}\s*分|钟|整|半)?"
+                        rf"|[{_NUM}]{{1,3}}\s*点\s*(?:[{_NUM}]{{1,3}}\s*分|钟|整|半(?!点))"
+                        rf"|(?:早上|上午|中午|下午|晚上|凌晨|夜里|傍晚)[{_NUM}]{{1,3}}点")
 _BRANCHES = "子丑寅卯辰巳午未申酉戌亥"
 _SKY = ("夜半", "深夜", "黎明前", "破晓", "清晨", "上午", "正午", "午后", "下午", "傍晚", "入夜", "夜深")
+_TIMED = re.compile(f"[{_BRANCHES}]时|{'|'.join(_SKY)}")     # 正文已经交代过时辰
 
 
 def _in_words(text: str) -> str:
@@ -162,33 +178,108 @@ def _with_lines(plan: RenderPlan, brief: SceneBrief) -> RenderPlan:
     return replace(plan, names=plan.names | names, source="\n".join([plan.source, *said]))
 
 
+_TALK = (Op.TELL.value, Op.ASK.value, Op.REQUEST_ITEM.value)
+
+
+@dataclass(frozen=True, slots=True)
+class _Row:
+    """模板的一行：事实清单的一行，或替 NPC 说出口的一句台词。"""
+    text: str
+    voice: VoiceLine | None = None
+    keys: tuple[str, ...] = ()     # 事实行的参与者（名与别称，观察者除外）：正文提到其一即算讲到了
+    must: bool = False             # 必须讲到：玩家自己的行动与后果、冲着玩家来的事、听见的话
+
+
+def _must(p: Percept, viewer: str) -> bool:
+    ev = p.event
+    if ev is None:
+        return False
+    if p.modality == Modality.SELF:
+        return ev.kind != Op.WAIT.value or bool(ev.utterance)     # 干等不必交代
+    return p.modality == Modality.SPEECH or (p.modality == Modality.SIGHT and ev.target == viewer)
+
+
+def _keys(p: Percept, viewer: str, names: Names, aliases: Mapping[str, Sequence[str]]) -> tuple[str, ...]:
+    ev = p.event
+    if ev is None:
+        return ()
+    table = {sk.id: sk.name for sk in p.sketches} | {eid: sk.name for eid, sk in names.items()}
+    ids = [x for x in (ev.actor, ev.target, ev.obj) if x and x != viewer]
+    return tuple(dict.fromkeys(n for x in ids for n in (table.get(x), *aliases.get(x, ())) if n))
+
+
 def _scene_lines(plan: RenderPlan, viewer: str, percepts: Sequence[Percept], names: Names, brief: SceneBrief,
-                 salt: str) -> tuple[list[str], frozenset[str]]:
-    """事实清单里 NPC 的言语换成带言语行为的台词（同一说话者按先后对应），清单里对不上的台词补在最后。
-    返回 (模板正文, 被台词取代的清单行)。"""
+                 salt: str, aliases: Mapping[str, Sequence[str]]) -> tuple[list[_Row], frozenset[str]]:
+    """事实清单里听见的 NPC 言语换成带言语行为的台词（同一说话者按先后、原话相同的优先对应），清单里对不上的台词补在最后；
+    只看见在耳语、没听见内容的那一行照旧留着。返回 (模板的各行, 被台词取代的清单行)。"""
     pending: dict[str, list[int]] = {}
     for k, vl in enumerate(brief.lines):
         pending.setdefault(vl.speaker, []).append(k)
-    spoken: dict[str, str] = {}
+    spoken: dict[str, tuple[str, str | None]] = {}
+    facts: dict[str, Percept] = {}
     for p in percepts:
+        if p.modality == Modality.SCENE:
+            continue
+        line = render_percept(p, names, viewer, me="你")
+        facts.setdefault(line, p)
         ev = p.event
-        if (ev is not None and p.modality != Modality.SCENE and ev.kind in (Op.TELL.value, Op.ASK.value)
-                and ev.actor in pending):
-            spoken.setdefault(render_percept(p, names, viewer, me="你"), ev.actor)
-    out: list[str] = []
+        if ev is not None and p.modality == Modality.SPEECH and ev.kind in _TALK and ev.actor in pending:
+            spoken.setdefault(line, (ev.actor, ev.utterance))
+    rows: list[_Row] = []
     covered: set[str] = set()
-    used: set[int] = set()
     for text in plan.lines:
-        who = spoken.get(text)
+        who, said = spoken.get(text, (None, None))
         if who is not None and pending.get(who):
-            k = pending[who].pop(0)
-            used.add(k)
+            queue = pending[who]
+            k = next((k for k in queue if brief.lines[k].template == said), queue[0])
+            queue.remove(k)
             covered.add(text)
-            out.append(render_voice(brief.lines[k], salt))
+            rows.append(_Row(render_voice(brief.lines[k], salt), voice=brief.lines[k]))
+        elif (p := facts.get(text)) is not None:
+            rows.append(_Row(text, keys=_keys(p, viewer, names, aliases), must=_must(p, viewer)))
         else:
-            out.append(text)
-    out += [render_voice(vl, salt) for k, vl in enumerate(brief.lines) if k not in used]
-    return out, frozenset(covered)
+            rows.append(_Row(text))
+    left = {k for ks in pending.values() for k in ks}
+    rows += [_Row(render_voice(vl, salt), voice=vl) for k, vl in enumerate(brief.lines) if k in left]
+    return rows, frozenset(covered)
+
+
+def _prose(line: str) -> str:
+    """模板行交给玩家时读起来像句子：没有句末标点的补个“。”；整行括注（外观描写、时辰）照旧。"""
+    line = line.rstrip()
+    if not line or line[-1] in SENTENCE_ENDS + QUOTE_CLOSE + "’』\"" or (line[0] == "（" and line[-1] == "）"):
+        return line
+    return line + "。"
+
+
+def _spoken(row: _Row, text: str, said: frozenset[str]) -> bool:
+    """这句台词正文里讲到了没有：有原话或说法的，须有一段归到说话者名下的引语（或名字后紧跟言说动词）；闲话提到其人即可。"""
+    vl = row.voice
+    assert vl is not None
+    return vl.speaker_name in said if (vl.template or vl.claim) else vl.speaker_name in text
+
+
+def _named(text: str, keys: Iterable[str]) -> bool:
+    """正文提到了其中之一：四字以上的名字取头尾两字以上也算（“凌波微步帛卷”说成“帛卷”“凌波微步”）。"""
+    return any(k in text or (len(k) >= 4 and any(k[:n] in text or k[-n:] in text for n in range(2, len(k))))
+               for k in keys)
+
+
+def _missing(rows: Sequence[_Row], text: str, plan: RenderPlan, brief: SceneBrief, dropped: int) -> list[_Row]:
+    """模型正文漏掉的必讲之事：台词没说出口、玩家自己的行动与后果、冲着玩家来的事、听见的话一个参与者都没提
+    （没有参与者可提的，只在丢过句子时算漏）。"""
+    said = voiced(text, plan, brief)
+    out: list[_Row] = []
+    for r in rows:
+        if r.voice is not None:
+            ok = _spoken(r, text, said)
+        elif r.must:
+            ok = _named(text, r.keys) if r.keys else dropped == 0
+        else:
+            ok = True
+        if not ok:
+            out.append(r)
+    return out
 
 
 # ============================================================
@@ -256,7 +347,9 @@ class _Gate:
         before = self.out.text
         piece = ("\n" if before and "\n" in raw[:len(raw) - len(raw.lstrip())] else "") + body
         text = before + piece
-        found = [v for v in check(text, self.plan, self.known) if v.kind != "hearsay"]    # 传闻归属收尾时整段查
+        found = [v for v in check(text, self.plan, self.known) if v.kind != "hearsay"]    # 传闻有没有归属：收尾整段查
+        found += restated_hearsay(piece, text, self.plan)                                  # 这一句替传闻作保：当场丢
+        found += check_deeds(text, self.plan, self.known)
         found += check_quotes(text, self.brief, self.plan, self.known, command=self.command, since=len(before))
         found += [Violation("clock", m.group(0)) for m in _CLOCK_ANY.finditer(piece)]
         if found:
@@ -277,12 +370,13 @@ class Narrator:
     aliases 是场景别称全表，只供闸门使用：识别“走进大殿”这类以别称说出的抵达，并拒绝本回合未出场实体的别称（“神仙姐姐”）。"""
 
     def __init__(self, llm: LLMClient | None = None, setting: str = "", lore: Mapping[str, str] | None = None,
-                 style: str = "", aliases: Mapping[str, Sequence[str]] | None = None) -> None:
+                 style: str = "", aliases: Mapping[str, Sequence[str]] | None = None, secrets: Sequence[str] = ()) -> None:
         self.llm = llm
         self.setting = setting
         self.style = style
         self.lore = dict(lore or {})
         self.aliases = dict(aliases or {})
+        self.secrets = tuple(secrets)
 
     def narrate(self, viewer: str, percepts: Sequence[Percept], names: Names, show_scene: bool = False,
                 fresh: Sequence[str] = (), command: str = "", lapse: str = "", known: Iterable[str] = ()) -> str:
@@ -303,8 +397,11 @@ class Narrator:
         known = frozenset(known)
         looks = [self.lore[k] for k in fresh if k in self.lore]
         passed = [f"（不觉已是{lapse}）"] if lapse else []
-        plan = _with_lines(build_plan(viewer, percepts, names, show_scene, looks, "".join(passed), self.aliases), brief)
-        scene, covered = _scene_lines(plan, viewer, percepts, names, brief, brief.recent[-1] if brief.recent else "")
+        plan = _with_lines(build_plan(viewer, percepts, names, show_scene, looks, "".join(passed), self.aliases,
+                                      self.secrets), brief)
+        rows, covered = _scene_lines(plan, viewer, percepts, names, brief, brief.recent[-1] if brief.recent else "",
+                                     self.aliases)
+        scene = [r.text for r in rows]
         out = _Delivery(on_text)
         if not scene and not looks:
             out.emit("\n".join(["时间悄悄过去，什么也没有发生。", *passed]))
@@ -322,8 +419,8 @@ class Narrator:
         pieces = self._pieces(prompt, self._system())
         try:
             for piece in pieces:
-                if not gate.feed(piece):
-                    break                                   # 丢满了：不再读流
+                if not gate.feed(piece) or len(out.text) >= MAX_CHARS:
+                    break                                   # 丢满了，或已经写够长：不再读流（没写完的半句不交付）
             else:
                 gate.finish()
         except LLMUnavailable as e:
@@ -333,7 +430,7 @@ class Narrator:
         finally:
             pieces.close()
 
-        # ---- 收尾：传闻归属整段查；没通过的补模板 ----
+        # ---- 收尾：传闻归属整段查；漏掉的必讲之事补上模板行；没通过的补模板（已讲到的台词与时辰不重复） ----
         violations = list(gate.violations)
         if failed:
             status = RenderStatus.LLM_UNAVAILABLE
@@ -344,12 +441,26 @@ class Narrator:
             hearsay = [v for v in check(out.text, plan, known) if v.kind == "hearsay"]
             violations += hearsay
             status = RenderStatus.GATED_FALLBACK if gate.dropped >= MAX_DROPS or hearsay else RenderStatus.LLM
-        if status != RenderStatus.LLM:
-            tail = passed + scene if scene else [f"（{x}）" for x in looks]
-            out.emit("\n" + "\n".join(tail) if out.text else plain)
-            if status == RenderStatus.GATED_FALLBACK:
-                log.info("叙述未通过语义闸门，补上事实清单: %s", violations)
-        return Rendered(out.text, status, tuple(dict.fromkeys(violations)))
+        when = [f"（不觉已是{_in_words(lapse)}）"] if lapse else []
+        if status == RenderStatus.LLM:
+            missing = _missing(rows, out.text, plan, brief, gate.dropped)
+            if missing:
+                out.emit("\n" + "\n".join(_prose(r.text) for r in missing))
+                violations.append(Violation("omitted", "；".join(r.text for r in missing)))
+                status = RenderStatus.GATED_FALLBACK
+                log.info("叙述漏掉了必讲之事，补上模板行: %s", [r.text for r in missing])
+        elif out.text:
+            said = voiced(out.text, plan, brief)
+            tail = ([] if _TIMED.search(out.text) else when) + [r.text for r in rows
+                                                                if r.voice is None or not _spoken(r, out.text, said)]
+            tail = tail if rows else [f"（{x}）" for x in looks]
+            if tail:
+                out.emit("\n" + "\n".join(_prose(x) for x in tail))
+        else:
+            out.emit("\n".join(_prose(x) for x in [*when, *scene, *(f"（{x}）" for x in looks)]))
+        if status == RenderStatus.GATED_FALLBACK:
+            log.info("叙述未通过语义闸门，补上事实清单: %s", violations)
+        return Rendered(out.text, status, tuple(dict.fromkeys(violations)), gate.dropped)
 
     # ------------------------------------------------------------
     #  提示词

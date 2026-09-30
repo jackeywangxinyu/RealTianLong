@@ -4,7 +4,7 @@
 [OUTPUT]: Gemini 接入验收（本地明文假端点代替 HTTPS，不联网、无密钥）：半截正文、半截错误正文、坏编码、怪形状的 JSON 一律是
           LLMUnavailable 且下一次调用照常；读超时与新连接上的挂断绝不重发，只有闲置长连接被对端关掉才重连一次；半读的响应不留在
           连接上（下一次请求只发一遍）；流内错误、提示词被拒、SAFETY/RECITATION/MAX_TOKENS/OTHER 与没有结束标记的流在交出已收到的
-          文字之后抛出，叙述者据此保留已交付的整句、补上模板台词；思考档位被拒逐级降档（→ low → 预算 0 → 去掉）且看所发的请求体；
+          文字之后抛出，叙述者据此保留已交付的整句、补上带句末标点的模板台词；思考档位被拒逐级降档（→ low → 预算 0 → 去掉）且看所发的请求体；
           generate 对来得快的 429/500/503 等 0.2 秒重试一次（至多一次，Retry-After 太久、失败太慢、stream 都不重试）；
           密钥只走请求头、不进路径与异常信息；坏缓存条目算没命中、写到一半被打断不留半截；
           llm_from_env 默认给叙述模型包一层首字对冲（备用与 fast_llm_from_env 同样装配、GEMINI_HEDGE_AFTER 定时限、0 不对冲、开缓存不对冲）
@@ -355,7 +355,7 @@ def test_narrator_keeps_whole_sentences_and_appends_the_template(gemini, view, t
     gemini.script[:] = [sse(piece(G1), piece(G2[:6]), tail)]
     r, got = _run(view, _client())
     assert r.status == RenderStatus.LLM_UNAVAILABLE
-    assert got[0] == G1 and r.text == G1 + "\n" + _template(view)
+    assert got[0] == G1 and r.text == G1 + "\n" + _template(view).rstrip("。") + "。"
     assert TAUNT in r.text
 
 

@@ -7,8 +7,9 @@
        认知只能经 revise() 形成新的一份：拿到 store.beliefs 的调用方改不动它。
        surveyed / searched 记着“我上次看清、上次仔细翻查某个容纳者是什么时候”：探索与“还没找过哪里”只凭这份个人记录，
        不读地图真相；obligations / said（cognition/agenda）是跨越经历缓冲的持久任务状态；
-       cues / attitudes / company（cognition/agenda.fold_social）是社交状态：别人对我的言语行为、我对每个人的态度 [-3, 3]、
-       眼前的人自何时起在我身边——同样只来自感知；allies 与 trust 一样是建档时写进心里的“自己人”（态度据此把“打我的同伴”算进去）
+       cues / attitudes / company / yielded（cognition/agenda.fold_social）是社交状态：别人对我的言语行为、我对每个人的态度 [-3, 3]、
+       眼前的人自何时起在我身边、谁最近一次何时向我服软——同样只来自感知；allies 与 trust 一样是建档时写进心里的“自己人”
+       （态度据此把“打我的同伴”算进去）
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
 
@@ -101,10 +102,11 @@ class BeliefStore:
     attitudes: Mapping[str, int] = field(default_factory=dict)   # 我对某人的态度 [-3, 3]，缺席 = 0；只在我心里
     company: Mapping[str, int] = field(default_factory=dict)     # 眼前的人 → 自何时起一直在我身边（只来自环顾）
     allies: tuple[str, ...] = ()               # 自己人（建档时写进心里，同 trust）：有人打他们，我对那人的态度下降
+    yielded: Mapping[str, int] = field(default_factory=dict)     # 某人 → 最近一次冲着我或当众服软的时刻（不随线索缓冲滚掉）
 
     def __post_init__(self) -> None:
         # frozen 只冻住字段指向，冻不住映射内容：映射一律包成只读快照（已是 FrozenMap 的直接沿用，零拷贝）
-        for name in ("entities", "beliefs", "trust", "surveyed", "searched", "attitudes", "company"):
+        for name in ("entities", "beliefs", "trust", "surveyed", "searched", "attitudes", "company", "yielded"):
             value = getattr(self, name)
             if not isinstance(value, FrozenMap):
                 object.__setattr__(self, name, FrozenMap(value))
@@ -221,10 +223,10 @@ class BeliefStore:
         changed = {(c.before or c.after).prop.slot for c in changes  # type: ignore[union-attr]
                    if not (c.before and c.after and c.before.prop == c.after.prop and c.before.holds == c.after.holds)}
         obligations, said = fold_agenda(self.owner, self.obligations, self.said, percept, changed)
-        cues, attitudes, company = fold_social(self.owner, self.allies, self.cues, self.attitudes, self.company,
-                                               percept)
+        cues, attitudes, company, yielded = fold_social(self.owner, self.allies, self.cues, self.attitudes, self.company,
+                                                        percept, self.yielded)
         store = BeliefStore(self.owner, entities, beliefs, episodes, self.trust, now, surveyed, searched,
-                            obligations, said, cues, attitudes, company, self.allies)
+                            obligations, said, cues, attitudes, company, self.allies, yielded)
         return store, tuple(changes)
 
     def revise_all(self, percepts: Iterable[Percept]) -> tuple[BeliefStore, tuple[BeliefChange, ...]]:

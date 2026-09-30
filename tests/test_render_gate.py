@@ -1,7 +1,7 @@
 """
-[INPUT]: 依赖 tianlong.language 的 render / narrator / speaker，tianlong.runtime.authority（真实内核产出的玩家感知），tianlong.scenarios
+[INPUT]: 依赖 tianlong.language 的 render / deeds / narrator / speaker，tianlong.runtime.authority（真实内核产出的玩家感知），tianlong.scenarios
 [OUTPUT]: 文字 ≠ 事实闸门验收 L01–L02：合法修辞放行；点名清单外实体（名或别称）、状态升级、瞬移、物品复制、编造承诺、传闻去归属
-          各被拦下；词法回归（松散否定、不连续说法、抵达动词、“还有一把”、伪言说动词）与误报回归（排除复合词、门名里的地名）；
+          各被拦下；人事闸门（伤落错人、否认确有的伤、没做成说成做成、没拿到说成在手、没走成却已在别处）；武侠状态说法；词法回归（松散否定、不连续说法、抵达动词、“还有一把”、伪言说动词）与误报回归（排除复合词、门名里的地名）；
           叙述者命中即回退模板且世界结算与文字结果分开记录；对白润色多出承诺/外人/丢了主语、或点名说话者没听说过的场景实体即回退模板
 [POS]: tests 的语言输出层；验证“LLM 成功返回的错误非空文字不会被展示为已发生的事实”，且闸门不误伤正常的氛围与动作描写
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -251,6 +251,90 @@ def test_common_ways_to_say_mastery_and_subdual_are_rejected():
         assert {v.kind for v in check(text, plan)} == {"status"}, text
 
 
+@pytest.mark.parametrize("text, status", [
+    ("龚光杰脸如金纸，嘴角溢出一丝血迹。", "wounded"), ("龚光杰吐了一口血。", "wounded"), ("龚光杰肩头血流如注。", "wounded"),
+    ("你只觉头晕目眩，嘴唇发紫。", "poisoned"), ("你浑身酸麻，再也动不了。", "subdued"),
+    ("你依图运气，神功已成。", "mastered"), ("你已然悟透了北冥神功。", "mastered"), ("你已得北冥神功三昧。", "mastered"),
+])
+def test_wuxia_ways_to_say_a_status_are_rejected(text, status):
+    plan, known = _opening_plan()
+    assert {v.detail.split(":")[0] for v in check(text, plan, known) if v.kind == "status"} == {status}, text
+
+
+@pytest.mark.parametrize("text", ["龚光杰气得脸色发青。", "左子穆脸色发紫，显是怒极。", "你只觉头皮发麻。", "天色渐渐发黑。",
+                                  "众弟子站在原地，一动不动。", "龚光杰僵住了。", "此事已成定局。", "龚光杰双眼布满血丝。"])
+def test_ordinary_wuxia_prose_is_not_a_status(text):
+    plan, known = _opening_plan()
+    assert check(text, plan, known) == (), text
+
+
+# ============================================================
+#  人事闸门：状态落在谁身上、谁做成了什么、东西在谁手里、玩家此刻在哪（无量山真实内核）
+# ============================================================
+
+
+def _wuliang_turn(*intents, until=None, tries: int = 8):
+    """在无量山上按 tick 结算同一组意图，直到 until(plan) 成立（内核确定，次数固定）；返回段誉的计划。"""
+    from tianlong.persistence import InMemoryWorldStore
+    from tianlong.runtime.authority import WorldAuthority
+    from tianlong.scenarios import build_wuliang
+    sc = build_wuliang()
+    auth = WorldAuthority.found(InMemoryWorldStore(), sc)
+    for n in range(tries):
+        v = auth.head().version
+        r = auth.settle([Intent(f"w{n}-{i}", *x, based_on=v) for i, x in enumerate(intents)])
+        names = auth.store.beliefs(auth.ref, "duanyu").entities
+        plan = build_plan("duanyu", [o.percept for o in r.observations_of("duanyu")], names, aliases=sc.aliases)
+        if until is None or until(plan):
+            return plan, {e.name for e in sc.state.entities.values()}
+    raise AssertionError("内核没有结算出想要的局面")
+
+
+def _deeds(text, plan, known):
+    from tianlong.language.deeds import check_deeds
+    return {(v.kind, v.detail) for v in check_deeds(text, plan, known)}
+
+
+def test_status_is_bound_to_the_person_who_has_it():
+    """龚光杰打伤了段誉：受伤的是你。把伤安到龚光杰身上、或说你毫发无损，都与内核相悖。"""
+    plan, known = _wuliang_turn(("gongguangjie", Op.ATTACK, "duanyu"), until=lambda p: "wounded" in p.statuses)
+    assert ("段誉", "wounded") in plan.afflicted
+    for bad, detail in [("龚光杰一掌拍来，你侧身让过，反手一推，龚光杰闷哼一声，受了内伤。", "wounded:龚光杰:受了内伤"),
+                        ("你却毫发无损。", "denied:段誉:毫发无损"), ("你并未受伤。", "denied:段誉:受伤")]:
+        assert _deeds(bad, plan, known) == {("status", detail)}, bad
+    for ok in ["龚光杰猛地出手，你肩头一痛，受了伤。", "龚光杰反手一掌正中你肩头，你闷哼一声，受了伤。", "你肩头的伤口隐隐作痛。",
+               "龚光杰一掌打中你，自己却毫发无损。", "他出手极快，正中她穴道。"]:
+        assert _deeds(ok, plan, known) == set(), ok
+
+
+def test_failed_attack_and_take_are_not_narrated_as_success():
+    """段誉出手被挡开：“拍中”就是说成了；没拿兵器架上的长剑，它就不在你手里。"""
+    plan, known = _wuliang_turn(("duanyu", Op.ATTACK, "gongguangjie"))
+    assert "你猛地向龚光杰出手，但没有成功（被对方挡了开去）" in plan.lines
+    for bad, kind in [("你大喝一声，一掌拍中龚光杰胸口，他踉跄着连退三步。", "outcome"),
+                      ("你抢上两步，从兵器架上抽出长剑，横在胸前。", "outcome"), ("长剑已握在你手中。", "outcome"),
+                      ("转眼之间，你已身在后院。", "teleport"), ("你出了大殿，站在剑湖宫后院里。", "teleport")]:
+        assert {k for k, _ in _deeds(bad, plan, known)} == {kind}, bad
+    for ok in ["你一掌拍向龚光杰，却被他挡了开去。", "你从怀里掏出易经，挡在胸前。", "你站在大殿中央，一时手足无措。",
+               "你是溜出大殿，还是留下赔罪？", "你若想溜出大殿，眼下正是时候。", "钟灵站在梁上拍手。", "你险些击中龚光杰。",
+               "你未能得手。"]:
+        assert _deeds(ok, plan, known) == set(), ok
+    both, _ = _wuliang_turn(("duanyu", Op.ATTACK, "gongguangjie"), ("gongguangjie", Op.ATTACK, "duanyu"),
+                            until=lambda p: "wounded" in p.statuses)
+    assert _deeds("龚光杰一掌拍中你肩头，你受了伤。", both, known) == set(), "做成了的一方照常可说"
+    assert ("outcome", "attack:段誉:拍中") in _deeds("你一掌拍中龚光杰胸口。", both, known), "按人记：他得手不等于你得手"
+
+
+def test_move_that_failed_or_succeeded():
+    failed, known = _wuliang_turn(("duanyu", Op.MOVE, "houshan", "d_path"))
+    text = "你趁众人不备，悄悄溜出大殿，穿过回廊，不多时已站在后院的古井旁。"
+    assert _deeds(text, failed, known) == {("teleport", "溜出大殿"), ("teleport", "站在后院")}
+    moved, _ = _wuliang_turn(("duanyu", Op.MOVE, "houyuan", "d_corridor"))
+    assert _deeds("你出了大殿，已站在剑湖宫后院的古井旁。", moved, known) == set()
+    took, _ = _wuliang_turn(("duanyu", Op.TAKE, "sword"))
+    assert _deeds("你抢上两步，从兵器架上抽出长剑，长剑已握在你手中。", took, known) == set()
+
+
 # ============================================================
 #  叙述者：闸门命中即回退模板；来源分开记录
 # ============================================================
@@ -263,12 +347,13 @@ def test_narrator_reports_render_source(authority):
     good = Narrator(FakeLLM("你屏住呼吸，从桌面上拿起钥匙。")).narrate_rendered(*args, known=KNOWN)
     assert good.status == RenderStatus.LLM and good.text == "你屏住呼吸，从桌面上拿起钥匙。"
     bad = Narrator(FakeLLM("你拿起钥匙，又顺手摸到另一把钥匙，转身走进内仓。")).narrate_rendered(*args, known=KNOWN)
-    assert bad.status == RenderStatus.GATED_FALLBACK and bad.text == "你拿起钥匙"
-    assert {v.kind for v in bad.violations} == {"duplicate", "teleport"}
+    assert bad.status == RenderStatus.GATED_FALLBACK and bad.text == "你拿起钥匙。", "回退的模板行读起来是句子"
+    assert {v.kind for v in bad.violations} == {"duplicate", "teleport"} and bad.dropped == 1
     down = Narrator(FakeLLM(fail=True)).narrate_rendered(*args)
-    assert down.status == RenderStatus.LLM_UNAVAILABLE and down.text == "你拿起钥匙"
+    assert down.status == RenderStatus.LLM_UNAVAILABLE and down.text == "你拿起钥匙。"
     assert Narrator(FakeLLM("  ")).narrate_rendered(*args).status == RenderStatus.GATED_FALLBACK
-    assert Narrator(FakeLLM("你拿起两把钥匙。")).narrate(*args) == "你拿起钥匙", "narrate() 仍返回文字"
+    assert Narrator(FakeLLM("你拿起两把钥匙。")).narrate(*args) == "你拿起钥匙。", "narrate() 仍返回文字"
+    assert Narrator().narrate(*args) == "你拿起钥匙", "没有模型时的模板照旧"
 
 
 def test_session_records_settlement_and_render_separately():
@@ -281,7 +366,7 @@ def test_session_records_settlement_and_render_separately():
     r = s.turn("拿走桌上的钥匙")
     assert r.advanced and s.authority.head().version == 1, "世界照常结算，且只结算一次"
     assert s.authority.head().target("key", Rel.AT) == "player"
-    assert r.render.status == RenderStatus.GATED_FALLBACK and r.narration == "你拿起钥匙"
+    assert r.render.status == RenderStatus.GATED_FALLBACK and r.narration == "你拿起钥匙。"
     assert {v.kind for v in r.render.violations} >= {"entity", "teleport"}
     assert s.store.events(s.ref) == r.events, "文字被拦不会让行动重跑"
 

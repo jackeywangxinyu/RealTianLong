@@ -1,6 +1,6 @@
 """
 [INPUT]: REQUEST_ITEM、实际内核、NPC 脚本决策、个人认知、SQLite 与特征编码
-[OUTPUT]: 请求/同意/真实交付/使用分离；拒绝、暂缓和恢复；回应绑定、耳语隔离、受益人批指针与裁剪、模型前向、旧记录和版本拒绝验收
+[OUTPUT]: 请求/同意/真实交付/使用分离；拒绝、暂缓和恢复；回应绑定、耳语隔离、受益人批指针与裁剪、模型前向、yielded 接续、旧记录和版本拒绝验收
 [POS]: 请求型对话的完整闭环；不能用漂亮文字或 Social.AGREE 代替 GIVE/USE。
 [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 """
@@ -90,10 +90,13 @@ def test_request_agree_give_use_are_separate_real_events_and_resume(tmp_path, be
     assert s.authority.head().attr(beneficiary, "poisoned") is True
     assert not any(c.op == Op.USE and c.obj == "pill" for c in candidates(s.beliefs("player")))
     assert any(o.kind == "request_item" and o.state == "accepted" for o in s.beliefs("npc").obligations)
+    assert s.beliefs("npc").yielded.get("player") is not None
+    yielded = dict(s.beliefs("npc").yielded)
     saved_menu = s.choices.current()
     s.index.client.close()
     s = session(sc, SQLiteWorldStore(path))
     assert s.choices.current() == saved_menu
+    assert dict(s.beliefs("npc").yielded) == yielded
     version = s.authority.head().version
     assert s.choose(decision, choice, "request").replayed
     assert s.authority.head().version == version
@@ -280,6 +283,10 @@ def test_old_records_decode_defaults_but_old_kernel_save_needs_explicit_migratio
     plain.pop("beneficiary")
     plain.pop("request_ref")
     assert codec.intent_from(plain).beneficiary is None
+    mind = codec.mind_to(replace(scene_beliefs(request_scene()), yielded={"npc": 42}))
+    assert codec.mind_from(mind).yielded["npc"] == 42
+    mind.pop("yielded")
+    assert not codec.mind_from(mind).yielded
     sc = request_scene()
     store = SQLiteWorldStore(tmp_path / "old.sqlite3")
     from tianlong.runtime.authority import WorldAuthority
